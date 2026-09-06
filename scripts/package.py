@@ -45,28 +45,47 @@ def find_rust_lld(target: str) -> Path:
     return candidate
 
 
-def bundle_macos_rust_lld(rust_lld: Path, sysroot: Path) -> list[tuple[str, Path]]:
-    """为 macOS 发行包修复 rust-lld 的动态链接依赖。
+def bundle_rust_lld_with_libllvm(
+    rust_lld: Path, sysroot: Path, target: str
+) -> list[tuple[str, Path]]:
+    """为 macOS / Linux 发行包修复 rust-lld 的动态链接依赖。
 
-    Rust 1.96+ 在 aarch64-apple-darwin 上把 rust-lld 改为动态链接
-    ``@rpath/libLLVM.dylib``，但 rustup 分发的工具链未把 libLLVM.dylib 放到
-    rust-lld 可解析的位置（其 rpath 指向官方构建机的 ``/Users/runner/work/...``
-    路径，上游 rust-lang/rust#151063 的后续仍未修复），导致发行包里的 rust-lld
-    运行时报 ``Library not loaded: @rpath/libLLVM.dylib``。
+    Rust 1.96+ 把 rust-lld 改为动态链接 LLVM（macOS 依赖 ``@rpath/libLLVM.dylib``，
+    Linux 依赖 ``libLLVM.so.<版本>-rust-<版本>-stable``），但 rustup 分发的工具链
+    未把该库放到 rust-lld 可解析的位置（macOS 的 rpath 指向官方构建机的
+    ``/Users/runner/work/...`` 路径，上游 rust-lang/rust#151063 的后续仍未修复；
+    Linux 的 ``$ORIGIN`` rpath 在发行包平铺布局下同样无法命中），导致发行包里的
+    rust-lld 运行时报 ``Library not loaded`` / ``cannot open shared object file``。
 
-    这里把工具链自带的 libLLVM.dylib 一起打包，并把 rust-lld 复制到临时目录用
-    ``install_name_tool`` 追加 ``@loader_path`` rpath，使 rust-lld 从自身所在目录
-    （即发行包根）解析 libLLVM.dylib。返回追加进发行包的文件列表。
+    这里把工具链自带的 LLVM 动态库一起打包，并把 rust-lld 复制到临时目录改写其
+    rpath，使其从自身所在目录（即发行包根）解析该库：
+    - macOS：用 ``install_name_tool`` 追加 ``@loader_path``；
+    - Linux：用 ``patchelf`` 把 RUNPATH 设为 ``$ORIGIN``。
+
+    返回追加进发行包的文件列表（改写后的 rust-lld 与 LLVM 动态库）。
     """
-    libllvm = sysroot / "lib" / "libLLVM.dylib"
-    if not libllvm.is_file():
-        raise SystemExit(f"libLLVM.dylib not found at {libllvm}")
+    lib_dir = sysroot / "lib"
 
-    staged = Path(tempfile.mkdtemp(prefix="dolphin-lld-")) / "rust-lld"
-    shutil.copy2(rust_lld, staged)
-    run(["install_name_tool", "-add_rpath", "@loader_path", str(staged)])
+    if target.endswith("apple-darwin"):
+        libllvm = lib_dir / "libLLVM.dylib"
+        arcname = "libLLVM.dylib"
+        if not libllvm.is_file():
+            raise SystemExit(f"libLLVM.dylib not found at {libllvm}")
+        staged = Path(tempfile.mkdtemp(prefix="dolphin-lld-")) / "rust-lld"
+        shutil.copy2(rust_lld, staged)
+        run(["install_name_tool", "-add_rpath", "@loader_path", str(staged)])
+    else:
+        # Linux：定位 libLLVM.so.*（soname 形如 libLLVM.so.22.1-rust-1.98.1-stable）。
+        candidates = sorted(lib_dir.glob("libLLVM.so.*"))
+        if not candidates:
+            raise SystemExit(f"libLLVM.so.* not found in {lib_dir}")
+        libllvm = candidates[0]
+        arcname = libllvm.name
+        staged = Path(tempfile.mkdtemp(prefix="dolphin-lld-")) / "rust-lld"
+        shutil.copy2(rust_lld, staged)
+        run(["patchelf", "--set-rpath", "$ORIGIN", str(staged)])
 
-    return [("rust-lld", staged), ("libLLVM.dylib", libllvm)]
+    return [("rust-lld", staged), (arcname, libllvm)]
 
 
 def checksum(path: Path) -> str:
@@ -115,9 +134,9 @@ def main() -> None:
         ("README.md", root / "README.md"),
     ]
     if rust_lld is not None:
-        if args.target.endswith("apple-darwin"):
-            # macOS 的 rust-lld 需连同 libLLVM.dylib 一起打包并修复 rpath。
-            files.extend(bundle_macos_rust_lld(rust_lld, rustc_sysroot()))
+        if args.target.endswith(("apple-darwin", "unknown-linux-gnu")):
+            # macOS / Linux 的 rust-lld 动态链接 LLVM，需连同 LLVM 库打包并修复 rpath。
+            files.extend(bundle_rust_lld_with_libllvm(rust_lld, rustc_sysroot(), args.target))
         else:
             files.append((f"rust-lld{EXE_SUFFIX}", rust_lld))
 

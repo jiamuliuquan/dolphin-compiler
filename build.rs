@@ -228,22 +228,32 @@ fn compile_windows(out_dir: &Path, manifest_dir: &Path) {
     std::fs::rename(&object, &final_object).expect("failed to rename the compiled runtime object");
 }
 
-/// 返回一个可执行的 `cl` 命令（已含工具路径或 `cmd /c vcvars64.bat && cl`）。
+/// 定位 `vcvars64.bat`：在常见 VS 安装路径（含 Program Files 与 Program Files (x86)）
+/// 搜索 VS 2022 / 2019 的 Community / Professional / Enterprise / BuildTools 版本。
+///
+/// GitHub Actions 的 `windows-latest` 镜像通常把 VS Build Tools 装在
+/// `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`，因此必须
+/// 同时覆盖 `ProgramFiles(x86)`。
 fn locate_vcvars64() -> PathBuf {
-    let vs_root = env::var("ProgramFiles")
-        .map(|p| PathBuf::from(p).join("Microsoft Visual Studio"))
-        .unwrap_or_default();
+    let roots = ["ProgramFiles", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(|key| env::var(key).ok())
+        .map(|root| PathBuf::from(root).join("Microsoft Visual Studio"));
 
-    for edition in ["Community", "Professional", "Enterprise", "BuildTools"] {
-        let vcvars = vs_root
-            .join("2022")
-            .join(edition)
-            .join("VC")
-            .join("Auxiliary")
-            .join("Build")
-            .join("vcvars64.bat");
-        if vcvars.exists() {
-            return vcvars;
+    for root in roots {
+        for year in ["2022", "2019"] {
+            for edition in ["Community", "Professional", "Enterprise", "BuildTools"] {
+                let vcvars = root
+                    .join(year)
+                    .join(edition)
+                    .join("VC")
+                    .join("Auxiliary")
+                    .join("Build")
+                    .join("vcvars64.bat");
+                if vcvars.exists() {
+                    return vcvars;
+                }
+            }
         }
     }
 

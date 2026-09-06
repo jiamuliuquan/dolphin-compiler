@@ -1,0 +1,17 @@
+[package]
+group = "me.foxlab"
+name = "greeter"
+version = "0.1.0"
+source = "src"
+
+[[bin]]
+name = "cli"
+path = "src/main.dc"
+
+[[bin]]
+name = "server"
+path = "src/server.dc"
+
+[build]
+optimization = "debug"
+output = "target"

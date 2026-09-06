@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release --bins
+
+      # 打包自包含发行包（dc + dolphin-compiler + rust-lld + 许可证 + 文档）。
+      - name: Package release archive
+        run: python scripts/package.py --target ${{ matrix.target }}
+
+      # 冒烟测试：解压发行包，从空目录构建并运行示例（不依赖系统 C 编译器）。
+      - name: Smoke test the release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          if compgen -G "dist/dolphin-*.zip" > /dev/null; then
+            (cd smoke && unzip -q "../$(ls dist/dolphin-*.zip | head -1)")
+          else
+            tar xzf "$(ls dist/dolphin-*.tar.gz | head -1)" -C smoke
+          fi
+          smoke/dc build examples/m8 --release
+          set +e
+          ./examples/m8/target/m8
+          code=$?
+          set -e
+          test "$code" -eq 64

@@ -13,13 +13,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          # macOS 暂缓：Rust 1.96+ 在 aarch64-apple-darwin 上把 rust-lld 改为动态
-          # 链接 @rpath/libLLVM.dylib，但 rustup 分发的工具链未把它放到 rust-lld
-          # 可解析的位置（上游 rust-lang/rust#151063 的 follow-up 尚未完全修复），
-          # 导致发行包里的 rust-lld 运行时报 "Library not loaded: @rpath/libLLVM.dylib"。
-          # 待上游修复或实现「发行包携带 libLLVM.dylib」后再恢复 macOS。
-          # - os: macos-latest
-          #   target: aarch64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
@@ -76,6 +71,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}

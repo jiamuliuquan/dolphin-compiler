@@ -30,11 +30,12 @@ Get-FileHash dolphin-0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 dc                     编译器主命令
 dolphin-compiler       兼容名称（与 dc 等价）
 rust-lld               可再分发链接器（发行包自带，LLD）
+libLLVM.dylib          仅 macOS：rust-lld 的动态依赖（发行包自带）
 LICENSE                GPL-3.0 许可证
 README.md              说明文档
 ```
 
-`dc` 构建 Dolphin 程序时会优先在**自身所在目录**查找 `rust-lld`，因此上述文件应保持在同一目录。
+`dc` 构建 Dolphin 程序时会优先在**自身所在目录**查找 `rust-lld`，因此上述文件应保持在同一目录。macOS 发行包额外携带 `libLLVM.dylib`，它与 `rust-lld` 同目录，`rust-lld` 通过 `@loader_path` rpath 定位到它，因此三者（`dc`、`rust-lld`、`libLLVM.dylib`）必须放在同一目录，不可拆分。
 
 ## 3. 安装
 

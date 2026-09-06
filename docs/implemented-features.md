@@ -1,6 +1,6 @@
 # 已实现功能参考
 
-> 对应编译器提交阶段：M0-M9  
+> 对应编译器提交阶段：M0-M12  
 > 编译器目录：[`仓库根目录`](../)  
 > 可运行示例：[`examples`](../examples/)
 
@@ -20,6 +20,9 @@
 | M7 | 已完成 | 多文件项目、模块、导入和可见性 |
 | M8 | 已完成 | 完整基础标量、转换、字符串比较、CLI 和运行时错误 |
 | M9 | 已完成 | `dolphin.toml` 项目清单、包坐标、多可执行目标和清单查找 |
+| M10 | 已完成 | `TargetPlatform` 平台抽象、`dc env`、链接命令可测试且不硬编码 `cc` |
+| M11 | 已完成 | Windows x86_64 原生支持：MSVC ABI、`.obj`/`.exe`、Windows 运行时与 CI |
+| M12 | 已完成 | 自包含工具链：内嵌运行时、`rust-lld` 链接、`--system-linker` 回退、发行包与冒烟测试 |
 
 ## 2. 构建和使用
 
@@ -54,11 +57,13 @@ my-project/
 
 ```text
 dc check <项目目录或main.dc> [--color auto|always|never]
-dc build <项目目录或main.dc> [-o <输出文件>] [--debug|--release]
-dc run   <项目目录或main.dc> [-o <输出文件>] [--debug|--release]
+dc build <项目目录或main.dc> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker]
+dc run   <项目目录或main.dc> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker]
+dc info  <项目目录>
+dc env
 ```
 
-CLI 使用 Clap 解析参数。`dc --help`、`dc --version` 以及 `dc <子命令> --help` 均可用；非法参数、缺失参数和冲突的 `--debug --release` 会输出标准帮助提示并返回退出码 `2`。
+CLI 使用 Clap 解析参数。`dc --help`、`dc --version` 以及 `dc <子命令> --help` 均可用；非法参数、缺失参数和冲突的 `--debug --release` 会输出标准帮助提示并返回退出码 `2`。`--color` 是全局选项，可放在子命令前后。`-o`（`--output`）与 `--bin` 仅对 `build`/`run` 生效；`--bin` 需要 `dolphin.toml` 清单，`-o` 仅在单文件模式下生效。`dc info` 只接受项目目录，`dc env` 显示宿主/目标平台、ABI 与所选链接器。
 
 例如：
 
@@ -67,7 +72,7 @@ CLI 使用 Clap 解析参数。`dc --help`、`dc --version` 以及 `dc <子命�
 ./examples/m5/target/m5
 ```
 
-也可以直接编译一个不使用模块声明和导入的 `.dc` 文件。命令支持 `check`、`build` 和 `run`，项目清单和依赖管理尚未实现。
+也可以直接编译一个不使用模块声明和导入的 `.dc` 文件。命令支持 `check`、`build` 和 `run`；远程依赖管理尚未实现。
 
 ### 2.2a 项目清单 `dolphin.toml`
 
@@ -605,12 +610,18 @@ UTF-8 源码
 
 ### 12.1 最小运行时
 
-M5 运行时通过固定 ABI 提供：
+运行时通过固定 ABI 提供：
 
 ```text
 dolphin_print_i32
+dolphin_print_i64
+dolphin_print_u64
+dolphin_print_f32
+dolphin_print_f64
+dolphin_print_char
 dolphin_print_bool
 dolphin_print_string
+dolphin_string_equal
 ```
 
 运行时使用系统 `write`（Unix）/`WriteFile`（Windows）输出，不依赖可变参数 `printf`。M12 起运行时源码在构建编译器时（`build.rs`）由系统 C 编译器预编译为目标文件并内嵌到编译器二进制，构建 Dolphin 程序时直接落盘并交给 `rust-lld` 链接，不再调用系统 `cc`/`cl`/`link`（`--system-linker` 可选回退）。Linux ELF 上 `rust-lld` 还需显式提供 CRT 启动对象、库搜索路径与动态链接器；macOS Mach-O 上需 `-arch`、`-platform_version`、`-syslibroot` 与 `-lSystem`。这些平台参数同样由 `build.rs` 在构建编译器时用 `cc -print-file-name`/`xcrun` 探测并内嵌，最终用户构建 Dolphin 程序时不依赖 C 编译器。

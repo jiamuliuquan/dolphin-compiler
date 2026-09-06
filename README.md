@@ -16,7 +16,7 @@ Dolphin 是一个用于学习和实践编译器实现的静态类型编程语言
 | 集合 | 一维定长数组、字面量、重复初始化、安全下标和按值语义 |
 | 字符串 | UTF-8 字符串、内容相等、`length` 字节长度、格式化输出 |
 | 模块 | 递归扫描 `src/`、`pkg`、模块/成员 `use`、`pub` 可见性 |
-| 工具 | Clap CLI、`check/build/run/info`、Debug/Release、颜色、帮助和版本 |
+| 工具 | Clap CLI、`check/build/run/info/env`、Debug/Release、颜色、帮助和版本 |
 | 后端 | 类型化 CFG IR、Cranelift、本机目标文件、内嵌最小 C 运行时和 `rust-lld` 链接器 |
 
 尚未实现的主要能力包括嵌套数组、切片、通配符导入、外部依赖、多错误恢复和 DWARF 源码调试信息。详细边界见[已实现功能参考](docs/implemented-features.md)和[路线图](docs/roadmap.md)。
@@ -57,12 +57,13 @@ cargo build --release --bins
 
 ```text
 dc check <项目目录或main.dc> [--color auto|always|never]
-dc build <项目目录或main.dc> [--bin <名称>] [--debug|--release]
-dc run   <项目目录或main.dc> [--bin <名称>] [--debug|--release]
+dc build <项目目录或main.dc> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker]
+dc run   <项目目录或main.dc> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker]
 dc info  <项目目录>
+dc env
 ```
 
-使用 `dc <子命令> --help` 查看子命令参数。`--debug` 与 `--release` 互斥，默认使用 Debug 配置。
+使用 `dc <子命令> --help` 查看子命令参数。`--debug` 与 `--release` 互斥，默认使用 Debug 配置。`--color` 是全局选项，可放在子命令前后。`-o`（`--output`）与 `--bin` 仅对 `build`/`run` 生效；`--bin` 需要 `dolphin.toml` 清单，`-o` 仅在单文件模式下生效。`dc info` 只接受项目目录（不接受 `.dc` 文件），`dc env` 显示宿主/目标平台、ABI 与所选链接器。
 
 当目录中存在 `dolphin.toml` 时，`check`/`build`/`run` 会从给定目录（或当前目录）向上查找清单并按清单驱动构建。清单声明包坐标与一个或多个 `[[bin]]` 可执行目标；多目标项目运行需用 `--bin` 选择目标，`dc info` 显示完整坐标。
 

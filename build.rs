@@ -228,13 +228,47 @@ fn compile_windows(out_dir: &Path, manifest_dir: &Path) {
     std::fs::rename(&object, &final_object).expect("failed to rename the compiled runtime object");
 }
 
-/// 定位 `vcvars64.bat`：在常见 VS 安装路径（含 Program Files 与 Program Files (x86)）
-/// 搜索 VS 2022 / 2019 的 Community / Professional / Enterprise / BuildTools 版本。
+/// 定位 `vcvars64.bat`：优先用微软官方的 `vswhere.exe` 查询 VS 安装路径，
+/// 再回退到常见安装目录（含 Program Files 与 Program Files (x86)）逐版本探测。
 ///
-/// GitHub Actions 的 `windows-latest` 镜像通常把 VS Build Tools 装在
-/// `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`，因此必须
-/// 同时覆盖 `ProgramFiles(x86)`。
+/// GitHub Actions 的 `windows-latest` 镜像把 Visual Studio Enterprise 2022 装在
+/// `C:\Program Files\Microsoft Visual Studio\2022\Enterprise`；本地开发机可能是
+/// Community/BuildTools 或其他盘符。`vswhere` 是 VS 自带的定位工具，最可靠。
 fn locate_vcvars64() -> PathBuf {
+    // 1. 用 vswhere 查询带 C++ 工具集的 VS 安装路径。
+    for vswhere in [
+        r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe",
+        r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe",
+    ] {
+        if let Ok(installation) = Command::new(vswhere)
+            .args([
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property",
+                "installationPath",
+            ])
+            .output()
+        {
+            let path = String::from_utf8_lossy(&installation.stdout)
+                .trim()
+                .to_string();
+            if !path.is_empty() {
+                let vcvars = Path::new(&path)
+                    .join("VC")
+                    .join("Auxiliary")
+                    .join("Build")
+                    .join("vcvars64.bat");
+                if vcvars.exists() {
+                    return vcvars;
+                }
+            }
+        }
+    }
+
+    // 2. 回退：逐版本/版本探测常见安装目录。
     let roots = ["ProgramFiles", "ProgramFiles(x86)"]
         .into_iter()
         .filter_map(|key| env::var(key).ok())
@@ -256,6 +290,18 @@ fn locate_vcvars64() -> PathBuf {
             }
         }
     }
+
+    // 诊断：打印环境与已探测的路径，便于定位 CI 上找不到 VS 的原因。
+    eprintln!("[build.rs] cl_in_path={}", cl_in_path());
+    eprintln!(
+        "[build.rs] ProgramFiles={:?}",
+        env::var("ProgramFiles").ok()
+    );
+    eprintln!(
+        "[build.rs] ProgramFiles(x86)={:?}",
+        env::var("ProgramFiles(x86)").ok()
+    );
+    eprintln!("[build.rs] PATH={:?}", env::var("PATH").ok());
 
     panic!(
         "`cl` not found in PATH and no vcvars64.bat located; \

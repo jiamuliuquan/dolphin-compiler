@@ -49,10 +49,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p smoke
-          if compgen -G "dist/dolphin-*.zip" > /dev/null; then
-            (cd smoke && unzip -q "../$(ls dist/dolphin-*.zip | head -1)")
+          zip=$(ls dist/dolphin-*.zip 2>/dev/null | head -1)
+          tar=$(ls dist/dolphin-*.tar.gz 2>/dev/null | head -1)
+          if [ -n "$zip" ]; then
+            unzip -q "$zip" -d smoke
+          elif [ -n "$tar" ]; then
+            tar xzf "$tar" -C smoke
           else
-            tar xzf "$(ls dist/dolphin-*.tar.gz | head -1)" -C smoke
+            echo "no release archive found in dist/" >&2
+            exit 1
           fi
           smoke/dc build examples/m8 --release
           set +e

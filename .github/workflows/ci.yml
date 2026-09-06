@@ -49,8 +49,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p smoke
-          zip=$(ls dist/dolphin-*.zip 2>/dev/null | head -1)
-          tar=$(ls dist/dolphin-*.tar.gz 2>/dev/null | head -1)
+          zip=$(ls dist/dolphin-*.zip 2>/dev/null | head -1 || true)
+          tar=$(ls dist/dolphin-*.tar.gz 2>/dev/null | head -1 || true)
           if [ -n "$zip" ]; then
             unzip -q "$zip" -d smoke
           elif [ -n "$tar" ]; then

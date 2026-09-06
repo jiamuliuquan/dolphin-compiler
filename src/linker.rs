@@ -93,22 +93,26 @@ fn run_command(command: &[OsString], failure: &str) -> Result<(), Diagnostic> {
 
 /// 解析工具名：`rust-lld` 需要定位到完整路径，其他工具（`cc`/`link`）保持原样。
 ///
-/// 查找顺序：`DOLPHIN_LLD` 环境变量（build.rs 编译期注入）→ 可执行文件同目录
-/// （发行包自带 `rust-lld`）→ PATH → 用 `rustc --print sysroot` 动态查询。
+/// 查找顺序：可执行文件同目录（发行包自带 `rust-lld`）→ `DOLPHIN_LLD` 环境变量
+/// （build.rs 编译期注入）→ PATH → 用 `rustc --print sysroot` 动态查询。
 /// 最终回退到原名，由 `Command` 报错。
+///
+/// 发行包里的 `rust-lld`（与 `dc` 同目录）优先于编译期注入的工具链路径：
+/// 后者在 macOS 上可能因 rpath 问题（rust-lld 动态依赖 libLLVM.dylib）无法运行，
+/// 而发行包里的 rust-lld 已经过 package.py 修复 rpath 并随附 libLLVM.dylib。
 fn resolve_tool(tool: &OsString) -> OsString {
     if tool != "rust-lld" {
         return tool.clone();
     }
-    // 1. 编译期注入的路径。
+    // 1. 可执行文件同目录（发行包形态：`dc` 与 `rust-lld` 放在同一目录）。
+    if let Some(path) = find_next_to_executable() {
+        return path;
+    }
+    // 2. 编译期注入的路径（开发/`cargo test` 环境：dc 同目录无 rust-lld）。
     if let Some(path) = option_env!("DOLPHIN_LLD")
         && Path::new(path).exists()
     {
         return path.into();
-    }
-    // 2. 可执行文件同目录（发行包形态：`dc` 与 `rust-lld` 放在同一目录）。
-    if let Some(path) = find_next_to_executable() {
-        return path;
     }
     // 3. PATH。
     if let Some(path) = find_in_path("rust-lld") {

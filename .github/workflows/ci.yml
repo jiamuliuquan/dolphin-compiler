@@ -6,6 +6,8 @@ on:
 
 jobs:
   test:
+    # 仅在分支 push 或 PR 时跑质量门禁；打 tag 时交给 release job。
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
     strategy:
       matrix:
         include:
@@ -15,7 +17,7 @@ jobs:
           # 链接 @rpath/libLLVM.dylib，但 rustup 分发的工具链未把它放到 rust-lld
           # 可解析的位置（上游 rust-lang/rust#151063 的 follow-up 尚未完全修复），
           # 导致发行包里的 rust-lld 运行时报 "Library not loaded: @rpath/libLLVM.dylib"。
-          # 待上游修复或实现「发行包携带 libLLVM.dylib」后再恢复 macOS 冒烟测试。
+          # 待上游修复或实现「发行包携带 libLLVM.dylib」后再恢复 macOS。
           # - os: macos-latest
           #   target: aarch64-apple-darwin
           - os: windows-latest
@@ -65,3 +67,40 @@ jobs:
           code=$?
           set -e
           test "$code" -eq 64
+
+  release:
+    # 仅在打 v* 标签时触发，把三平台发行包上传为 GitHub Release 资产。
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Activate MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - run: cargo build --release --bins
+
+      - name: Package release archive
+        run: python scripts/package.py --target ${{ matrix.target }}
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/dolphin-*.zip
+            dist/dolphin-*.tar.gz
+            dist/dolphin-*.sha256

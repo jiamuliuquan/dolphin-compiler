@@ -13,7 +13,8 @@
 //! 给出诊断，而不是等外部链接器失败。
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use target_lexicon::{Architecture, OperatingSystem, Triple};
 
@@ -153,8 +154,41 @@ impl TargetPlatform for UnixPlatform {
             self.link_flavor().into(),
         ];
         // Linux ELF / macOS Mach-O：`rust-lld` 需显式提供平台相关参数（CRT 对象、
-        // 架构、平台版本、动态链接器、系统库等），由 build.rs 探测并生成
-        // `link_args.rs`。Windows 的 COFF 由 `-flavor link` 自动处理（常量均为空）。
+        // 架构、平台版本、动态链接器、系统库等）。Windows 的 COFF 由
+        // `-flavor link` 自动处理（常量均为空）。
+        //
+        // 若在编译编译器时把平台相关的绝对路径/版本固化成常量，跨机器分发后会
+        // 因目标机的工具链不同而链接失败：
+        //   - Linux：CRT 对象（`crtbeginS.o` 等）位于 GCC 版本目录
+        //     （如 `/usr/lib/gcc/x86_64-linux-gnu/<ver>/`）。
+        //   - macOS：`-syslibroot` 固化了 Xcode/CLT 的 SDK 路径，`-platform_version`
+        //     固化了 SDK 版本号。
+        // 因此 Linux 与 macOS 都改为运行时现查（Linux 用 `cc -print-file-name`，
+        // macOS 用 `xcrun`），探测失败再回退到 build.rs 编译期固化的 `link_args.rs`
+        // 常量，保持自包含能力（最终用户不装 C 编译器/Xcode 时仍能靠常量工作）。
+        if self.triple.operating_system == OperatingSystem::Linux {
+            if let Some((prefix, lib, suffix)) = probe_linux_link_args_runtime() {
+                command.extend(prefix.into_iter());
+                command.push(object.as_os_str().to_owned());
+                command.push(runtime.as_os_str().to_owned());
+                command.extend(lib.into_iter());
+                command.extend(suffix.into_iter());
+                command.push(OsString::from("-o"));
+                command.push(output.as_os_str().to_owned());
+                return command;
+            }
+        } else if self.triple.operating_system.is_like_darwin() {
+            if let Some((prefix, lib, suffix)) = probe_darwin_link_args_runtime(self) {
+                command.extend(prefix.into_iter());
+                command.push(object.as_os_str().to_owned());
+                command.push(runtime.as_os_str().to_owned());
+                command.extend(lib.into_iter());
+                command.extend(suffix.into_iter());
+                command.push(OsString::from("-o"));
+                command.push(output.as_os_str().to_owned());
+                return command;
+            }
+        }
         command.extend(link_args::LINK_PREFIX.iter().map(OsString::from));
         command.push(object.as_os_str().to_owned());
         command.push(runtime.as_os_str().to_owned());
@@ -278,9 +312,126 @@ pub fn host() -> Result<Box<dyn TargetPlatform>, Diagnostic> {
     }
 }
 
+/// 运行时探测 Linux ELF 链接参数（`rust-lld` GNU flavor 所需）。
+///
+/// 与 `build.rs::probe_unix_link_args` 逻辑一致，但在**每次 `dc build` 时**用本机
+/// `cc -print-file-name=<name>` 现查 CRT 对象、libc 目录与动态链接器路径，避免
+/// 编译期固化的 GCC 版本目录（如 `/usr/lib/gcc/x86_64-linux-gnu/13/`）在跨机器
+/// 分发后失效。返回 `(prefix, lib, suffix)` 三段参数；任一关键对象（`Scrt1.o`）
+/// 探测不到则返回 `None`，调用方回退到编译期常量。
+///
+/// 注意：这要求目标机装有 `cc`（C 编译器）。自包含发行（无 C 编译器）场景会
+/// 探测失败并自动回退到 `link_args.rs` 常量。
+fn probe_linux_link_args_runtime() -> Option<(Vec<OsString>, Vec<OsString>, Vec<OsString>)> {
+    let cc = env_cc();
+    let mut prefix: Vec<OsString> = Vec::new();
+    let mut lib: Vec<OsString> = Vec::new();
+    let mut suffix: Vec<OsString> = Vec::new();
+
+    if let Some(linker) = print_file_name(&cc, "ld-linux-x86-64.so.2") {
+        prefix.push(OsString::from("-dynamic-linker"));
+        prefix.push(linker.into_os_string());
+    }
+    if let Some(libc) = print_file_name(&cc, "libc.so")
+        && let Some(dir) = libc.parent()
+    {
+        prefix.push(OsString::from("-L"));
+        prefix.push(dir.into());
+    }
+    // `Scrt1.o` 是 CRT 入口对象，缺失说明没有可用工具链，整个探测视为失败。
+    let mut objects = Vec::new();
+    for object in ["Scrt1.o", "crti.o", "crtbeginS.o"] {
+        objects.push(print_file_name(&cc, object)?);
+    }
+    prefix.extend(objects.into_iter().map(PathBuf::into_os_string));
+    lib.push(OsString::from("-lc"));
+    for object in ["crtendS.o", "crtn.o"] {
+        suffix.push(print_file_name(&cc, object)?.into_os_string());
+    }
+    Some((prefix, lib, suffix))
+}
+
+/// 运行时探测 macOS Mach-O 链接参数（`rust-lld` darwin flavor 所需）。
+///
+/// 与 `build.rs::probe_unix_link_args` 的 darwin 分支逻辑一致，但在**每次
+/// `dc build` 时**用本机 `xcrun --show-sdk-path` / `--show-sdk-version` 现查 SDK
+/// 路径与版本号，避免编译期固化的 `-syslibroot` 路径和 `-platform_version` 版本
+/// 号在跨机器（不同 Xcode / Command Line Tools 安装位置与版本）分发后失效。
+///
+/// SDK 路径与版本号任一探测不到则返回 `None`，调用方回退到编译期常量。
+///
+/// 注意：这要求目标机装有 `xcrun`（Xcode 或 Command Line Tools）。自包含发行
+/// （无 Xcode）场景会探测失败并自动回退到 `link_args.rs` 常量。
+fn probe_darwin_link_args_runtime(
+    platform: &UnixPlatform,
+) -> Option<(Vec<OsString>, Vec<OsString>, Vec<OsString>)> {
+    let sdk = xcrun("--show-sdk-version")?;
+    let sdk_path = xcrun("--show-sdk-path")?;
+
+    let mut prefix: Vec<OsString> = Vec::new();
+    prefix.push(OsString::from("-arch"));
+    prefix.push(OsString::from(macos_arch(platform)));
+    prefix.push(OsString::from("-platform_version"));
+    prefix.push(OsString::from("macos"));
+    prefix.push(OsString::from(sdk.clone()));
+    prefix.push(OsString::from(sdk));
+    prefix.push(OsString::from("-syslibroot"));
+    prefix.push(OsString::from(sdk_path));
+
+    let lib: Vec<OsString> = vec![OsString::from("-lSystem")];
+    let suffix: Vec<OsString> = Vec::new();
+    Some((prefix, lib, suffix))
+}
+
+/// 从 Rust target 三元组推导 macOS 的 `-arch` 值（`aarch64` → `arm64`）。
+fn macos_arch(platform: &UnixPlatform) -> &'static str {
+    let triple = platform.triple().to_string();
+    if triple.contains("aarch64") {
+        "arm64"
+    } else if triple.contains("x86_64") {
+        "x86_64"
+    } else {
+        "arm64"
+    }
+}
+
+/// 用 `xcrun` 探测 macOS SDK 信息（SDK 路径、SDK 版本）。
+fn xcrun(arg: &str) -> Option<String> {
+    let output = Command::new("xcrun").arg(arg).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+/// 选择 `cc` 命令：优先 `CC` 环境变量，回退 `cc`。
+fn env_cc() -> String {
+    std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
+}/// 用 `cc -print-file-name=<name>` 探测系统对象路径；找不到时返回 `None`。
+///
+/// 返回前做路径规范化（`cc` 常返回含 `../../` 的路径，`rust-lld` 不会自行
+/// 规范化，导致 `-L` 或对象路径失效）。
+fn print_file_name(cc: &str, name: &str) -> Option<PathBuf> {
+    let output = Command::new(cc)
+        .arg(format!("-print-file-name={name}"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() || path == name {
+        return None;
+    }
+    let path = PathBuf::from(path);
+    std::fs::canonicalize(&path).ok()
+}
+
 /// `build.rs` 生成的链接参数常量（`LINK_PREFIX` / `LINK_SUFFIX`）。
 ///
 /// Linux ELF 链接所需的 CRT 对象、库搜索路径与动态链接器；其他平台为空数组。
+/// 作为运行时探测失败时的回退，保证自包含发行（无 C 编译器）仍可链接。
 mod link_args {
     include!(concat!(env!("OUT_DIR"), "/link_args.rs"));
 }

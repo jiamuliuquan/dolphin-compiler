@@ -166,28 +166,22 @@ impl TargetPlatform for UnixPlatform {
         // 因此 Linux 与 macOS 都改为运行时现查（Linux 用 `cc -print-file-name`，
         // macOS 用 `xcrun`），探测失败再回退到 build.rs 编译期固化的 `link_args.rs`
         // 常量，保持自包含能力（最终用户不装 C 编译器/Xcode 时仍能靠常量工作）。
-        if self.triple.operating_system == OperatingSystem::Linux {
-            if let Some((prefix, lib, suffix)) = probe_linux_link_args_runtime() {
-                command.extend(prefix.into_iter());
-                command.push(object.as_os_str().to_owned());
-                command.push(runtime.as_os_str().to_owned());
-                command.extend(lib.into_iter());
-                command.extend(suffix.into_iter());
-                command.push(OsString::from("-o"));
-                command.push(output.as_os_str().to_owned());
-                return command;
-            }
+        let runtime_args = if self.triple.operating_system == OperatingSystem::Linux {
+            probe_linux_link_args_runtime()
         } else if self.triple.operating_system.is_like_darwin() {
-            if let Some((prefix, lib, suffix)) = probe_darwin_link_args_runtime(self) {
-                command.extend(prefix.into_iter());
-                command.push(object.as_os_str().to_owned());
-                command.push(runtime.as_os_str().to_owned());
-                command.extend(lib.into_iter());
-                command.extend(suffix.into_iter());
-                command.push(OsString::from("-o"));
-                command.push(output.as_os_str().to_owned());
-                return command;
-            }
+            probe_darwin_link_args_runtime(self)
+        } else {
+            None
+        };
+        if let Some((prefix, lib, suffix)) = runtime_args {
+            command.extend(prefix);
+            command.push(object.as_os_str().to_owned());
+            command.push(runtime.as_os_str().to_owned());
+            command.extend(lib);
+            command.extend(suffix);
+            command.push(OsString::from("-o"));
+            command.push(output.as_os_str().to_owned());
+            return command;
         }
         command.extend(link_args::LINK_PREFIX.iter().map(OsString::from));
         command.push(object.as_os_str().to_owned());
@@ -368,15 +362,16 @@ fn probe_darwin_link_args_runtime(
     let sdk = xcrun("--show-sdk-version")?;
     let sdk_path = xcrun("--show-sdk-path")?;
 
-    let mut prefix: Vec<OsString> = Vec::new();
-    prefix.push(OsString::from("-arch"));
-    prefix.push(OsString::from(macos_arch(platform)));
-    prefix.push(OsString::from("-platform_version"));
-    prefix.push(OsString::from("macos"));
-    prefix.push(OsString::from(sdk.clone()));
-    prefix.push(OsString::from(sdk));
-    prefix.push(OsString::from("-syslibroot"));
-    prefix.push(OsString::from(sdk_path));
+    let prefix: Vec<OsString> = vec![
+        OsString::from("-arch"),
+        OsString::from(macos_arch(platform)),
+        OsString::from("-platform_version"),
+        OsString::from("macos"),
+        OsString::from(sdk.clone()),
+        OsString::from(sdk),
+        OsString::from("-syslibroot"),
+        OsString::from(sdk_path),
+    ];
 
     let lib: Vec<OsString> = vec![OsString::from("-lSystem")];
     let suffix: Vec<OsString> = Vec::new();

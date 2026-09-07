@@ -4,7 +4,9 @@ use std::path::Path;
 
 use crate::ast::{BinaryOperator, UnaryOperator};
 use crate::diagnostic::Diagnostic;
-use crate::ir::{self, Expr, ExprKind, Instruction, PrintPart, ScalarType, Terminator, Type};
+use crate::ir::{
+    self, Expr, ExprKind, Instruction, PrintPart, ScalarType, Terminator, Type, TypeDef,
+};
 use crate::platform::TargetPlatform;
 use cranelift_codegen::ir::{
     self as clif, AbiParam, ArgumentPurpose, Block, FuncRef, GlobalValue, InstBuilder,
@@ -256,6 +258,23 @@ fn collect_expr_strings(expression: &Expr, values: &mut HashSet<String>) {
         }
         ExprKind::Cast { value, .. } => collect_expr_strings(value, values),
         ExprKind::StringLength(value) => collect_expr_strings(value, values),
+        ExprKind::StructInit { fields } => {
+            for field in fields {
+                collect_expr_strings(field, values);
+            }
+        }
+        ExprKind::EnumInit { arguments, .. } => {
+            for argument in arguments {
+                collect_expr_strings(argument, values);
+            }
+        }
+        ExprKind::Field { base, .. } => collect_expr_strings(base, values),
+        ExprKind::Match { value, arms } => {
+            collect_expr_strings(value, values);
+            for arm in arms {
+                collect_expr_strings(&arm.body, values);
+            }
+        }
         ExprKind::Integer(_)
         | ExprKind::Float(_)
         | ExprKind::Char(_)
@@ -317,12 +336,19 @@ fn define_function(
             .locals
             .iter()
             .copied()
-            .map(|ty| create_local_slot(&mut builder, ty, pointer_type))
+            .map(|ty| create_local_slot(&mut builder, ty, &program.types, pointer_type))
             .collect();
 
         builder.switch_to_block(entry);
         let shape = FunctionShape::of(function, function.id == program.main);
-        let sret_param = initialize_parameters(&mut builder, function, &slots, pointer_type, shape);
+        let sret_param = initialize_parameters(
+            &mut builder,
+            function,
+            &slots,
+            &program.types,
+            pointer_type,
+            shape,
+        );
 
         for (index, ir_block) in function.blocks.iter().enumerate() {
             if index != function.entry.0 {
@@ -336,6 +362,7 @@ fn define_function(
                 runtime_refs: &runtime_refs,
                 string_refs: &string_refs,
                 sret_param,
+                types: &program.types,
             };
             for instruction in &ir_block.instructions {
                 emitter.emit_instruction(instruction);
@@ -437,15 +464,16 @@ struct LocalSlot {
 fn create_local_slot(
     builder: &mut FunctionBuilder<'_>,
     ty: Type,
+    types: &[TypeDef],
     pointer: clif::Type,
 ) -> LocalSlot {
-    let layout = component_layout(ty, pointer);
+    let layout = component_layout(ty, types, pointer);
     let (last_type, last_offset) = layout
         .last()
         .copied()
         .expect("stored values have components");
     let size = last_offset as u32 + last_type.bytes();
-    let align = scalar_alignment(ty, pointer);
+    let align = scalar_alignment(ty, types, pointer);
     LocalSlot {
         slot: builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -460,6 +488,7 @@ fn initialize_parameters(
     builder: &mut FunctionBuilder<'_>,
     function: &ir::Function,
     slots: &[LocalSlot],
+    types: &[TypeDef],
     pointer: clif::Type,
     shape: FunctionShape,
 ) -> Option<Value> {
@@ -477,7 +506,7 @@ fn initialize_parameters(
     for local in &function.parameters {
         let width = abi_width(slots[local.0].ty);
         let value = RuntimeValue::from_slice(slots[local.0].ty, &values[index..index + width]);
-        store_local(builder, slots[local.0], value, pointer);
+        store_local(builder, slots[local.0], value, types, pointer);
         index += width;
     }
     sret_param
@@ -541,6 +570,7 @@ struct Emitter<'a, 'b> {
     runtime_refs: &'a RuntimeRefs,
     string_refs: &'a HashMap<String, GlobalValue>,
     sret_param: Option<Value>,
+    types: &'a [TypeDef],
 }
 
 impl Emitter<'_, '_> {
@@ -548,14 +578,25 @@ impl Emitter<'_, '_> {
         match instruction {
             Instruction::SetLocal { local, value } => {
                 let value = self.emit_expr(value);
-                store_local(self.builder, self.slots[local.0], value, self.pointer_type);
+                store_local(
+                    self.builder,
+                    self.slots[local.0],
+                    value,
+                    self.types,
+                    self.pointer_type,
+                );
             }
             Instruction::SetIndex {
                 local,
                 index,
                 value,
             } => {
-                let array = load_local(self.builder, self.slots[local.0], self.pointer_type);
+                let array = load_local(
+                    self.builder,
+                    self.slots[local.0],
+                    self.types,
+                    self.pointer_type,
+                );
                 let index = self.emit_expr(index).one();
                 let value = self.emit_expr(value);
                 let Type::Array { element, length } = array.ty else {
@@ -583,6 +624,7 @@ impl Emitter<'_, '_> {
                         ty: array.ty,
                         values: updated,
                     },
+                    self.types,
                     self.pointer_type,
                 );
             }
@@ -652,7 +694,7 @@ impl Emitter<'_, '_> {
                             ty: Type::Unit,
                             values: Vec::new(),
                         });
-                    let layout = component_layout(runtime_value.ty, self.pointer_type);
+                    let layout = component_layout(runtime_value.ty, self.types, self.pointer_type);
                     for ((_, offset), component) in layout.into_iter().zip(runtime_value.values) {
                         self.builder
                             .ins()
@@ -754,9 +796,12 @@ impl Emitter<'_, '_> {
                     values,
                 }
             }
-            ExprKind::Local(local) => {
-                load_local(self.builder, self.slots[local.0], self.pointer_type)
-            }
+            ExprKind::Local(local) => load_local(
+                self.builder,
+                self.slots[local.0],
+                self.types,
+                self.pointer_type,
+            ),
             ExprKind::Call {
                 function,
                 arguments,
@@ -765,11 +810,11 @@ impl Emitter<'_, '_> {
                 let uses_sret = abi_width(expression.ty) > 2;
                 let sret_ptr = if uses_sret {
                     // sret 模式：分配返回缓冲区，把其地址作为隐藏的第一个参数。
-                    let layout = component_layout(expression.ty, self.pointer_type);
+                    let layout = component_layout(expression.ty, self.types, self.pointer_type);
                     let (last_type, last_offset) =
                         layout.last().copied().expect("sret value has components");
                     let size = last_offset as u32 + last_type.bytes();
-                    let align = scalar_alignment(expression.ty, self.pointer_type);
+                    let align = scalar_alignment(expression.ty, self.types, self.pointer_type);
                     let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
                         size,
@@ -787,7 +832,7 @@ impl Emitter<'_, '_> {
                 let call = self.builder.ins().call(self.user_refs[function.0], &values);
                 if let Some(sret_ptr) = sret_ptr {
                     // sret 模式：从自己分配的返回缓冲区读回结果分量。
-                    let layout = component_layout(expression.ty, self.pointer_type);
+                    let layout = component_layout(expression.ty, self.types, self.pointer_type);
                     let mut components = Vec::with_capacity(layout.len());
                     for (component_type, offset) in layout {
                         components.push(self.builder.ins().load(
@@ -955,7 +1000,118 @@ impl Emitter<'_, '_> {
                 let value = self.emit_expr(value).one();
                 RuntimeValue::scalar(*to, self.emit_cast(value, from, *to))
             }
+            ExprKind::StructInit { fields } => {
+                let mut values = Vec::new();
+                for field in fields {
+                    values.extend(self.emit_expr(field).values);
+                }
+                RuntimeValue {
+                    ty: expression.ty,
+                    values,
+                }
+            }
+            ExprKind::EnumInit { variant, arguments } => {
+                // 统一枚举运行时表示：I32 tag + 统一 I64 payload 分量。
+                let tag = self.builder.ins().iconst(types::I32, *variant as i64);
+                let mut values = vec![tag];
+                for argument in arguments {
+                    let arg_value = self.emit_expr(argument);
+                    let component_types: Vec<clif::Type> =
+                        component_layout(arg_value.ty, self.types, self.pointer_type)
+                            .into_iter()
+                            .map(|(ty, _)| ty)
+                            .collect();
+                    values.extend(self.uniform_encode(&arg_value.values, &component_types));
+                }
+                // 填充到完整 layout 宽度（I64 零值）。
+                let layout = component_layout(expression.ty, self.types, self.pointer_type);
+                while values.len() < layout.len() {
+                    values.push(self.builder.ins().iconst(types::I64, 0));
+                }
+                RuntimeValue {
+                    ty: expression.ty,
+                    values,
+                }
+            }
+            ExprKind::Field { base, field } => {
+                let base_value = self.emit_expr(base);
+                let Type::Struct(id) = base_value.ty else {
+                    unreachable!("field access targets a struct");
+                };
+                let TypeDef::Struct { fields, .. } = &self.types[id.0] else {
+                    unreachable!("field access resolves a struct type");
+                };
+                // 计算字段在扁平组件里的起始下标。
+                let mut start = 0;
+                for (index, field_def) in fields.iter().enumerate() {
+                    let width = self.field_width(&field_def.ty);
+                    if index == *field {
+                        let values = base_value.values[start..start + width].to_vec();
+                        return RuntimeValue {
+                            ty: field_def.ty,
+                            values,
+                        };
+                    }
+                    start += width;
+                }
+                unreachable!("field index was validated during lowering");
+            }
+            ExprKind::Match { value, arms } => self.emit_match(expression.ty, value, arms),
         }
+    }
+
+    /// 计算一个类型扁平展开后的组件个数。
+    fn field_width(&self, ty: &Type) -> usize {
+        component_layout(*ty, self.types, self.pointer_type).len()
+    }
+
+    /// 把一组自然类型分量统一为 I64 分量（用于枚举 payload 的 bitcast 存储）。
+    fn uniform_encode(&mut self, values: &[Value], component_types: &[clif::Type]) -> Vec<Value> {
+        values
+            .iter()
+            .zip(component_types)
+            .map(|(value, component_type)| {
+                if *component_type == types::F32 {
+                    let i32_value =
+                        self.builder
+                            .ins()
+                            .bitcast(types::I32, MemFlagsData::new(), *value);
+                    self.builder.ins().uextend(types::I64, i32_value)
+                } else if *component_type == types::F64 {
+                    self.builder
+                        .ins()
+                        .bitcast(types::I64, MemFlagsData::new(), *value)
+                } else if component_type.bits() < 64 {
+                    self.builder.ins().uextend(types::I64, *value)
+                } else {
+                    *value
+                }
+            })
+            .collect()
+    }
+
+    /// 把统一 I64 分量恢复为自然类型分量。
+    fn uniform_decode(&mut self, values: &[Value], component_types: &[clif::Type]) -> Vec<Value> {
+        values
+            .iter()
+            .zip(component_types)
+            .map(|(value, component_type)| {
+                if *component_type == types::F32 {
+                    let i32_value = self.builder.ins().ireduce(types::I32, *value);
+                    self.builder
+                        .ins()
+                        .bitcast(types::F32, MemFlagsData::new(), i32_value)
+                } else if *component_type == types::F64 {
+                    self.builder
+                        .ins()
+                        .bitcast(types::F64, MemFlagsData::new(), *value)
+                } else if component_type.bits() < 64 {
+                    self.builder.ins().ireduce(*component_type, *value)
+                } else {
+                    *value
+                }
+            })
+            .collect()
     }
 
     fn emit_string(&mut self, value: &str) -> RuntimeValue {
@@ -1062,16 +1218,161 @@ impl Emitter<'_, '_> {
         self.builder.switch_to_block(merge_block);
         RuntimeValue::scalar(Type::Bool, result)
     }
+
+    fn emit_match(&mut self, result_ty: Type, value: &Expr, arms: &[ir::MatchArm]) -> RuntimeValue {
+        let value = self.emit_expr(value);
+        let tag = value.values[0];
+        let Type::Enum(id) = value.ty else {
+            unreachable!("match targets an enum");
+        };
+        let TypeDef::Enum { variants, .. } = &self.types[id.0] else {
+            unreachable!("match resolves an enum type");
+        };
+
+        let merge_block = self.builder.create_block();
+        // 表达式式 match 结果分量（Unit 无分量）。
+        let result_values: Vec<Value> = if result_ty == Type::Unit {
+            Vec::new()
+        } else {
+            component_layout(result_ty, self.types, self.pointer_type)
+                .iter()
+                .map(|(component_type, _)| {
+                    self.builder
+                        .append_block_param(merge_block, *component_type)
+                })
+                .collect()
+        };
+
+        // 统一布局下，所有 variant 的字段都从 tag 之后（分量 1）开始。
+        let variant_field_starts: Vec<usize> = variants.iter().map(|_| 1).collect();
+
+        // 线性链式比较：每个 variant arm 生成一个比较，匹配则进入 body，否则继续下一个比较。
+        for (arm_index, arm) in arms.iter().enumerate() {
+            let is_last = arm_index + 1 == arms.len();
+            match &arm.pattern {
+                ir::MatchPattern::Variant { variant, bindings } => {
+                    let arm_body = self.builder.create_block();
+                    let next_check = self.builder.create_block();
+                    let expected = self.builder.ins().iconst(types::I32, *variant as i64);
+                    let matches = self.builder.ins().icmp(IntCC::Equal, tag, expected);
+                    if is_last {
+                        // 最后一个 variant：不匹配说明 tag 是未知值（穷尽性保证不可达），
+                        // 这里 trap 以避免生成需要 merge 参数的不可达分支。
+                        let unreachable_block = self.builder.create_block();
+                        self.builder
+                            .ins()
+                            .brif(matches, arm_body, &[], unreachable_block, &[]);
+                        self.builder.switch_to_block(unreachable_block);
+                        self.builder.ins().trap(TrapCode::unwrap_user(2));
+                    } else {
+                        self.builder
+                            .ins()
+                            .brif(matches, arm_body, &[], next_check, &[]);
+                    }
+
+                    // body 块：解构绑定 + 执行 body。
+                    self.builder.switch_to_block(arm_body);
+                    self.emit_arm_body(
+                        *variant,
+                        bindings,
+                        &arm.body,
+                        &value,
+                        variants,
+                        &variant_field_starts,
+                        &result_values,
+                        merge_block,
+                    );
+
+                    self.builder.switch_to_block(next_check);
+                }
+                ir::MatchPattern::Wildcard => {
+                    // 通配符作为 fallback，直接进入 body（匹配所有未命中的 tag）。
+                    self.emit_arm_body(
+                        0,
+                        &[],
+                        &arm.body,
+                        &value,
+                        variants,
+                        &variant_field_starts,
+                        &result_values,
+                        merge_block,
+                    );
+                    break;
+                }
+            }
+        }
+
+        self.builder.switch_to_block(merge_block);
+        RuntimeValue {
+            ty: result_ty,
+            values: result_values,
+        }
+    }
+
+    /// 生成单个 match 分支体：解构绑定、执行 body、跳转到 merge。
+    #[allow(clippy::too_many_arguments)]
+    fn emit_arm_body(
+        &mut self,
+        variant: usize,
+        bindings: &[ir::LocalId],
+        body: &Expr,
+        value: &RuntimeValue,
+        variants: &[ir::EnumVariant],
+        variant_field_starts: &[usize],
+        result_values: &[Value],
+        merge_block: Block,
+    ) {
+        if !bindings.is_empty() {
+            let start = variant_field_starts[variant];
+            let mut offset = start;
+            for (local, field) in bindings.iter().zip(&variants[variant].fields) {
+                let component_types: Vec<clif::Type> =
+                    component_layout(*field, self.types, self.pointer_type)
+                        .into_iter()
+                        .map(|(ty, _)| ty)
+                        .collect();
+                let width = component_types.len();
+                let uniform_values = &value.values[offset..offset + width];
+                let field_values = self.uniform_decode(uniform_values, &component_types);
+                store_local(
+                    self.builder,
+                    self.slots[local.0],
+                    RuntimeValue {
+                        ty: *field,
+                        values: field_values,
+                    },
+                    self.types,
+                    self.pointer_type,
+                );
+                offset += width;
+            }
+        }
+        let body_value = self.emit_expr(body);
+        if result_values.is_empty() {
+            self.builder.ins().jump(merge_block, &[]);
+        } else {
+            self.builder.ins().jump(
+                merge_block,
+                &body_value
+                    .values
+                    .iter()
+                    .copied()
+                    .map(Into::into)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
 }
 
 fn store_local(
     builder: &mut FunctionBuilder<'_>,
     slot: LocalSlot,
     value: RuntimeValue,
+    types: &[TypeDef],
     pointer: clif::Type,
 ) {
     debug_assert_eq!(slot.ty, value.ty);
-    let layout = component_layout(slot.ty, pointer);
+    let layout = component_layout(slot.ty, types, pointer);
     debug_assert_eq!(layout.len(), value.values.len());
     for ((_, offset), component) in layout.into_iter().zip(value.values) {
         builder
@@ -1083,9 +1384,10 @@ fn store_local(
 fn load_local(
     builder: &mut FunctionBuilder<'_>,
     slot: LocalSlot,
+    types: &[TypeDef],
     pointer: clif::Type,
 ) -> RuntimeValue {
-    let values = component_layout(slot.ty, pointer)
+    let values = component_layout(slot.ty, types, pointer)
         .into_iter()
         .map(|(component_type, offset)| {
             builder
@@ -1124,13 +1426,68 @@ fn checked_binary(
     value
 }
 
-fn component_layout(ty: Type, pointer: clif::Type) -> Vec<(clif::Type, i32)> {
+fn component_layout(ty: Type, types: &[TypeDef], pointer: clif::Type) -> Vec<(clif::Type, i32)> {
+    match ty {
+        Type::Struct(id) => {
+            // 结构体：字段按声明顺序扁平拼接。
+            let mut layout = Vec::new();
+            let mut offset = 0;
+            if let TypeDef::Struct { fields, .. } = &types[id.0] {
+                for field in fields {
+                    for (component_type, component_offset) in
+                        component_layout(field.ty, types, pointer)
+                    {
+                        layout.push((component_type, offset + component_offset));
+                    }
+                    offset += size_of_type(field.ty, types, pointer);
+                }
+            }
+            layout
+        }
+        Type::Enum(id) => {
+            // 枚举：一个 I32 标签 + payload 区，payload 统一用 I64 分量（bitcast 存储），
+            // 大小 = 最大 variant 的统一分量数。
+            let mut layout = vec![(types::I32, 0)];
+            let payload_components = if let TypeDef::Enum { variants, .. } = &types[id.0] {
+                variants
+                    .iter()
+                    .map(|variant| uniform_variant_components(variant, types, pointer))
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            for index in 0..payload_components {
+                layout.push((types::I64, 4 + index as i32 * 8));
+            }
+            layout
+        }
+        _ => scalar_component_layout(ty, pointer),
+    }
+}
+
+/// 计算枚举 variant 的统一 payload 分量数（每个标量分量映射到一个 I64）。
+fn uniform_variant_components(
+    variant: &ir::EnumVariant,
+    types: &[TypeDef],
+    pointer: clif::Type,
+) -> usize {
+    let mut count = 0;
+    for field in &variant.fields {
+        count += component_layout(*field, types, pointer).len();
+    }
+    count
+}
+
+/// 标量与数组的组件布局（原 component_layout 的主体）。
+fn scalar_component_layout(ty: Type, pointer: clif::Type) -> Vec<(clif::Type, i32)> {
     let (element, length) = match ty {
         ty if ty.is_integer() || ty.is_float() || ty == Type::Char => (ty.as_scalar().unwrap(), 1),
         Type::Bool => (ScalarType::Bool, 1),
         Type::String => (ScalarType::String, 1),
         Type::Array { element, length } => (element, length),
         Type::Unit => unreachable!("Unit has no runtime value"),
+        Type::Struct(_) | Type::Enum(_) => unreachable!("user types handled by component_layout"),
         _ => unreachable!("all scalar types are covered"),
     };
     let pointer_bytes = pointer.bytes() as i32;
@@ -1161,7 +1518,16 @@ fn component_layout(ty: Type, pointer: clif::Type) -> Vec<(clif::Type, i32)> {
     layout
 }
 
-fn scalar_alignment(ty: Type, pointer: clif::Type) -> u8 {
+/// 计算一个类型的栈布局大小（字节数）。
+fn size_of_type(ty: Type, types: &[TypeDef], pointer: clif::Type) -> i32 {
+    let layout = component_layout(ty, types, pointer);
+    layout
+        .last()
+        .map(|(component_type, offset)| *offset + component_type.bytes() as i32)
+        .unwrap_or(0)
+}
+
+fn scalar_alignment(ty: Type, _types: &[TypeDef], pointer: clif::Type) -> u8 {
     match ty {
         Type::String
         | Type::Array {
@@ -1175,6 +1541,10 @@ fn scalar_alignment(ty: Type, pointer: clif::Type) -> u8 {
         Type::Array { element, .. } => clif_type(element.as_type(), pointer)
             .bytes()
             .trailing_zeros() as u8,
+        Type::Struct(_) | Type::Enum(_) => {
+            // 用户类型按最大字段对齐（这里用指针宽度，足够安全）。
+            pointer.bytes().trailing_zeros() as u8
+        }
         Type::Unit => unreachable!("Unit has no runtime value"),
         _ => unreachable!("all scalar types are covered"),
     }
@@ -1189,6 +1559,8 @@ fn clif_type(ty: Type, pointer: clif::Type) -> clif::Type {
         Type::F32 => types::F32,
         Type::F64 => types::F64,
         Type::String => pointer,
-        Type::Unit | Type::Array { .. } => unreachable!("type has no single runtime value"),
+        Type::Unit | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
+            unreachable!("type has no single runtime value")
+        }
     }
 }

@@ -6,7 +6,8 @@ use crate::ast::{
 };
 use crate::diagnostic::Diagnostic;
 use crate::ir::{
-    self, BasicBlock, BlockId, Expr, FunctionId, Instruction, LocalId, PrintPart, Terminator, Type,
+    self, BasicBlock, BlockId, EnumVariant, Expr, FunctionId, Instruction, LocalId, PrintPart,
+    StructField, Terminator, Type, TypeDef, TypeId,
 };
 use crate::source::{SourceFile, Span};
 
@@ -33,6 +34,8 @@ struct ProgramLowerer<'a> {
     ast: &'a ast::Program,
     signatures: HashMap<String, FunctionSignature>,
     main: Option<FunctionId>,
+    types: Vec<TypeDef>,
+    type_ids: HashMap<String, TypeId>,
 }
 
 impl<'a> ProgramLowerer<'a> {
@@ -42,10 +45,13 @@ impl<'a> ProgramLowerer<'a> {
             ast,
             signatures: HashMap::new(),
             main: None,
+            types: Vec::new(),
+            type_ids: HashMap::new(),
         }
     }
 
     fn lower(mut self) -> Result<ir::Program, Diagnostic> {
+        self.collect_types()?;
         self.collect_signatures()?;
         let mut functions = Vec::with_capacity(self.ast.functions.len());
         for (index, function) in self.ast.functions.iter().enumerate() {
@@ -57,6 +63,8 @@ impl<'a> ProgramLowerer<'a> {
                     function,
                     signature,
                     &self.signatures,
+                    &self.types,
+                    &self.type_ids,
                 )
                 .lower()?,
             );
@@ -64,7 +72,92 @@ impl<'a> ProgramLowerer<'a> {
         Ok(ir::Program {
             functions,
             main: self.main.expect("signature collection checks main"),
+            types: self.types,
         })
+    }
+
+    /// 收集 struct/enum 声明，构建类型表与全限定名到 TypeId 的映射。
+    fn collect_types(&mut self) -> Result<(), Diagnostic> {
+        for structure in &self.ast.structs {
+            let id = TypeId(self.types.len());
+            self.type_ids.insert(structure.name.clone(), id);
+            self.types.push(TypeDef::Struct { fields: Vec::new() });
+        }
+        for enumeration in &self.ast.enums {
+            let id = TypeId(self.types.len());
+            self.type_ids.insert(enumeration.name.clone(), id);
+            self.types.push(TypeDef::Enum {
+                variants: Vec::new(),
+            });
+        }
+        // 第二轮：填充字段与 variant 类型（此时所有类型名都已注册，可解析相互引用）。
+        for structure in &self.ast.structs {
+            let id = self.type_ids[&structure.name];
+            // 检查字段重复。
+            let mut seen = std::collections::HashSet::new();
+            for field in &structure.fields {
+                if !seen.insert(field.name.clone()) {
+                    let source = &self.sources[structure.source_id];
+                    return Err(Diagnostic::at(
+                        source,
+                        field.name_span,
+                        format!("field `{}` is already defined", field.name),
+                    ));
+                }
+            }
+            let fields = structure
+                .fields
+                .iter()
+                .map(|field| {
+                    let source = &self.sources[structure.source_id];
+                    let ty = resolve_type(source, &field.ty, &self.types, &self.type_ids)?;
+                    Ok(StructField {
+                        name: field.name.clone(),
+                        ty,
+                    })
+                })
+                .collect::<Result<Vec<_>, Diagnostic>>()?;
+            if let TypeDef::Struct { fields: slot, .. } = &mut self.types[id.0] {
+                *slot = fields;
+            }
+        }
+        for enumeration in &self.ast.enums {
+            let id = self.type_ids[&enumeration.name];
+            // 检查 variant 重复。
+            let mut seen = std::collections::HashSet::new();
+            for variant in &enumeration.variants {
+                if !seen.insert(variant.name.clone()) {
+                    let source = &self.sources[enumeration.source_id];
+                    return Err(Diagnostic::at(
+                        source,
+                        variant.name_span,
+                        format!("variant `{}` is already defined", variant.name),
+                    ));
+                }
+            }
+            let variants = enumeration
+                .variants
+                .iter()
+                .map(|variant| {
+                    let fields = variant
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            let source = &self.sources[enumeration.source_id];
+                            resolve_type(source, field, &self.types, &self.type_ids)
+                        })
+                        .collect::<Result<Vec<_>, Diagnostic>>()?;
+                    Ok(EnumVariant {
+                        name: variant.name.clone(),
+                        fields,
+                    })
+                })
+                .collect::<Result<Vec<_>, Diagnostic>>()?;
+            if let TypeDef::Enum { variants: slot, .. } = &mut self.types[id.0] {
+                *slot = variants;
+            }
+        }
+        Ok(())
     }
 
     fn collect_signatures(&mut self) -> Result<(), Diagnostic> {
@@ -87,11 +180,29 @@ impl<'a> ProgramLowerer<'a> {
 
             let mut parameters = Vec::with_capacity(function.parameters.len());
             for parameter in &function.parameters {
-                parameters.push(resolve_type(source, &parameter.ty)?);
+                let ty = resolve_type(source, &parameter.ty, &self.types, &self.type_ids)?;
+                if is_user_type(ty) {
+                    return Err(Diagnostic::at(
+                        source,
+                        parameter.ty.span,
+                        "user-defined types cannot be passed to functions yet (M14)",
+                    ));
+                }
+                parameters.push(ty);
             }
             let is_main = function.name == "main";
             let return_type = match &function.return_type {
-                Some(ty) => resolve_type(source, ty)?,
+                Some(ty) => {
+                    let resolved = resolve_type(source, ty, &self.types, &self.type_ids)?;
+                    if is_user_type(resolved) {
+                        return Err(Diagnostic::at(
+                            source,
+                            ty.span,
+                            "user-defined types cannot be returned from functions yet (M14)",
+                        ));
+                    }
+                    resolved
+                }
                 None if is_main => Type::I32,
                 None => Type::Unit,
             };
@@ -160,6 +271,8 @@ struct FunctionLowerer<'a> {
     function: &'a ast::Function,
     signature: FunctionSignature,
     signatures: &'a HashMap<String, FunctionSignature>,
+    types: &'a [TypeDef],
+    type_ids: &'a HashMap<String, TypeId>,
     parameters: Vec<LocalId>,
     locals: Vec<Type>,
     scopes: Vec<HashMap<String, Binding>>,
@@ -174,12 +287,16 @@ impl<'a> FunctionLowerer<'a> {
         function: &'a ast::Function,
         signature: FunctionSignature,
         signatures: &'a HashMap<String, FunctionSignature>,
+        types: &'a [TypeDef],
+        type_ids: &'a HashMap<String, TypeId>,
     ) -> Self {
         Self {
             source,
             function,
             signature,
             signatures,
+            types,
+            type_ids,
             parameters: Vec::new(),
             locals: Vec::new(),
             scopes: vec![HashMap::new()],
@@ -296,7 +413,7 @@ impl<'a> FunctionLowerer<'a> {
                 }
                 let ty = match type_name {
                     Some(ty) => {
-                        let declared = resolve_type(self.source, ty)?;
+                        let declared = resolve_type(self.source, ty, self.types, self.type_ids)?;
                         self.require_type(value.ty, declared, initializer.span)?;
                         declared
                     }
@@ -517,7 +634,7 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn lower_print(
-        &self,
+        &mut self,
         arguments: &[ast::Expr],
         newline: bool,
         span: Span,
@@ -890,7 +1007,7 @@ impl<'a> FunctionLowerer<'a> {
         Ok(())
     }
 
-    fn lower_expr(&self, expression: &ast::Expr) -> Result<Expr, Diagnostic> {
+    fn lower_expr(&mut self, expression: &ast::Expr) -> Result<Expr, Diagnostic> {
         match &expression.kind {
             ExprKind::Number(value) => lower_number(self.source, value, false, expression.span),
             ExprKind::Character(value) => Ok(Expr {
@@ -996,7 +1113,7 @@ impl<'a> FunctionLowerer<'a> {
             } => self.lower_call(callee, *callee_span, arguments),
             ExprKind::Cast { value, ty } => {
                 let value = self.lower_expr(value)?;
-                let to = resolve_type(self.source, ty)?;
+                let to = resolve_type(self.source, ty, self.types, self.type_ids)?;
                 if !is_castable(value.ty) || !is_castable(to) {
                     return Err(Diagnostic::at(
                         self.source,
@@ -1048,11 +1165,17 @@ impl<'a> FunctionLowerer<'a> {
                 left,
                 right,
             } => self.lower_binary(*operator, left, right, expression.span),
+            ExprKind::Field {
+                base,
+                field,
+                field_span,
+            } => self.lower_field(base, field, *field_span),
+            ExprKind::Match { value, arms } => self.lower_match(value, arms),
         }
     }
 
     fn lower_call(
-        &self,
+        &mut self,
         callee: &str,
         callee_span: Span,
         arguments: &[ast::Expr],
@@ -1078,6 +1201,19 @@ impl<'a> FunctionLowerer<'a> {
                 callee_span,
                 format!("`{callee}` can only be used as a statement"),
             ));
+        }
+        // 结构体构造：`TypeName(args)`。
+        if let Some(id) = self.type_ids.get(callee)
+            && let TypeDef::Struct { .. } = &self.types[id.0]
+        {
+            return self.lower_struct_init(*id, arguments, callee_span);
+        }
+        // 枚举项构造：`Enum.Variant(args)`。
+        if let Some((enum_name, variant_name)) = callee.rsplit_once('.')
+            && let Some(id) = self.type_ids.get(enum_name)
+            && let TypeDef::Enum { variants, .. } = &self.types[id.0]
+        {
+            return self.lower_enum_init(*id, variants, variant_name, arguments, callee_span);
         }
         let signature = self.signatures.get(callee).ok_or_else(|| {
             Diagnostic::at(
@@ -1112,8 +1248,292 @@ impl<'a> FunctionLowerer<'a> {
         })
     }
 
+    fn lower_struct_init(
+        &mut self,
+        id: TypeId,
+        arguments: &[ast::Expr],
+        span: Span,
+    ) -> Result<Expr, Diagnostic> {
+        let TypeDef::Struct { fields, .. } = &self.types[id.0] else {
+            unreachable!("struct init resolves a struct type");
+        };
+        if arguments.len() != fields.len() {
+            return Err(Diagnostic::at(
+                self.source,
+                span,
+                format!(
+                    "struct constructor expects {} arguments but {} were provided",
+                    fields.len(),
+                    arguments.len()
+                ),
+            ));
+        }
+        let mut lowered = Vec::with_capacity(arguments.len());
+        for (argument, field) in arguments.iter().zip(fields) {
+            let value = self.lower_expr(argument)?;
+            self.require_type(value.ty, field.ty, argument.span)?;
+            lowered.push(value);
+        }
+        Ok(Expr {
+            kind: ir::ExprKind::StructInit { fields: lowered },
+            ty: Type::Struct(id),
+        })
+    }
+
+    fn lower_enum_init(
+        &mut self,
+        id: TypeId,
+        variants: &[EnumVariant],
+        variant_name: &str,
+        arguments: &[ast::Expr],
+        span: Span,
+    ) -> Result<Expr, Diagnostic> {
+        let index = variants
+            .iter()
+            .position(|variant| variant.name == variant_name)
+            .ok_or_else(|| {
+                Diagnostic::at(
+                    self.source,
+                    span,
+                    format!("unknown variant `{variant_name}`"),
+                )
+            })?;
+        let variant = &variants[index];
+        if arguments.len() != variant.fields.len() {
+            return Err(Diagnostic::at(
+                self.source,
+                span,
+                format!(
+                    "variant `{variant_name}` expects {} arguments but {} were provided",
+                    variant.fields.len(),
+                    arguments.len()
+                ),
+            ));
+        }
+        let mut lowered = Vec::with_capacity(arguments.len());
+        for (argument, expected) in arguments.iter().zip(&variant.fields) {
+            let value = self.lower_expr(argument)?;
+            self.require_type(value.ty, *expected, argument.span)?;
+            lowered.push(value);
+        }
+        Ok(Expr {
+            kind: ir::ExprKind::EnumInit {
+                variant: index,
+                arguments: lowered,
+            },
+            ty: Type::Enum(id),
+        })
+    }
+
+    fn lower_field(
+        &mut self,
+        base: &ast::Expr,
+        field: &str,
+        field_span: Span,
+    ) -> Result<Expr, Diagnostic> {
+        // 无参枚举项引用：`Enum.Variant`（无括号）等价于 `Enum.Variant()`。
+        if let ExprKind::Name(name) = &base.kind
+            && let Some(id) = self.type_ids.get(name)
+            && let TypeDef::Enum { variants, .. } = &self.types[id.0]
+        {
+            let index = variants
+                .iter()
+                .position(|variant| variant.name == field)
+                .ok_or_else(|| {
+                    Diagnostic::at(
+                        self.source,
+                        field_span,
+                        format!("unknown variant `{field}`"),
+                    )
+                })?;
+            if !variants[index].fields.is_empty() {
+                return Err(Diagnostic::at(
+                    self.source,
+                    field_span,
+                    format!("variant `{field}` requires arguments"),
+                ));
+            }
+            return Ok(Expr {
+                kind: ir::ExprKind::EnumInit {
+                    variant: index,
+                    arguments: Vec::new(),
+                },
+                ty: Type::Enum(*id),
+            });
+        }
+        let base_value = self.lower_expr(base)?;
+        let Type::Struct(id) = base_value.ty else {
+            return Err(Diagnostic::at(
+                self.source,
+                field_span,
+                format!("cannot access field on value of type `{}`", base_value.ty),
+            ));
+        };
+        let TypeDef::Struct { fields, .. } = &self.types[id.0] else {
+            unreachable!("struct field access resolves a struct type");
+        };
+        let index = fields
+            .iter()
+            .position(|field_def| field_def.name == field)
+            .ok_or_else(|| {
+                Diagnostic::at(
+                    self.source,
+                    field_span,
+                    format!("struct has no field named `{field}`"),
+                )
+            })?;
+        Ok(Expr {
+            kind: ir::ExprKind::Field {
+                base: Box::new(base_value),
+                field: index,
+            },
+            ty: fields[index].ty,
+        })
+    }
+
+    fn lower_match(
+        &mut self,
+        value: &ast::Expr,
+        arms: &[ast::MatchArm],
+    ) -> Result<Expr, Diagnostic> {
+        let value_span = value.span;
+        let value = self.lower_expr(value)?;
+        let Type::Enum(id) = value.ty else {
+            return Err(Diagnostic::at(
+                self.source,
+                value_span,
+                "`match` expects an enum value",
+            ));
+        };
+        let TypeDef::Enum { variants, .. } = &self.types[id.0] else {
+            unreachable!("match resolves an enum type");
+        };
+
+        let mut lowered_arms = Vec::with_capacity(arms.len());
+        let mut result_type: Option<Type> = None;
+        let mut matched = vec![false; variants.len()];
+        let mut has_wildcard = false;
+
+        for arm in arms {
+            let (variant_index, binding_names, pattern_span) = match &arm.pattern {
+                ast::MatchPattern::Wildcard => {
+                    has_wildcard = true;
+                    (None, Vec::new(), value_span)
+                }
+                ast::MatchPattern::Enum {
+                    name,
+                    name_span,
+                    bindings,
+                } => {
+                    let variant_name = name.rsplit_once('.').map(|(_, v)| v).unwrap_or(name);
+                    let index = variants
+                        .iter()
+                        .position(|variant| variant.name == variant_name)
+                        .ok_or_else(|| {
+                            Diagnostic::at(
+                                self.source,
+                                *name_span,
+                                format!("unknown variant `{variant_name}`"),
+                            )
+                        })?;
+                    if matched[index] {
+                        return Err(Diagnostic::at(
+                            self.source,
+                            *name_span,
+                            format!("variant `{variant_name}` is matched more than once"),
+                        ));
+                    }
+                    matched[index] = true;
+                    (Some(index), bindings.clone(), *name_span)
+                }
+            };
+
+            // 为解构绑定创建局部变量：与 variant 字段一一对应。
+            let mut binding_locals = Vec::new();
+            let mut binding_types = Vec::new();
+            if let Some(index) = variant_index {
+                let variant = &variants[index];
+                if binding_names.len() != variant.fields.len() {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        pattern_span,
+                        format!(
+                            "variant `{}` expects {} bindings but {} were provided",
+                            variant.name,
+                            variant.fields.len(),
+                            binding_names.len()
+                        ),
+                    ));
+                }
+                for field in &variant.fields {
+                    binding_locals.push(self.new_local(*field));
+                    binding_types.push(*field);
+                }
+            }
+
+            // 在绑定作用域内 lowering 分支体。
+            let body = self.with_scope(|lowerer| {
+                let scope = lowerer.scopes.last_mut().unwrap();
+                for ((name, local), ty) in binding_names
+                    .iter()
+                    .zip(binding_locals.iter())
+                    .zip(binding_types.iter())
+                {
+                    // `_` 表示忽略该字段，不绑定到任何变量。
+                    if name == "_" {
+                        continue;
+                    }
+                    scope.insert(
+                        name.clone(),
+                        Binding {
+                            local: *local,
+                            ty: *ty,
+                            mutable: false,
+                        },
+                    );
+                }
+                lowerer.lower_expr(&arm.body)
+            })?;
+
+            match result_type {
+                None => result_type = Some(body.ty),
+                Some(expected) => self.require_type(body.ty, expected, arm.body.span)?,
+            }
+            let pattern = match variant_index {
+                Some(v) => ir::MatchPattern::Variant {
+                    variant: v,
+                    bindings: binding_locals,
+                },
+                None => ir::MatchPattern::Wildcard,
+            };
+            lowered_arms.push(ir::MatchArm { pattern, body });
+        }
+
+        // 穷尽性检查：所有 variant 都被匹配，或存在通配符。
+        if !has_wildcard {
+            for (index, is_matched) in matched.iter().enumerate() {
+                if !is_matched {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        value_span,
+                        format!("match is missing variant `{}`", variants[index].name),
+                    ));
+                }
+            }
+        }
+
+        let ty = result_type.unwrap_or(Type::Unit);
+        Ok(Expr {
+            kind: ir::ExprKind::Match {
+                value: Box::new(value),
+                arms: lowered_arms,
+            },
+            ty,
+        })
+    }
+
     fn lower_binary(
-        &self,
+        &mut self,
         operator: BinaryOperator,
         left: &ast::Expr,
         right: &ast::Expr,
@@ -1302,7 +1722,12 @@ fn parse_format(
     Ok(parts)
 }
 
-fn resolve_type(source: &SourceFile, type_ref: &ast::TypeRef) -> Result<Type, Diagnostic> {
+fn resolve_type(
+    source: &SourceFile,
+    type_ref: &ast::TypeRef,
+    types: &[TypeDef],
+    type_ids: &HashMap<String, TypeId>,
+) -> Result<Type, Diagnostic> {
     match &type_ref.kind {
         TypeRefKind::Name(name) => match name.as_str() {
             "i8" => Ok(Type::I8),
@@ -1318,11 +1743,14 @@ fn resolve_type(source: &SourceFile, type_ref: &ast::TypeRef) -> Result<Type, Di
             "char" => Ok(Type::Char),
             "bool" => Ok(Type::Bool),
             "string" => Ok(Type::String),
-            _ => Err(Diagnostic::at(
-                source,
-                type_ref.span,
-                format!("unknown type `{name}`"),
-            )),
+            _ => match type_ids.get(name) {
+                Some(id) => Ok(type_of(&types[id.0], *id)),
+                None => Err(Diagnostic::at(
+                    source,
+                    type_ref.span,
+                    format!("unknown type `{name}`"),
+                )),
+            },
         },
         TypeRefKind::Array { element, length } => {
             if *length == 0 {
@@ -1339,7 +1767,7 @@ fn resolve_type(source: &SourceFile, type_ref: &ast::TypeRef) -> Result<Type, Di
                     "array length is too large",
                 ));
             }
-            let element_type = resolve_type(source, element)?;
+            let element_type = resolve_type(source, element, types, type_ids)?;
             let scalar = element_type.as_scalar().ok_or_else(|| {
                 Diagnostic::at(
                     source,
@@ -1352,6 +1780,14 @@ fn resolve_type(source: &SourceFile, type_ref: &ast::TypeRef) -> Result<Type, Di
                 length: *length,
             })
         }
+    }
+}
+
+/// 根据类型定义构造对应的 `Type`。
+fn type_of(def: &TypeDef, id: TypeId) -> Type {
+    match def {
+        TypeDef::Struct { .. } => Type::Struct(id),
+        TypeDef::Enum { .. } => Type::Enum(id),
     }
 }
 
@@ -1504,6 +1940,10 @@ fn is_castable(ty: Type) -> bool {
     ty.is_integer() || ty.is_float() || ty == Type::Char
 }
 
+fn is_user_type(ty: Type) -> bool {
+    matches!(ty, Type::Struct(_) | Type::Enum(_))
+}
+
 fn parse_unsuffixed_integer(value: &str) -> Option<i64> {
     (!value.contains('_') && !value.contains(['.', 'e', 'E']))
         .then(|| value.parse::<i64>().ok())
@@ -1633,5 +2073,45 @@ mod tests {
         let bounds =
             lower_text("fn main() { val values = [1, 2]; return values[-1]; }").unwrap_err();
         assert!(bounds.to_string().contains("out of bounds"));
+    }
+
+    #[test]
+    fn m13_lowers_structs_and_enums() {
+        lower_text(
+            "struct Point { x: i32, y: i32 } enum Shape { Circle(f64), Rectangle(f64, f64), Empty } fn main() { var p = Point(1, 2); val c = Shape.Circle(2.0); val area = match c { Shape.Circle(r) => r, Shape.Rectangle(w, h) => w + h, Shape.Empty => 0.0 }; return p.x + area as i32; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn m13_rejects_user_types_in_function_signatures() {
+        let param = lower_text(
+            "struct Point { x: i32 } fn area(p: Point): i32 { return p.x; } fn main() {}",
+        )
+        .unwrap_err();
+        assert!(param.to_string().contains("cannot be passed to functions"));
+
+        let ret = lower_text(
+            "struct Point { x: i32 } fn make(): Point { return Point(1); } fn main() {}",
+        )
+        .unwrap_err();
+        assert!(
+            ret.to_string()
+                .contains("cannot be returned from functions")
+        );
+    }
+
+    #[test]
+    fn m13_rejects_unknown_fields_and_non_exhaustive_match() {
+        let field =
+            lower_text("struct Point { x: i32 } fn main() { var p = Point(1); return p.y; }")
+                .unwrap_err();
+        assert!(field.to_string().contains("no field named `y`"));
+
+        let exhaustive = lower_text(
+            "enum Shape { Circle(f64), Rectangle(f64, f64) } fn main() { val s = Shape.Circle(1.0); return match s { Shape.Circle(r) => 1 }; }",
+        )
+        .unwrap_err();
+        assert!(exhaustive.to_string().contains("missing variant"));
     }
 }

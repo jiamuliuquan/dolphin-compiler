@@ -305,6 +305,148 @@ fn m8_narrow_integer_overflow_has_runtime_message() {
     );
 }
 
+#[test]
+fn m13_structs_enums_and_match() {
+    let output = run_program(
+        r#"
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        enum Shape {
+            Circle(f64),
+            Rectangle(f64, f64),
+            Empty,
+        }
+
+        fn main() {
+            var p = Point(3, 4);
+            val sum = p.x + p.y;
+
+            val circle = Shape.Circle(2.0);
+            val circle_area = match circle {
+                Shape.Circle(r) => 3.14 * r * r,
+                Shape.Rectangle(w, h) => w * h,
+                Shape.Empty => 0.0,
+            };
+
+            val rect = Shape.Rectangle(3.0, 4.0);
+            val rect_area = match rect {
+                Shape.Circle(r) => 3.14 * r * r,
+                Shape.Rectangle(w, h) => w * h,
+                Shape.Empty => 0.0,
+            };
+
+            println("sum = {}, circle = {}, rect = {}", sum, circle_area, rect_area);
+            return sum + (circle_area as i32) + (rect_area as i32);
+        }
+        "#,
+    );
+    assert_eq!(output.status.code(), Some(31));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "sum = 7, circle = 12.56, rect = 12\n"
+    );
+}
+
+#[test]
+fn m13_enum_error_handling_with_wildcard() {
+    let output = run_program(
+        r#"
+        enum ParseResult {
+            Ok(i32),
+            Error(i32),
+        }
+
+        fn main() {
+            val ok = ParseResult.Ok(42);
+            val ok_value = match ok {
+                ParseResult.Ok(v) => v,
+                ParseResult.Error(_) => -1,
+            };
+
+            val err = ParseResult.Error(1);
+            val err_value = match err {
+                ParseResult.Ok(v) => v,
+                ParseResult.Error(_) => -1,
+            };
+
+            return ok_value + err_value;
+        }
+        "#,
+    );
+    assert_eq!(output.status.code(), Some(41));
+}
+
+#[test]
+fn m13_cross_module_types() {
+    let output = run_project(&[
+        (
+            "src/main.do",
+            r#"
+            use geom.shapes;
+
+            fn main() {
+                var p = shapes.Point(3, 4);
+                val circle = shapes.Shape.Circle(2.0);
+                val area = match circle {
+                    shapes.Shape.Circle(r) => 3.14 * r * r,
+                    shapes.Shape.Rectangle(w, h) => w * h,
+                    shapes.Shape.Empty => 0.0,
+                };
+                return p.x + p.y;
+            }
+            "#,
+        ),
+        (
+            "src/geom/shapes.do",
+            r#"
+            pkg geom.shapes;
+            pub struct Point {
+                x: i32,
+                y: i32,
+            }
+            pub enum Shape {
+                Circle(f64),
+                Rectangle(f64, f64),
+                Empty,
+            }
+            "#,
+        ),
+    ])
+    .expect("M13 cross-module project should build and run");
+    assert_eq!(output.status.code(), Some(7));
+}
+
+#[test]
+fn m13_rejects_missing_match_arms_and_duplicate_fields() {
+    let missing = build_project(&[(
+        "src/main.do",
+        r#"
+        enum Shape {
+            Circle(f64),
+            Rectangle(f64, f64),
+        }
+        fn main() {
+            val s = Shape.Circle(2.0);
+            return match s {
+                Shape.Circle(r) => 1,
+            };
+        }
+        "#,
+    )])
+    .unwrap_err();
+    assert!(missing.to_string().contains("missing variant"));
+
+    let duplicate = build_project(&[(
+        "src/main.do",
+        "struct Point { x: i32, x: i32 } fn main() {}",
+    )])
+    .unwrap_err();
+    assert!(duplicate.to_string().contains("already defined"));
+}
+
 fn assert_program_exit(source: &str, expected: i32) {
     let output = run_program(source);
     assert_eq!(output.status.code(), Some(expected));

@@ -17,6 +17,31 @@ pub enum Type {
     Bool,
     String,
     Array { element: ScalarType, length: usize },
+    Struct(TypeId),
+    Enum(TypeId),
+}
+
+/// 用户自定义类型的全局编号（M13）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TypeId(pub usize);
+
+/// 用户自定义类型定义（M13）。
+#[derive(Debug)]
+pub enum TypeDef {
+    Struct { fields: Vec<StructField> },
+    Enum { variants: Vec<EnumVariant> },
+}
+
+#[derive(Debug)]
+pub struct StructField {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Debug)]
+pub struct EnumVariant {
+    pub name: String,
+    pub fields: Vec<Type>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +97,7 @@ impl Type {
             Self::Char => Some(ScalarType::Char),
             Self::Bool => Some(ScalarType::Bool),
             Self::String => Some(ScalarType::String),
-            Self::Unit | Self::Array { .. } => None,
+            Self::Unit | Self::Array { .. } | Self::Struct(_) | Self::Enum(_) => None,
         }
     }
 
@@ -122,6 +147,7 @@ pub struct BlockId(pub usize);
 pub struct Program {
     pub functions: Vec<Function>,
     pub main: FunctionId,
+    pub types: Vec<TypeDef>,
 }
 
 #[derive(Debug)]
@@ -214,6 +240,36 @@ pub enum ExprKind {
         value: Box<Expr>,
         to: Type,
     },
+    StructInit {
+        fields: Vec<Expr>,
+    },
+    EnumInit {
+        variant: usize,
+        arguments: Vec<Expr>,
+    },
+    Field {
+        base: Box<Expr>,
+        field: usize,
+    },
+    Match {
+        value: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+}
+
+#[derive(Debug)]
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub body: Expr,
+}
+
+#[derive(Debug)]
+pub enum MatchPattern {
+    Variant {
+        variant: usize,
+        bindings: Vec<LocalId>,
+    },
+    Wildcard,
 }
 
 impl Expr {
@@ -243,6 +299,8 @@ impl std::fmt::Display for Type {
             Type::Bool => formatter.write_str("bool"),
             Type::String => formatter.write_str("string"),
             Type::Array { element, length } => write!(formatter, "[{element}; {length}]"),
+            Type::Struct(id) => write!(formatter, "struct@{}", id.0),
+            Type::Enum(id) => write!(formatter, "enum@{}", id.0),
         }
     }
 }

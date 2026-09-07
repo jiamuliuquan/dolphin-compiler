@@ -1,6 +1,7 @@
 use crate::ast::{
-    AssignmentOperator, BinaryOperator, Block, Expr, ExprKind, ForIterable, Function, Parameter,
-    PathRef, Program, Statement, StatementKind, TypeRef, TypeRefKind, UnaryOperator,
+    AssignmentOperator, BinaryOperator, Block, EnumDecl, Expr, ExprKind, FieldDecl, ForIterable,
+    Function, MatchArm, MatchPattern, Parameter, PathRef, Program, Statement, StatementKind,
+    StructDecl, TypeRef, TypeRefKind, UnaryOperator, VariantDecl,
 };
 use crate::diagnostic::Diagnostic;
 use crate::source::{SourceFile, Span};
@@ -42,20 +43,62 @@ impl<'a> Parser<'a> {
             self.expect_simple(TokenKind::Semicolon, "expected `;` after import")?;
         }
         let mut functions = Vec::new();
+        let mut structs = Vec::new();
+        let mut enums = Vec::new();
         while !self.check(&TokenKind::Eof) {
-            functions.push(self.parse_function()?);
+            match self.current().kind {
+                TokenKind::Fn => functions.push(self.parse_function()?),
+                TokenKind::Struct => structs.push(self.parse_struct()?),
+                TokenKind::Enum => enums.push(self.parse_enum()?),
+                TokenKind::Pub => {
+                    let public = self.consume(&TokenKind::Pub).is_some();
+                    match self.current().kind {
+                        TokenKind::Fn => {
+                            let mut function = self.parse_function()?;
+                            function.public = public;
+                            functions.push(function);
+                        }
+                        TokenKind::Struct => {
+                            let mut structure = self.parse_struct()?;
+                            structure.public = public;
+                            structs.push(structure);
+                        }
+                        TokenKind::Enum => {
+                            let mut enumeration = self.parse_enum()?;
+                            enumeration.public = public;
+                            enums.push(enumeration);
+                        }
+                        _ => {
+                            return Err(Diagnostic::at(
+                                self.source,
+                                self.current().span,
+                                "expected `fn`, `struct`, or `enum` after `pub`",
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        self.current().span,
+                        "expected a function, struct, or enum",
+                    ));
+                }
+            }
         }
-        if functions.is_empty() {
+        if functions.is_empty() && structs.is_empty() && enums.is_empty() {
             return Err(Diagnostic::at(
                 self.source,
                 self.current().span,
-                "expected a function",
+                "expected a function, struct, or enum",
             ));
         }
         Ok(Program {
             package,
             uses,
             functions,
+            structs,
+            enums,
         })
     }
 
@@ -97,6 +140,78 @@ impl<'a> Parser<'a> {
             return_type,
             body,
             span: start.merge(block_span),
+        })
+    }
+
+    fn parse_struct(&mut self) -> Result<StructDecl, Diagnostic> {
+        self.expect_simple(TokenKind::Struct, "expected `struct`")?;
+        let (name, name_span) = self.expect_identifier("expected struct name")?;
+        self.expect_simple(TokenKind::LeftBrace, "expected `{` after struct name")?;
+        let mut fields = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            let (field_name, field_span) = self.expect_identifier("expected field name")?;
+            self.expect_simple(TokenKind::Colon, "expected `:` after field name")?;
+            let ty = self.parse_type("expected field type")?;
+            fields.push(FieldDecl {
+                name: field_name,
+                name_span: field_span,
+                ty,
+            });
+            // 最后一个字段的逗号可选。
+            if self.consume(&TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let right = self.expect_simple(TokenKind::RightBrace, "expected `}` after struct body")?;
+        let _ = right;
+        Ok(StructDecl {
+            source_id: 0,
+            public: false,
+            name,
+            name_span,
+            fields,
+        })
+    }
+
+    fn parse_enum(&mut self) -> Result<EnumDecl, Diagnostic> {
+        self.expect_simple(TokenKind::Enum, "expected `enum`")?;
+        let (name, name_span) = self.expect_identifier("expected enum name")?;
+        self.expect_simple(TokenKind::LeftBrace, "expected `{` after enum name")?;
+        let mut variants = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            let (variant_name, variant_span) = self.expect_identifier("expected variant name")?;
+            let fields = if self.consume(&TokenKind::LeftParen).is_some() {
+                let mut fields = Vec::new();
+                if !self.check(&TokenKind::RightParen) {
+                    loop {
+                        fields.push(self.parse_type("expected variant field type")?);
+                        if self.consume(&TokenKind::Comma).is_none() {
+                            break;
+                        }
+                    }
+                }
+                self.expect_simple(TokenKind::RightParen, "expected `)` after variant fields")?;
+                fields
+            } else {
+                Vec::new()
+            };
+            variants.push(VariantDecl {
+                name: variant_name,
+                name_span: variant_span,
+                fields,
+            });
+            // 最后一个 variant 的逗号可选。
+            if self.consume(&TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect_simple(TokenKind::RightBrace, "expected `}` after enum body")?;
+        Ok(EnumDecl {
+            source_id: 0,
+            public: false,
+            name,
+            name_span,
+            variants,
         })
     }
 
@@ -363,19 +478,17 @@ impl<'a> Parser<'a> {
                 span: token.span,
             },
             TokenKind::LeftBracket => self.parse_array_literal(token.span)?,
+            TokenKind::Match => self.parse_match(token.span)?,
             TokenKind::Identifier(name) => {
-                let mut callee = name;
+                // 收集点号路径段（可能用于函数调用、构造或字段访问）。
+                let mut segments = vec![name];
                 while self.consume(&TokenKind::Dot).is_some() {
                     let (segment, _) = self.expect_identifier("expected name after `.`")?;
-                    callee.push('.');
-                    callee.push_str(&segment);
+                    segments.push(segment);
                 }
-                if !self.check(&TokenKind::LeftParen) {
-                    Expr {
-                        kind: ExprKind::Name(callee),
-                        span: token.span,
-                    }
-                } else {
+                if self.check(&TokenKind::LeftParen) {
+                    // 带括号：函数调用或结构体/枚举构造，交由 lower 按名称区分。
+                    let path = segments.join(".");
                     self.advance();
                     let mut arguments = Vec::new();
                     if !self.check(&TokenKind::RightParen) {
@@ -392,12 +505,34 @@ impl<'a> Parser<'a> {
                     )?;
                     Expr {
                         kind: ExprKind::Call {
-                            callee,
+                            callee: path,
                             callee_span: token.span,
                             arguments,
                         },
                         span: token.span.merge(right),
                     }
+                } else if segments.len() == 1 {
+                    Expr {
+                        kind: ExprKind::Name(segments.into_iter().next().unwrap()),
+                        span: token.span,
+                    }
+                } else {
+                    // 无括号的点号链：字段访问。第一个段是名字，其余段是 Field 后缀。
+                    let mut expression = Expr {
+                        kind: ExprKind::Name(segments[0].clone()),
+                        span: token.span,
+                    };
+                    for field in &segments[1..] {
+                        expression = Expr {
+                            kind: ExprKind::Field {
+                                base: Box::new(expression),
+                                field: field.clone(),
+                                field_span: token.span,
+                            },
+                            span: token.span,
+                        };
+                    }
+                    expression
                 }
             }
             TokenKind::Minus | TokenKind::Bang => {
@@ -433,20 +568,100 @@ impl<'a> Parser<'a> {
                 ));
             }
         };
-        while self.consume(&TokenKind::LeftBracket).is_some() {
-            let index = self.parse_expression(0)?;
-            let right =
-                self.expect_simple(TokenKind::RightBracket, "expected `]` after array index")?;
-            let span = expression.span.merge(right);
-            expression = Expr {
-                kind: ExprKind::Index {
-                    array: Box::new(expression),
-                    index: Box::new(index),
-                },
-                span,
-            };
+        // 后缀：数组下标 `[i]` 与字段访问 `.field`。
+        loop {
+            if self.consume(&TokenKind::LeftBracket).is_some() {
+                let index = self.parse_expression(0)?;
+                let right =
+                    self.expect_simple(TokenKind::RightBracket, "expected `]` after array index")?;
+                let span = expression.span.merge(right);
+                expression = Expr {
+                    kind: ExprKind::Index {
+                        array: Box::new(expression),
+                        index: Box::new(index),
+                    },
+                    span,
+                };
+            } else if self.consume(&TokenKind::Dot).is_some() {
+                let (field, field_span) =
+                    self.expect_identifier("expected field name after `.`")?;
+                let span = expression.span.merge(field_span);
+                expression = Expr {
+                    kind: ExprKind::Field {
+                        base: Box::new(expression),
+                        field,
+                        field_span,
+                    },
+                    span,
+                };
+            } else {
+                break;
+            }
         }
         Ok(expression)
+    }
+
+    fn parse_match(&mut self, start: Span) -> Result<Expr, Diagnostic> {
+        let value = self.parse_expression(0)?;
+        self.expect_simple(TokenKind::LeftBrace, "expected `{` after match value")?;
+        let mut arms = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            let pattern = self.parse_match_pattern()?;
+            self.expect_simple(TokenKind::FatArrow, "expected `=>` after match pattern")?;
+            let body = self.parse_expression(0)?;
+            arms.push(MatchArm { pattern, body });
+            // 最后一个 arm 的逗号可选。
+            if self.consume(&TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let right = self.expect_simple(TokenKind::RightBrace, "expected `}` after match arms")?;
+        Ok(Expr {
+            kind: ExprKind::Match {
+                value: Box::new(value),
+                arms,
+            },
+            span: start.merge(right),
+        })
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<MatchPattern, Diagnostic> {
+        if self.consume(&TokenKind::Underscore).is_some() {
+            return Ok(MatchPattern::Wildcard);
+        }
+        let (name, name_span) = self.expect_identifier("expected match pattern")?;
+        let mut path = name;
+        while self.consume(&TokenKind::Dot).is_some() {
+            let (segment, _) = self.expect_identifier("expected name after `.`")?;
+            path.push('.');
+            path.push_str(&segment);
+        }
+        let bindings = if self.consume(&TokenKind::LeftParen).is_some() {
+            let mut bindings = Vec::new();
+            if !self.check(&TokenKind::RightParen) {
+                loop {
+                    // 绑定名可以是标识符，或 `_` 表示忽略该字段。
+                    if self.consume(&TokenKind::Underscore).is_some() {
+                        bindings.push("_".to_string());
+                    } else {
+                        let (binding, _) = self.expect_identifier("expected binding name")?;
+                        bindings.push(binding);
+                    }
+                    if self.consume(&TokenKind::Comma).is_none() {
+                        break;
+                    }
+                }
+            }
+            self.expect_simple(TokenKind::RightParen, "expected `)` after pattern bindings")?;
+            bindings
+        } else {
+            Vec::new()
+        };
+        Ok(MatchPattern::Enum {
+            name: path,
+            name_span,
+            bindings,
+        })
     }
 
     fn parse_array_literal(&mut self, left: Span) -> Result<Expr, Diagnostic> {

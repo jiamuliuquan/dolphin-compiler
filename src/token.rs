@@ -20,6 +20,9 @@ pub enum TokenKind {
     Continue,
     True,
     False,
+    Struct,
+    Enum,
+    Match,
     Identifier(String),
     Number(String),
     Character(char),
@@ -55,6 +58,8 @@ pub enum TokenKind {
     OrOr,
     DotDot,
     DotDotEqual,
+    FatArrow,
+    Underscore,
     Dot,
     Eof,
 }

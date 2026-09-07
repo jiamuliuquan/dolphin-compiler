@@ -74,6 +74,12 @@ pub fn load_sources(
         for function in &mut program.functions {
             function.source_id = source_id;
         }
+        for structure in &mut program.structs {
+            structure.source_id = source_id;
+        }
+        for enumeration in &mut program.enums {
+            enumeration.source_id = source_id;
+        }
         sources.push(source);
         units.push(Unit {
             source_id,
@@ -84,8 +90,12 @@ pub fn load_sources(
 
     resolve_modules(&sources, &mut units)?;
     let mut functions = Vec::new();
+    let mut structs = Vec::new();
+    let mut enums = Vec::new();
     for unit in &mut units {
         functions.append(&mut unit.program.functions);
+        structs.append(&mut unit.program.structs);
+        enums.append(&mut unit.program.enums);
     }
     Ok(LoadedProgram {
         sources,
@@ -93,6 +103,8 @@ pub fn load_sources(
             package: None,
             uses: Vec::new(),
             functions,
+            structs,
+            enums,
         },
     })
 }
@@ -216,6 +228,49 @@ fn resolve_modules(sources: &[SourceFile], units: &mut [Unit]) -> Result<(), Dia
         }
     }
 
+    // 收集并校验用户自定义类型（struct/enum），构建全限定名到可见性信息的映射。
+    let mut type_infos = HashMap::new();
+    for unit in units.iter() {
+        let source = &sources[unit.source_id];
+        for structure in &unit.program.structs {
+            let qualified = qualify(&unit.module, &structure.name);
+            if type_infos
+                .insert(
+                    qualified.clone(),
+                    TypeInfo {
+                        module: unit.module.clone(),
+                        public: structure.public,
+                    },
+                )
+                .is_some()
+            {
+                return Err(Diagnostic::at(
+                    source,
+                    structure.name_span,
+                    format!("type `{qualified}` is already defined"),
+                ));
+            }
+        }
+        for enumeration in &unit.program.enums {
+            let qualified = qualify(&unit.module, &enumeration.name);
+            if type_infos
+                .insert(
+                    qualified.clone(),
+                    TypeInfo {
+                        module: unit.module.clone(),
+                        public: enumeration.public,
+                    },
+                )
+                .is_some()
+            {
+                return Err(Diagnostic::at(
+                    source,
+                    enumeration.name_span,
+                    format!("type `{qualified}` is already defined"),
+                ));
+            }
+        }
+    }
     for unit in units.iter_mut() {
         let source = &sources[unit.source_id];
         let bindings = resolve_imports(source, unit, &modules, &functions)?;
@@ -233,6 +288,21 @@ fn resolve_modules(sources: &[SourceFile], units: &mut [Unit]) -> Result<(), Dia
                 )));
             }
         }
+        // 先 qualify 类型声明自身的名字与其字段类型。
+        for structure in &mut unit.program.structs {
+            structure.name = qualify(&unit.module, &structure.name);
+            for field in &mut structure.fields {
+                resolve_type_ref(source, &unit.module, &bindings, &type_infos, &mut field.ty)?;
+            }
+        }
+        for enumeration in &mut unit.program.enums {
+            enumeration.name = qualify(&unit.module, &enumeration.name);
+            for variant in &mut enumeration.variants {
+                for field in &mut variant.fields {
+                    resolve_type_ref(source, &unit.module, &bindings, &type_infos, field)?;
+                }
+            }
+        }
         for function in &mut unit.program.functions {
             resolve_block(
                 source,
@@ -240,12 +310,19 @@ fn resolve_modules(sources: &[SourceFile], units: &mut [Unit]) -> Result<(), Dia
                 &local_names,
                 &bindings,
                 &functions,
+                &type_infos,
                 &mut function.body,
             )?;
             function.name = qualify(&unit.module, &function.name);
         }
     }
     Ok(())
+}
+
+#[derive(Clone)]
+struct TypeInfo {
+    module: String,
+    public: bool,
 }
 
 fn resolve_imports(
@@ -299,6 +376,7 @@ fn resolve_block(
     locals: &HashSet<String>,
     imports: &HashMap<String, ImportBinding>,
     functions: &HashMap<String, FunctionInfo>,
+    type_infos: &HashMap<String, TypeInfo>,
     statements: &mut [ast::Statement],
 ) -> Result<(), Diagnostic> {
     for statement in statements {
@@ -306,47 +384,69 @@ fn resolve_block(
             StatementKind::Variable { initializer, .. }
             | StatementKind::Assignment {
                 value: initializer, ..
-            } => resolve_expr(source, module, locals, imports, functions, initializer)?,
+            } => resolve_expr(
+                source,
+                module,
+                locals,
+                imports,
+                functions,
+                type_infos,
+                initializer,
+            )?,
             StatementKind::IndexAssignment { index, value, .. } => {
-                resolve_expr(source, module, locals, imports, functions, index)?;
-                resolve_expr(source, module, locals, imports, functions, value)?;
+                resolve_expr(
+                    source, module, locals, imports, functions, type_infos, index,
+                )?;
+                resolve_expr(
+                    source, module, locals, imports, functions, type_infos, value,
+                )?;
             }
-            StatementKind::Expression(expression) => {
-                resolve_expr(source, module, locals, imports, functions, expression)?
-            }
+            StatementKind::Expression(expression) => resolve_expr(
+                source, module, locals, imports, functions, type_infos, expression,
+            )?,
             StatementKind::If {
                 condition,
                 then_block,
                 else_block,
             } => {
-                resolve_expr(source, module, locals, imports, functions, condition)?;
-                resolve_block(source, module, locals, imports, functions, then_block)?;
+                resolve_expr(
+                    source, module, locals, imports, functions, type_infos, condition,
+                )?;
+                resolve_block(
+                    source, module, locals, imports, functions, type_infos, then_block,
+                )?;
                 if let Some(block) = else_block {
-                    resolve_block(source, module, locals, imports, functions, block)?;
+                    resolve_block(
+                        source, module, locals, imports, functions, type_infos, block,
+                    )?;
                 }
             }
-            StatementKind::Loop(block) => {
-                resolve_block(source, module, locals, imports, functions, block)?
-            }
+            StatementKind::Loop(block) => resolve_block(
+                source, module, locals, imports, functions, type_infos, block,
+            )?,
             StatementKind::While { condition, body } => {
-                resolve_expr(source, module, locals, imports, functions, condition)?;
-                resolve_block(source, module, locals, imports, functions, body)?;
+                resolve_expr(
+                    source, module, locals, imports, functions, type_infos, condition,
+                )?;
+                resolve_block(source, module, locals, imports, functions, type_infos, body)?;
             }
             StatementKind::For { iterable, body, .. } => {
                 match iterable {
                     ast::ForIterable::Range { start, end, .. } => {
-                        resolve_expr(source, module, locals, imports, functions, start)?;
-                        resolve_expr(source, module, locals, imports, functions, end)?;
+                        resolve_expr(
+                            source, module, locals, imports, functions, type_infos, start,
+                        )?;
+                        resolve_expr(source, module, locals, imports, functions, type_infos, end)?;
                     }
-                    ast::ForIterable::Array(array) => {
-                        resolve_expr(source, module, locals, imports, functions, array)?
-                    }
+                    ast::ForIterable::Array(array) => resolve_expr(
+                        source, module, locals, imports, functions, type_infos, array,
+                    )?,
                 }
-                resolve_block(source, module, locals, imports, functions, body)?;
+                resolve_block(source, module, locals, imports, functions, type_infos, body)?;
             }
-            StatementKind::Return(Some(value)) => {
-                resolve_expr(source, module, locals, imports, functions, value)?
-            }
+            StatementKind::Return(Some(value)) => resolve_expr(
+                source, module, locals, imports, functions, type_infos, value,
+            )?,
             StatementKind::Break | StatementKind::Continue | StatementKind::Return(None) => {}
         }
     }
@@ -359,19 +459,27 @@ fn resolve_expr(
     locals: &HashSet<String>,
     imports: &HashMap<String, ImportBinding>,
     functions: &HashMap<String, FunctionInfo>,
+    type_infos: &HashMap<String, TypeInfo>,
     expression: &mut ast::Expr,
 ) -> Result<(), Diagnostic> {
     match &mut expression.kind {
         ExprKind::Array(values) => {
             for value in values {
-                resolve_expr(source, module, locals, imports, functions, value)?;
+                resolve_expr(
+                    source, module, locals, imports, functions, type_infos, value,
+                )?;
             }
         }
         ExprKind::RepeatArray { value, .. } | ExprKind::Unary { operand: value, .. } => {
-            resolve_expr(source, module, locals, imports, functions, value)?
+            resolve_expr(
+                source, module, locals, imports, functions, type_infos, value,
+            )?
         }
-        ExprKind::Cast { value, .. } => {
-            resolve_expr(source, module, locals, imports, functions, value)?
+        ExprKind::Cast { value, ty } => {
+            resolve_expr(
+                source, module, locals, imports, functions, type_infos, value,
+            )?;
+            resolve_type_ref(source, module, imports, type_infos, ty)?;
         }
         ExprKind::Index { array, index }
         | ExprKind::Binary {
@@ -379,8 +487,12 @@ fn resolve_expr(
             right: index,
             ..
         } => {
-            resolve_expr(source, module, locals, imports, functions, array)?;
-            resolve_expr(source, module, locals, imports, functions, index)?;
+            resolve_expr(
+                source, module, locals, imports, functions, type_infos, array,
+            )?;
+            resolve_expr(
+                source, module, locals, imports, functions, type_infos, index,
+            )?;
         }
         ExprKind::Call {
             callee,
@@ -388,9 +500,16 @@ fn resolve_expr(
             arguments,
         } => {
             for argument in arguments {
-                resolve_expr(source, module, locals, imports, functions, argument)?;
+                resolve_expr(
+                    source, module, locals, imports, functions, type_infos, argument,
+                )?;
             }
             if matches!(callee.as_str(), "print" | "println" | "length") {
+                return Ok(());
+            }
+            // 结构体/枚举构造的 callee 是类型名或枚举项名：qualify 后不按函数解析。
+            if is_constructor_target(callee, imports, type_infos) {
+                *callee = qualify_constructor(module, imports, type_infos, callee);
                 return Ok(());
             }
             let resolved = resolve_callee(module, locals, imports, callee);
@@ -406,11 +525,168 @@ fn resolve_expr(
             }
             *callee = resolved;
         }
+        ExprKind::Field { base, .. } => {
+            resolve_expr(source, module, locals, imports, functions, type_infos, base)?;
+        }
+        ExprKind::Match { value, arms } => {
+            resolve_expr(
+                source, module, locals, imports, functions, type_infos, value,
+            )?;
+            for arm in arms {
+                if let ast::MatchPattern::Enum { name, .. } = &mut arm.pattern {
+                    *name = qualify_enum_variant(module, imports, type_infos, name);
+                }
+                resolve_expr(
+                    source,
+                    module,
+                    locals,
+                    imports,
+                    functions,
+                    type_infos,
+                    &mut arm.body,
+                )?;
+            }
+        }
         ExprKind::Number(_)
         | ExprKind::Character(_)
         | ExprKind::Boolean(_)
         | ExprKind::String(_)
         | ExprKind::Name(_) => {}
+    }
+    Ok(())
+}
+
+/// 判断 callee 是否为结构体构造（类型名后跟 `(`）或枚举项构造。
+fn is_constructor_target(
+    callee: &str,
+    imports: &HashMap<String, ImportBinding>,
+    type_infos: &HashMap<String, TypeInfo>,
+) -> bool {
+    // 先解析 callee 的第一个段（可能是 `use` 导入的模块别名）。
+    let resolved = resolve_imported(imports, callee);
+    // 结构体构造：`TypeName(...)` 或 `mod.TypeName(...)`。
+    if type_infos.contains_key(&resolved) {
+        return true;
+    }
+    // 枚举项构造：`Enum.Variant(...)` 或 `mod.Enum.Variant(...)`，其中 Enum 是类型名。
+    if let Some((prefix, _)) = resolved.rsplit_once('.') {
+        return type_infos.contains_key(prefix);
+    }
+    false
+}
+
+/// 解析一个类型名到全限定名（用于结构体构造）。
+/// 解析 `Enum.Variant` 到全限定枚举名 + variant（保留 `Enum.Variant` 结构）。
+fn qualify_enum_variant(
+    module: &str,
+    imports: &HashMap<String, ImportBinding>,
+    type_infos: &HashMap<String, TypeInfo>,
+    name: &str,
+) -> String {
+    let resolved = resolve_imported(imports, name);
+    if let Some((prefix, variant)) = resolved.rsplit_once('.')
+        && type_infos.contains_key(prefix)
+    {
+        return format!("{prefix}.{variant}");
+    }
+    // 回退：用模块 qualify。
+    let qualified = qualify(module, name);
+    if let Some((prefix, variant)) = qualified.rsplit_once('.')
+        && type_infos.contains_key(prefix)
+    {
+        return format!("{prefix}.{variant}");
+    }
+    resolved
+}
+
+/// 通过 `use` 绑定解析可能被导入的名称。
+fn resolve_imported(imports: &HashMap<String, ImportBinding>, name: &str) -> String {
+    if let Some((first, rest)) = name.split_once('.')
+        && let Some(ImportBinding::Module(imported)) = imports.get(first)
+    {
+        return format!("{imported}.{rest}");
+    }
+    name.to_string()
+}
+
+/// 解析构造 callee（结构体名或枚举项名）到全限定名。
+fn qualify_constructor(
+    module: &str,
+    imports: &HashMap<String, ImportBinding>,
+    type_infos: &HashMap<String, TypeInfo>,
+    name: &str,
+) -> String {
+    // 先解析第一个段（可能是 `use` 导入的模块别名）。
+    let resolved = resolve_imported(imports, name);
+    if type_infos.contains_key(&resolved) {
+        // 结构体构造：`TypeName` 或 `mod.TypeName`。
+        return resolved;
+    }
+    // 枚举项构造：`Enum.Variant` 或 `mod.Enum.Variant`。
+    if let Some((prefix, variant)) = resolved.rsplit_once('.')
+        && type_infos.contains_key(prefix)
+    {
+        return format!("{prefix}.{variant}");
+    }
+    // 回退：用模块 qualify 后再试一次（用于本模块内定义的类型）。
+    let qualified = qualify(module, name);
+    if type_infos.contains_key(&qualified) {
+        return qualified;
+    }
+    resolved
+}
+
+/// 解析类型引用中的名字，把用户类型名 qualify 为全限定名。
+fn resolve_type_ref(
+    source: &SourceFile,
+    module: &str,
+    imports: &HashMap<String, ImportBinding>,
+    type_infos: &HashMap<String, TypeInfo>,
+    ty: &mut ast::TypeRef,
+) -> Result<(), Diagnostic> {
+    match &mut ty.kind {
+        ast::TypeRefKind::Name(name) => {
+            let resolved = if type_infos.contains_key(name) {
+                name.clone()
+            } else {
+                let imported = resolve_imported(imports, name);
+                if type_infos.contains_key(&imported) {
+                    imported
+                } else {
+                    let qualified = qualify(module, name);
+                    if type_infos.contains_key(&qualified) {
+                        qualified
+                    } else {
+                        // 基础类型或未知类型：保持不变，交给 lower 的 resolve_type 处理。
+                        return Ok(());
+                    }
+                }
+            };
+            check_type_visibility(source, module, &resolved, type_infos, ty.span)?;
+            *name = resolved;
+            Ok(())
+        }
+        ast::TypeRefKind::Array { element, .. } => {
+            resolve_type_ref(source, module, imports, type_infos, element)
+        }
+    }
+}
+
+/// 检查类型是否对当前模块可见（私有类型不能被其他模块引用）。
+fn check_type_visibility(
+    source: &SourceFile,
+    module: &str,
+    type_name: &str,
+    type_infos: &HashMap<String, TypeInfo>,
+    span: crate::source::Span,
+) -> Result<(), Diagnostic> {
+    let info = type_infos.get(type_name).expect("resolved type must exist");
+    if info.module != module && !info.public {
+        return Err(Diagnostic::at(
+            source,
+            span,
+            format!("type `{type_name}` is private"),
+        ));
     }
     Ok(())
 }

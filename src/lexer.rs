@@ -57,7 +57,13 @@ impl<'a> Lexer<'a> {
                 b'/' => self.with_equal(TokenKind::Slash, TokenKind::SlashEqual),
                 b'%' => self.with_equal(TokenKind::Percent, TokenKind::PercentEqual),
                 b'!' => self.with_equal(TokenKind::Bang, TokenKind::BangEqual),
-                b'=' => self.with_equal(TokenKind::Equal, TokenKind::EqualEqual),
+                b'=' => {
+                    if self.starts_with(b"=>") {
+                        self.double(TokenKind::FatArrow)
+                    } else {
+                        self.with_equal(TokenKind::Equal, TokenKind::EqualEqual)
+                    }
+                }
                 b'<' => self.with_equal(TokenKind::Less, TokenKind::LessEqual),
                 b'>' => self.with_equal(TokenKind::Greater, TokenKind::GreaterEqual),
                 b'&' if self.starts_with(b"&&") => self.double(TokenKind::AndAnd),
@@ -307,6 +313,7 @@ impl<'a> Lexer<'a> {
             self.position += 1;
         }
         match &self.source.text[start..self.position] {
+            "_" => TokenKind::Underscore,
             "fn" => TokenKind::Fn,
             "pub" => TokenKind::Pub,
             "pkg" => TokenKind::Pkg,
@@ -325,6 +332,9 @@ impl<'a> Lexer<'a> {
             "continue" => TokenKind::Continue,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
+            "struct" => TokenKind::Struct,
+            "enum" => TokenKind::Enum,
+            "match" => TokenKind::Match,
             value => TokenKind::Identifier(value.to_string()),
         }
     }

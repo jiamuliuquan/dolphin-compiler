@@ -5,6 +5,40 @@ pub struct Program {
     pub package: Option<PathRef>,
     pub uses: Vec<PathRef>,
     pub functions: Vec<Function>,
+    pub structs: Vec<StructDecl>,
+    pub enums: Vec<EnumDecl>,
+}
+
+#[derive(Debug)]
+pub struct StructDecl {
+    pub source_id: usize,
+    pub public: bool,
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<FieldDecl>,
+}
+
+#[derive(Debug)]
+pub struct FieldDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: TypeRef,
+}
+
+#[derive(Debug)]
+pub struct EnumDecl {
+    pub source_id: usize,
+    pub public: bool,
+    pub name: String,
+    pub name_span: Span,
+    pub variants: Vec<VariantDecl>,
+}
+
+#[derive(Debug)]
+pub struct VariantDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<TypeRef>,
 }
 
 #[derive(Debug)]
@@ -159,6 +193,31 @@ pub enum ExprKind {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    Field {
+        base: Box<Expr>,
+        field: String,
+        field_span: Span,
+    },
+    Match {
+        value: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+}
+
+#[derive(Debug)]
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub body: Expr,
+}
+
+#[derive(Debug)]
+pub enum MatchPattern {
+    Enum {
+        name: String,
+        name_span: Span,
+        bindings: Vec<String>,
+    },
+    Wildcard,
 }
 
 #[derive(Clone, Copy, Debug)]

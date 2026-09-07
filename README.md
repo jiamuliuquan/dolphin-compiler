@@ -203,7 +203,7 @@ UTF-8 源文件
 | M10 | 已完成 | `TargetPlatform` 平台抽象、`dc env`、链接命令可测试且不硬编码 `cc` |
 | M11 | 已完成 | Windows x86_64 原生支持：MSVC ABI、`.obj`/`.exe`、Windows 运行时与 CI |
 | M12 | 已完成 | 自包含工具链：内嵌运行时、`rust-lld` 链接、`--system-linker` 回退、发行包与冒烟测试 |
-| M13-M16 | 目标阶段 | 数据类型、内存模型、泛型标准库和可选 LLVM 后端 |
+| M13-M17 | 目标阶段 | 数据类型、内存模型、泛型标准库、可选 LLVM 后端和开发工具 |
 
 ## 文档和示例
 
@@ -211,7 +211,7 @@ UTF-8 源文件
 - [编译器实现指南](docs/compiler-implementation.md)：架构、核心数据结构和测试策略。
 - [已实现功能参考](docs/implemented-features.md)：当前编译器的准确行为与限制。
 - [安装与发行](docs/installation.md)：发行包获取、安装、升级、卸载、兼容政策与许可证。
-- [实现路线图](docs/roadmap.md)：MVP 完成状态、M9-M12 可执行计划和 M13-M16 目标。
+- [实现路线图](docs/roadmap.md)：MVP 完成状态、M9-M12 可执行计划和 M13-M17 目标。
 - [M1-M8 可运行示例](examples/README.md)：每个里程碑的源码、命令和预期结果。
 
 ## 开发验证

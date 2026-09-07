@@ -632,7 +632,7 @@ mod tests {
     use super::*;
 
     fn parse_text(text: &str) -> Program {
-        let source = SourceFile::new(PathBuf::from("main.dc"), text.to_string());
+        let source = SourceFile::new(PathBuf::from("main.do"), text.to_string());
         let tokens = lexer::lex(&source).expect("lexing should succeed");
         parse(&source, tokens).expect("parsing should succeed")
     }

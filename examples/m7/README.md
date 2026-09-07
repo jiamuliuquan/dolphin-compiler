@@ -1,12 +1,12 @@
 # M7：多文件项目与模块
 
-入口：[src/main.dc](src/main.dc)
+入口：[src/main.do](src/main.do)
 
 本示例验证：
 
-- 递归扫描项目 `src/` 下的 `.dc` 文件
-- `src/main.dc` 与 `src/helper.dc` 合并到根模块并省略 `pkg`
-- `src/std/math.dc` 声明与路径一致的 `pkg std.math;`
+- 递归扫描项目 `src/` 下的 `.do` 文件
+- `src/main.do` 与 `src/helper.do` 合并到根模块并省略 `pkg`
+- `src/std/math.do` 声明与路径一致的 `pkg std.math;`
 - `use std.math;` 导入模块并通过 `math.clamp(...)` 调用
 - `use std.math.min;` 导入公开成员并通过 `min(...)` 调用
 - `pub` 控制跨模块可见性

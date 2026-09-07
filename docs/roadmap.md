@@ -8,7 +8,7 @@
 
 ### M0：空程序
 
-- [x] 读取 `src/main.dc`
+- [x] 读取 `src/main.do`
 - [x] 解析空 `main`
 - [x] Cranelift 生成本机目标文件
 - [x] 系统链接器生成可执行文件
@@ -90,12 +90,12 @@
 
 ## 3. M7：项目与模块（已完成）
 
-目标：从“只读取一个 `src/main.dc`”升级为真正的多文件项目。
+目标：从“只读取一个 `src/main.do`”升级为真正的多文件项目。
 
 ### 源码发现
 
 - [x] 递归扫描项目 `src/`
-- [x] `src/*.dc` 归入根模块并允许省略 `pkg`
+- [x] `src/*.do` 归入根模块并允许省略 `pkg`
 - [x] 子目录文件必须声明与路径一致的 `pkg`
 - [x] 检测重复函数和模块路径不一致
 - [x] 根目录多文件合并；子目录每个文件对应一个模块
@@ -120,7 +120,7 @@
 ### 验收标准
 
 - [x] 新增 `examples/m7`
-- [x] 根模块调用 `src/std/math.dc` 的公开函数
+- [x] 根模块调用 `src/std/math.do` 的公开函数
 - [x] 私有函数不能跨模块访问
 - [x] 路径与 `pkg` 不一致时有准确诊断
 - [x] M1-M6 全部回归通过
@@ -193,7 +193,7 @@ source = "src"
 
 [[bin]]
 name = "hello"
-path = "src/main.dc"
+path = "src/main.do"
 
 [build]
 optimization = "debug"

@@ -205,7 +205,7 @@ fn m6_array_bounds_are_checked_at_runtime() {
 fn builds_and_runs_m7_modules() {
     let output = run_project(&[
         (
-            "src/main.dc",
+            "src/main.do",
             r#"
             use std.math;
             use text.labels.name;
@@ -216,13 +216,13 @@ fn builds_and_runs_m7_modules() {
             }
             "#,
         ),
-        ("src/helper.dc", "fn helper(): i32 { return 5; }"),
+        ("src/helper.do", "fn helper(): i32 { return 5; }"),
         (
-            "src/std/math.dc",
+            "src/std/math.do",
             "pkg std.math; pub fn min(a: i32, b: i32): i32 { if a < b { return a; } return b; } fn private_value(): i32 { return 9; }",
         ),
         (
-            "src/text/labels.dc",
+            "src/text/labels.do",
             "pkg text.labels; pub fn name(): string { return \"minimum\"; }",
         ),
     ])
@@ -235,28 +235,28 @@ fn builds_and_runs_m7_modules() {
 fn m7_rejects_private_access_and_package_mismatch() {
     let private = build_project(&[
         (
-            "src/main.dc",
+            "src/main.do",
             "use std.math; fn main() { return math.secret(); }",
         ),
         (
-            "src/std/math.dc",
+            "src/std/math.do",
             "pkg std.math; fn secret(): i32 { return 1; }",
         ),
     ])
     .unwrap_err();
     assert!(private.to_string().contains("private"));
-    assert!(private.to_string().contains("src/main.dc"));
+    assert!(private.to_string().contains("src/main.do"));
 
     let mismatch = build_project(&[
-        ("src/main.dc", "fn main() {}"),
+        ("src/main.do", "fn main() {}"),
         (
-            "src/std/math.dc",
+            "src/std/math.do",
             "pkg wrong.path; pub fn min(a: i32, b: i32): i32 { return a; }",
         ),
     ])
     .unwrap_err();
     assert!(mismatch.to_string().contains("does not match"));
-    assert!(mismatch.to_string().contains("src/std/math.dc"));
+    assert!(mismatch.to_string().contains("src/std/math.do"));
 }
 
 #[test]
@@ -322,7 +322,7 @@ fn run_program(source: &str) -> std::process::Output {
     ));
     let source_dir = project.join("src");
     fs::create_dir_all(&source_dir).expect("temporary source directory should be created");
-    fs::write(source_dir.join("main.dc"), source).expect("temporary source should be written");
+    fs::write(source_dir.join("main.do"), source).expect("temporary source should be written");
 
     let artifact = build(BuildOptions {
         input: project.clone(),

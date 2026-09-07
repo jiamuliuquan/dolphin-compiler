@@ -8,7 +8,7 @@
 - 包坐标 `me.foxlab:greeter:0.1.0`
 - `[[bin]]` 声明多个可执行目标及各自入口文件
 - `[build]` 中的 `output` 与 `optimization`
-- 多个目标共享 `src/` 下的模块（`util.dc`）
+- 多个目标共享 `src/` 下的模块（`util.do`）
 - 从任意目录向上查找清单，无需重复传入目录
 
 项目结构：
@@ -17,9 +17,9 @@
 m9/
 ├── dolphin.toml        项目清单
 └── src/
-    ├── main.dc         cli 入口（main）
-    ├── server.dc       server 入口（main）
-    └── util.dc         共享模块（double、classify）
+    ├── main.do         cli 入口（main）
+    ├── server.do       server 入口（main）
+    └── util.do         共享模块（double、classify）
 ```
 
 ## 查看包信息
@@ -40,8 +40,8 @@ m9/
 `build` 会为每个 `[[bin]]` 生成一个可执行文件：
 
 ```text
-target/cli       由 src/main.dc 编译
-target/server    由 src/server.dc 编译
+target/cli       由 src/main.do 编译
+target/server    由 src/server.do 编译
 ```
 
 ## 运行单个目标

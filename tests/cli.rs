@@ -99,11 +99,11 @@ fn info_shows_package_coordinate() {
 
         [[bin]]
         name = "hello"
-        path = "src/main.dc"
+        path = "src/main.do"
         "#,
     )
     .unwrap();
-    fs::write(project.join("src/main.dc"), "fn main() { return 0; }").unwrap();
+    fs::write(project.join("src/main.do"), "fn main() { return 0; }").unwrap();
 
     let output = dc()
         .arg("info")
@@ -114,7 +114,7 @@ fn info_shows_package_coordinate() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("me.foxlab:hello:0.1.0"));
     assert!(stdout.contains("hello -> "));
-    assert!(stdout.contains("main.dc"));
+    assert!(stdout.contains("main.do"));
 
     fs::remove_dir_all(project).unwrap();
 }
@@ -140,11 +140,11 @@ fn build_with_manifest_and_run_single_bin() {
 
         [[bin]]
         name = "app"
-        path = "src/main.dc"
+        path = "src/main.do"
         "#,
     )
     .unwrap();
-    fs::write(project.join("src/main.dc"), "fn main() { return 42; }").unwrap();
+    fs::write(project.join("src/main.do"), "fn main() { return 42; }").unwrap();
 
     let run = dc()
         .arg("run")
@@ -177,16 +177,16 @@ fn run_multiple_bins_requires_selection() {
 
         [[bin]]
         name = "a"
-        path = "src/a.dc"
+        path = "src/a.do"
 
         [[bin]]
         name = "b"
-        path = "src/b.dc"
+        path = "src/b.do"
         "#,
     )
     .unwrap();
-    fs::write(project.join("src/a.dc"), "fn main() { return 1; }").unwrap();
-    fs::write(project.join("src/b.dc"), "fn main() { return 2; }").unwrap();
+    fs::write(project.join("src/a.do"), "fn main() { return 1; }").unwrap();
+    fs::write(project.join("src/b.do"), "fn main() { return 2; }").unwrap();
 
     let no_bin = dc()
         .arg("run")

@@ -1,7 +1,7 @@
 # 语言设计说明
 
 > 状态：设计草案（Draft）  
-> 源文件扩展名：`.dc`
+> 源文件扩展名：`.do`
 
 本文档描述目标语言规范，其中包含尚未实现的设计。当前编译器的真实能力以[已实现功能参考](implemented-features.md)为准，后续顺序以[实现路线图](roadmap.md)为准。
 
@@ -45,7 +45,7 @@ Rust 适合实现词法分析器、语法树、类型检查器和代码生成器
 
 ## 3. 源文件和注释
 
-源文件使用 UTF-8 编码，扩展名为 `.dc`。
+源文件使用 UTF-8 编码，扩展名为 `.do`。
 
 ```dc
 // 单行注释
@@ -409,18 +409,18 @@ println("{{}}"); // 输出 {}
 ```text
 project/
 └── src/
-    ├── main.dc
-    ├── helper.dc
+    ├── main.do
+    ├── helper.do
     ├── std/
-    │   └── math.dc
+    │   └── math.do
     └── app/
-        └── service.dc
+        └── service.do
 ```
 
-直接位于 `src/` 下的 `.dc` 文件属于项目根模块，可以省略 `pkg`：
+直接位于 `src/` 下的 `.do` 文件属于项目根模块，可以省略 `pkg`：
 
 ```dc
-// src/main.dc
+// src/main.do
 use std.math;
 
 fn main() {
@@ -428,16 +428,16 @@ fn main() {
 }
 ```
 
-`src/main.dc` 和 `src/helper.dc` 位于同一个根模块。根模块中的声明默认可以互相访问，但仍不能重复定义同名符号。
+`src/main.do` 和 `src/helper.do` 位于同一个根模块。根模块中的声明默认可以互相访问，但仍不能重复定义同名符号。
 
-`src` 子目录中的源码必须在第一条有效语句中声明 `pkg`。模块路径由文件相对于 `src` 的路径推导：去掉 `.dc` 扩展名，再把目录分隔符替换为 `.`。
+`src` 子目录中的源码必须在第一条有效语句中声明 `pkg`。模块路径由文件相对于 `src` 的路径推导：去掉 `.do` 扩展名，再把目录分隔符替换为 `.`。
 
 ```text
-src/std/math.dc       -> pkg std.math;
-src/app/service.dc    -> pkg app.service;
+src/std/math.do       -> pkg std.math;
+src/app/service.do    -> pkg app.service;
 ```
 
-例如 `src/std/math.dc` 必须以以下声明开头：
+例如 `src/std/math.do` 必须以以下声明开头：
 
 ```dc
 pkg std.math;
@@ -514,7 +514,7 @@ if value > 0 {
 
 ```text
 error: cannot assign to immutable variable `limit`
- --> app/main.dc:8:5
+ --> app/main.do:8:5
   |
 8 |     limit = 20;
   |     ^^^^^ `limit` was declared with `val`
@@ -533,7 +533,7 @@ error: cannot assign to immutable variable `limit`
 
 以下代码展示 M7 已实现的模块语法。对应可运行工程见 [`examples/m7`](../examples/m7/)。
 
-应用入口 `src/main.dc` 位于源码根目录，因此不需要 `pkg`：
+应用入口 `src/main.do` 位于源码根目录，因此不需要 `pkg`：
 
 ```dc
 use std.math;
@@ -547,7 +547,7 @@ fn main() {
 }
 ```
 
-标准库模块 `src/std/math.dc` 位于子目录，因此必须声明 `pkg std.math;`：
+标准库模块 `src/std/math.do` 位于子目录，因此必须声明 `pkg std.math;`：
 
 ```dc
 pkg std.math;

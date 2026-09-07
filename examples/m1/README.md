@@ -1,6 +1,6 @@
 # M1：整数算术
 
-入口：[src/main.dc](src/main.dc)
+入口：[src/main.do](src/main.do)
 
 本示例验证第一条包含实际计算的完整编译链路：
 

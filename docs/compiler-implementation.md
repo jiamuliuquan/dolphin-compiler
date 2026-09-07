@@ -292,7 +292,7 @@ fn main() {
 实现项目源码发现：
 
 - 扫描项目的 `src/` 目录。
-- `src/*.dc` 归入根模块并允许省略 `pkg`。
+- `src/*.do` 归入根模块并允许省略 `pkg`。
 - 子目录文件必须声明与相对路径一致的 `pkg`。
 - 收集函数和其他顶层声明。
 - 处理 `use` 和 `pub`。
@@ -448,13 +448,13 @@ M9-M12 的优先级高于新增语言语法。先用项目清单稳定构建输�
 ```text
 tests/
 ├── pass/
-│   ├── variables.dc
-│   ├── functions.dc
-│   └── loops.dc
+│   ├── variables.do
+│   ├── functions.do
+│   └── loops.do
 └── fail/
-    ├── immutable_assignment.dc
-    ├── unknown_name.dc
-    └── type_mismatch.dc
+    ├── immutable_assignment.do
+    ├── unknown_name.do
+    └── type_mismatch.do
 ```
 
 `pass` 文件必须编译成功；`fail` 文件必须失败，并检查主要错误代码、位置和关键信息。错误测试不要完整匹配操作系统路径或终端颜色。

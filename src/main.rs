@@ -28,7 +28,7 @@ struct Cli {
 enum Commands {
     /// Parse and type-check without producing build artifacts
     Check {
-        /// Dolphin project directory or a standalone .dc file (defaults to the current directory)
+        /// Dolphin project directory or a standalone .do file (defaults to the current directory)
         input: Option<PathBuf>,
     },
 
@@ -50,7 +50,7 @@ enum Commands {
 
 #[derive(Args)]
 struct BuildArgs {
-    /// Dolphin project directory or a standalone .dc file (defaults to the current directory)
+    /// Dolphin project directory or a standalone .do file (defaults to the current directory)
     input: Option<PathBuf>,
 
     /// Select which binary target to build or run (for dolphin.toml projects)

@@ -1,6 +1,6 @@
 # M5：字符串与格式化输出
 
-入口：[src/main.dc](src/main.dc)
+入口：[src/main.do](src/main.do)
 
 本示例在 M4 基础上验证：
 

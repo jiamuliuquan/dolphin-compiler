@@ -54,7 +54,7 @@ pub fn load_sources(
     paths.sort();
     if paths.is_empty() {
         return Err(Diagnostic::plain(format!(
-            "source directory `{}` does not contain any `.dc` files",
+            "source directory `{}` does not contain any `.do` files",
             source_root.display()
         )));
     }
@@ -119,7 +119,7 @@ fn discover_sources(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), Di
             && entry
                 .path()
                 .extension()
-                .is_some_and(|extension| extension == "dc")
+                .is_some_and(|extension| extension == "do")
         {
             paths.push(entry.path());
         }

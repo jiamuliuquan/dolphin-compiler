@@ -51,10 +51,10 @@ fn parses_manifest_and_builds_single_bin() {
 
         [[bin]]
         name = "hello"
-        path = "src/main.dc"
+        path = "src/main.do"
         "#,
     );
-    write(&project.join("src/main.dc"), "fn main() { return 42; }");
+    write(&project.join("src/main.do"), "fn main() { return 42; }");
 
     let manifest = load_manifest(&project).expect("manifest should load");
     assert_eq!(manifest.package.coordinate(), "me.foxlab:hello:0.1.0");
@@ -95,19 +95,19 @@ fn builds_all_and_selects_single_bin_from_multiple() {
 
         [[bin]]
         name = "cli"
-        path = "src/cli.dc"
+        path = "src/cli.do"
 
         [[bin]]
         name = "server"
-        path = "src/server.dc"
+        path = "src/server.do"
 
         [build]
         optimization = "debug"
         output = "dist"
         "#,
     );
-    write(&project.join("src/cli.dc"), "fn main() { return 1; }");
-    write(&project.join("src/server.dc"), "fn main() { return 2; }");
+    write(&project.join("src/cli.do"), "fn main() { return 1; }");
+    write(&project.join("src/server.do"), "fn main() { return 2; }");
 
     let manifest = load_manifest(&project).expect("manifest should load");
 
@@ -151,22 +151,22 @@ fn bins_share_modules_but_have_independent_entry_points() {
 
         [[bin]]
         name = "a"
-        path = "src/a.dc"
+        path = "src/a.do"
 
         [[bin]]
         name = "b"
-        path = "src/b.dc"
+        path = "src/b.do"
         "#,
     );
     write(
-        &project.join("src/util.dc"),
+        &project.join("src/util.do"),
         "fn double(value: i32): i32 { return value * 2; }",
     );
     write(
-        &project.join("src/a.dc"),
+        &project.join("src/a.do"),
         "fn main() { return double(21); }",
     );
-    write(&project.join("src/b.dc"), "fn main() { return double(3); }");
+    write(&project.join("src/b.do"), "fn main() { return double(3); }");
 
     let manifest = load_manifest(&project).expect("manifest should load");
     let artifacts = build_manifest(
@@ -202,10 +202,10 @@ fn rejects_unknown_bin_selection() {
 
         [[bin]]
         name = "a"
-        path = "src/a.dc"
+        path = "src/a.do"
         "#,
     );
-    write(&project.join("src/a.dc"), "fn main() { return 0; }");
+    write(&project.join("src/a.do"), "fn main() { return 0; }");
 
     let manifest = load_manifest(&project).expect("manifest should load");
     let error = build_manifest(
@@ -238,7 +238,7 @@ fn rejects_missing_entry_file() {
 
         [[bin]]
         name = "a"
-        path = "src/does_not_exist.dc"
+        path = "src/does_not_exist.do"
         "#,
     );
 
@@ -279,10 +279,10 @@ fn discover_manifest_walks_up_directories() {
 
         [[bin]]
         name = "n"
-        path = "src/main.dc"
+        path = "src/main.do"
         "#,
     );
-    write(&project.join("src/main.dc"), "fn main() { return 0; }");
+    write(&project.join("src/main.do"), "fn main() { return 0; }");
 
     let nested = project.join("a").join("b").join("c");
     fs::create_dir_all(&nested).expect("nested directory should be created");

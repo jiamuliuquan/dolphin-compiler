@@ -1,6 +1,6 @@
 # M2：局部变量
 
-入口：[src/main.dc](src/main.dc)
+入口：[src/main.do](src/main.do)
 
 本示例在 M1 基础上验证：
 

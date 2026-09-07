@@ -1,6 +1,6 @@
 # M8：MVP 标量类型与命令体验
 
-入口：[src/main.dc](src/main.dc)
+入口：[src/main.do](src/main.do)
 
 本示例验证：
 

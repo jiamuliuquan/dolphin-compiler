@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn lexes_m3_program() {
         let source = SourceFile::new(
-            PathBuf::from("main.dc"),
+            PathBuf::from("main.do"),
             "fn main() { var i = 0; while i < 3 && true { i += 1; } return i; }".to_string(),
         );
         let tokens = lex(&source).expect("lexing should succeed");
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn decodes_utf8_strings_and_escapes() {
         let source = SourceFile::new(
-            PathBuf::from("main.dc"),
+            PathBuf::from("main.do"),
             "fn main() { println(\"你好\\n{}\", 1); }".to_string(),
         );
         let tokens = lex(&source).expect("lexing should succeed");
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn skips_comments() {
         let source = SourceFile::new(
-            PathBuf::from("main.dc"),
+            PathBuf::from("main.do"),
             "// line\nfn /* block */ main() {}".to_string(),
         );
         let tokens = lex(&source).expect("lexing should succeed");

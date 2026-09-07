@@ -1546,7 +1546,7 @@ mod tests {
     use super::*;
 
     fn lower_text(text: &str) -> Result<ir::Program, Diagnostic> {
-        let source = SourceFile::new(PathBuf::from("main.dc"), text.to_string());
+        let source = SourceFile::new(PathBuf::from("main.do"), text.to_string());
         let tokens = lexer::lex(&source)?;
         let ast = parser::parse(&source, tokens)?;
         lower(&source, &ast)

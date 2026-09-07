@@ -12,7 +12,7 @@
 //!
 //! [[bin]]
 //! name = "hello"
-//! path = "src/main.dc"
+//! path = "src/main.do"
 //!
 //! [build]
 //! optimization = "debug"
@@ -319,14 +319,14 @@ mod tests {
 
             [[bin]]
             name = "hello"
-            path = "src/main.dc"
+            path = "src/main.do"
             "#,
         );
         assert_eq!(manifest.package.coordinate(), "me.foxlab:hello:0.1.0");
         assert_eq!(manifest.package.source, root.join("src"));
         assert_eq!(manifest.bins.len(), 1);
         assert_eq!(manifest.bins[0].name, "hello");
-        assert_eq!(manifest.bins[0].path, root.join("src").join("main.dc"));
+        assert_eq!(manifest.bins[0].path, root.join("src").join("main.do"));
         assert_eq!(manifest.build.optimization, "debug");
         assert_eq!(manifest.build.output, root.join("target"));
     }
@@ -343,11 +343,11 @@ mod tests {
 
             [[bin]]
             name = "cli"
-            path = "source/cli.dc"
+            path = "source/cli.do"
 
             [[bin]]
             name = "server"
-            path = "source/server.dc"
+            path = "source/server.do"
 
             [build]
             optimization = "release"
@@ -393,7 +393,7 @@ mod tests {
 
             [[bin]]
             name = "n"
-            path = "src/main.dc"
+            path = "src/main.do"
             "#,
         )
         .unwrap_err();
@@ -412,7 +412,7 @@ mod tests {
 
             [[bin]]
             name = "n"
-            path = "src/main.dc"
+            path = "src/main.do"
             "#,
         )
         .unwrap_err();
@@ -431,11 +431,11 @@ mod tests {
 
             [[bin]]
             name = "n"
-            path = "src/a.dc"
+            path = "src/a.do"
 
             [[bin]]
             name = "n"
-            path = "src/b.dc"
+            path = "src/b.do"
             "#,
         )
         .unwrap_err();
@@ -455,7 +455,7 @@ mod tests {
 
             [[bin]]
             name = "n"
-            path = "src/main.dc"
+            path = "src/main.do"
             "#,
         )
         .unwrap_err();
@@ -474,7 +474,7 @@ mod tests {
 
             [[bin]]
             name = "n"
-            path = "src/main.dc"
+            path = "src/main.do"
 
             [build]
             optimization = "fast"

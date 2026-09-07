@@ -43,22 +43,22 @@ target/release/dolphin-compiler
 
 ### 2.2 编译 Dolphin 项目
 
-项目源码位于 `src/`，编译器会递归读取所有 `.dc` 文件。入口函数 `main` 必须定义在 `src` 根目录的某个文件中：
+项目源码位于 `src/`，编译器会递归读取所有 `.do` 文件。入口函数 `main` 必须定义在 `src` 根目录的某个文件中：
 
 ```text
 my-project/
 └── src/
-    ├── main.dc
+    ├── main.do
     └── std/
-        └── math.dc
+        └── math.do
 ```
 
 命令格式：
 
 ```text
-dc check <项目目录或main.dc> [--color auto|always|never]
-dc build <项目目录或main.dc> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker]
-dc run   <项目目录或main.dc> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker]
+dc check <项目目录或main.do> [--color auto|always|never]
+dc build <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker]
+dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker]
 dc info  <项目目录>
 dc env
 ```
@@ -72,7 +72,7 @@ CLI 使用 Clap 解析参数。`dc --help`、`dc --version` 以及 `dc <子命�
 ./examples/m5/target/m5
 ```
 
-也可以直接编译一个不使用模块声明和导入的 `.dc` 文件。命令支持 `check`、`build` 和 `run`；远程依赖管理尚未实现。
+也可以直接编译一个不使用模块声明和导入的 `.do` 文件。命令支持 `check`、`build` 和 `run`；远程依赖管理尚未实现。
 
 ### 2.2a 项目清单 `dolphin.toml`
 
@@ -87,11 +87,11 @@ source = "src"
 
 [[bin]]
 name = "cli"
-path = "src/main.dc"
+path = "src/main.do"
 
 [[bin]]
 name = "server"
-path = "src/server.dc"
+path = "src/server.do"
 
 [build]
 optimization = "debug"
@@ -120,7 +120,7 @@ examples/m5/target/m5.runtime.o   最小运行时目标文件
 
 ## 3. 源文件和词法规则
 
-源文件扩展名为 `.dc`，按 UTF-8 读取。
+源文件扩展名为 `.do`，按 UTF-8 读取。
 
 ### 3.1 注释
 
@@ -533,18 +533,18 @@ println("{{}}"); // 输出 {}
 
 ### 11.1 源码路径和 `pkg`
 
-`src` 根目录下的所有 `.dc` 文件合并为根模块，并且必须省略 `pkg`：
+`src` 根目录下的所有 `.do` 文件合并为根模块，并且必须省略 `pkg`：
 
 ```text
-src/main.dc
-src/helper.dc
+src/main.do
+src/helper.do
 ```
 
 子目录文件的模块路径由相对路径和文件名共同决定，且必须显式声明完全一致的 `pkg`：
 
 ```text
-src/std/math.dc  ->  pkg std.math;
-src/net/http/client.dc  ->  pkg net.http.client;
+src/std/math.do  ->  pkg std.math;
+src/net/http/client.do  ->  pkg net.http.client;
 ```
 
 模块文件名和目录名目前使用原始 UTF-8 路径段；语言标识符仍只允许 ASCII。路径与 `pkg` 不一致或子目录文件缺少 `pkg` 会产生编译错误。

@@ -16,7 +16,22 @@ pub enum Type {
     Char,
     Bool,
     String,
-    Array { element: ScalarType, length: usize },
+    Array {
+        element: ScalarType,
+        length: usize,
+    },
+    Struct(TypeId),
+    Enum(TypeId),
+    /// 显式指针 `*T`（M14）：单个地址分量。指向目标为标量/结构体/枚举（最小模型）。
+    Ptr(Pointer),
+    /// 动态切片 `[]T`（M14）：`{ ptr, len }` 二元组，首版仅支持 `u8`。
+    Slice(ScalarType),
+}
+
+/// 指针的指向目标（M14）。保持 `Copy`，避免 `Type` 因递归而失去 `Copy`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pointer {
+    Scalar(ScalarType),
     Struct(TypeId),
     Enum(TypeId),
 }
@@ -97,7 +112,12 @@ impl Type {
             Self::Char => Some(ScalarType::Char),
             Self::Bool => Some(ScalarType::Bool),
             Self::String => Some(ScalarType::String),
-            Self::Unit | Self::Array { .. } | Self::Struct(_) | Self::Enum(_) => None,
+            Self::Unit
+            | Self::Array { .. }
+            | Self::Struct(_)
+            | Self::Enum(_)
+            | Self::Ptr(_)
+            | Self::Slice(_) => None,
         }
     }
 
@@ -178,6 +198,23 @@ pub enum Instruction {
         index: Expr,
         value: Expr,
     },
+    /// 指针解引用写入 `*p = v`（M14）。
+    SetDeref {
+        pointer: Expr,
+        value: Expr,
+    },
+    /// 指针字段写入 `q->x = v`（M14）。
+    SetPtrField {
+        pointer: Expr,
+        field: usize,
+        value: Expr,
+    },
+    /// 切片下标写入 `s[i] = v`（M14，带运行时越界检查）。
+    SetSliceIndex {
+        slice: Expr,
+        index: Expr,
+        value: Expr,
+    },
     Evaluate(Expr),
     Print(Vec<PrintPart>),
 }
@@ -199,13 +236,13 @@ pub enum Terminator {
     Return(Option<Expr>),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     pub ty: Type,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ExprKind {
     Integer(u64),
     Float(f64),
@@ -255,15 +292,40 @@ pub enum ExprKind {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+    /// `allocate(n)`（M14）：分配 `n` 字节，返回 `[]u8`。
+    Allocate(Box<Expr>),
+    /// `free(s)`（M14）：释放切片 `s` 指向的堆内存，返回 Unit。
+    Free(Box<Expr>),
+    /// 字符串拼接 `a + b`（M14）：隐式分配目标缓冲并返回新 `string`。
+    StringConcat {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    /// 取址 `&e`（M14）：产生 `*T`。
+    AddressOf(Box<Expr>),
+    /// 解引用 `*e`（M14）：读取指针指向的值。
+    Deref(Box<Expr>),
+    /// 指针字段访问 `q->x`（M14）：等价 `(*q).x`。
+    PtrField {
+        base: Box<Expr>,
+        field: usize,
+    },
+    /// 切片下标读取 `s[i]`（M14，带运行时越界检查）。
+    SliceIndex {
+        slice: Box<Expr>,
+        index: Box<Expr>,
+    },
+    /// 切片长度 `length(s)`（M14）：取 `{ ptr, len }` 的 len 分量。
+    SliceLen(Box<Expr>),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MatchArm {
     pub pattern: MatchPattern,
     pub body: Expr,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum MatchPattern {
     Variant {
         variant: usize,
@@ -301,6 +363,8 @@ impl std::fmt::Display for Type {
             Type::Array { element, length } => write!(formatter, "[{element}; {length}]"),
             Type::Struct(id) => write!(formatter, "struct@{}", id.0),
             Type::Enum(id) => write!(formatter, "enum@{}", id.0),
+            Type::Ptr(inner) => write!(formatter, "*{inner}"),
+            Type::Slice(element) => write!(formatter, "[]{element}"),
         }
     }
 }
@@ -322,5 +386,15 @@ impl std::fmt::Display for ScalarType {
             ScalarType::Bool => "bool",
             ScalarType::String => "string",
         })
+    }
+}
+
+impl std::fmt::Display for Pointer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Pointer::Scalar(scalar) => scalar.fmt(formatter),
+            Pointer::Struct(id) => write!(formatter, "struct@{}", id.0),
+            Pointer::Enum(id) => write!(formatter, "enum@{}", id.0),
+        }
     }
 }

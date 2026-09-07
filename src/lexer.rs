@@ -52,7 +52,13 @@ impl<'a> Lexer<'a> {
                 b'"' => self.string()?,
                 b'\'' => self.character()?,
                 b'+' => self.with_equal(TokenKind::Plus, TokenKind::PlusEqual),
-                b'-' => self.with_equal(TokenKind::Minus, TokenKind::MinusEqual),
+                b'-' => {
+                    if self.starts_with(b"->") {
+                        self.double(TokenKind::Arrow)
+                    } else {
+                        self.with_equal(TokenKind::Minus, TokenKind::MinusEqual)
+                    }
+                }
                 b'*' => self.with_equal(TokenKind::Star, TokenKind::StarEqual),
                 b'/' => self.with_equal(TokenKind::Slash, TokenKind::SlashEqual),
                 b'%' => self.with_equal(TokenKind::Percent, TokenKind::PercentEqual),
@@ -67,6 +73,7 @@ impl<'a> Lexer<'a> {
                 b'<' => self.with_equal(TokenKind::Less, TokenKind::LessEqual),
                 b'>' => self.with_equal(TokenKind::Greater, TokenKind::GreaterEqual),
                 b'&' if self.starts_with(b"&&") => self.double(TokenKind::AndAnd),
+                b'&' => self.single(TokenKind::Amper),
                 b'|' if self.starts_with(b"||") => self.double(TokenKind::OrOr),
                 b'.' if self.starts_with(b"..=") => self.triple(TokenKind::DotDotEqual),
                 b'.' if self.starts_with(b"..") => self.double(TokenKind::DotDot),
@@ -335,6 +342,8 @@ impl<'a> Lexer<'a> {
             "struct" => TokenKind::Struct,
             "enum" => TokenKind::Enum,
             "match" => TokenKind::Match,
+            "defer" => TokenKind::Defer,
+            "try" => TokenKind::Try,
             value => TokenKind::Identifier(value.to_string()),
         }
     }

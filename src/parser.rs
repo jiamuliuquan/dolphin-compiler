@@ -1,7 +1,7 @@
 use crate::ast::{
     AssignmentOperator, BinaryOperator, Block, EnumDecl, Expr, ExprKind, FieldDecl, ForIterable,
     Function, MatchArm, MatchPattern, Parameter, PathRef, Program, Statement, StatementKind,
-    StructDecl, TypeRef, TypeRefKind, UnaryOperator, VariantDecl,
+    StructDecl, TryResource, TypeRef, TypeRefKind, UnaryOperator, VariantDecl,
 };
 use crate::diagnostic::Diagnostic;
 use crate::source::{SourceFile, Span};
@@ -229,6 +229,17 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self, message: &str) -> Result<TypeRef, Diagnostic> {
         if let Some(left) = self.consume(&TokenKind::LeftBracket) {
+            if self.consume(&TokenKind::RightBracket).is_some() {
+                // 动态切片 `[]T`（M14）。
+                let element = self.parse_type(message)?;
+                let span = left.merge(element.span);
+                return Ok(TypeRef {
+                    kind: TypeRefKind::Slice {
+                        element: Box::new(element),
+                    },
+                    span,
+                });
+            }
             let element = self.parse_type(message)?;
             self.expect_simple(TokenKind::Semicolon, "expected `;` in array type")?;
             let (length, length_span) = self.expect_array_length()?;
@@ -240,6 +251,17 @@ impl<'a> Parser<'a> {
                     length,
                 },
                 span: left.merge(right).merge(length_span),
+            });
+        }
+        if let Some(star) = self.consume(&TokenKind::Star) {
+            // 显式指针 `*T`（M14）。
+            let inner = self.parse_type(message)?;
+            let span = star.merge(inner.span);
+            return Ok(TypeRef {
+                kind: TypeRefKind::Pointer {
+                    inner: Box::new(inner),
+                },
+                span,
             });
         }
         let (name, span) = self.expect_identifier(message)?;
@@ -282,6 +304,12 @@ impl<'a> Parser<'a> {
                 StatementKind::Continue
             }
             TokenKind::Return => self.parse_return()?,
+            TokenKind::Defer => self.parse_defer()?,
+            TokenKind::Try => self.parse_try()?,
+            TokenKind::Star => self.parse_deref_assignment()?,
+            TokenKind::Identifier(_) if self.is_ptr_field_assignment() => {
+                self.parse_ptr_field_assignment()?
+            }
             TokenKind::Identifier(_) if self.is_index_assignment() => {
                 self.parse_index_assignment()?
             }
@@ -421,6 +449,84 @@ impl<'a> Parser<'a> {
         Ok(StatementKind::Return(value))
     }
 
+    fn parse_defer(&mut self) -> Result<StatementKind, Diagnostic> {
+        self.advance();
+        let value = self.parse_expression(0)?;
+        self.expect_simple(
+            TokenKind::Semicolon,
+            "expected `;` after `defer` expression",
+        )?;
+        Ok(StatementKind::Defer { value })
+    }
+
+    fn parse_try(&mut self) -> Result<StatementKind, Diagnostic> {
+        self.advance();
+        self.expect_simple(TokenKind::LeftParen, "expected `(` after `try`")?;
+        let mut resources = Vec::new();
+        if !self.check(&TokenKind::RightParen) {
+            loop {
+                if !matches!(self.advance().kind, TokenKind::Var) {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        self.previous().span,
+                        "expected `var` in `try` resource declaration",
+                    ));
+                }
+                let (name, name_span) = self.expect_identifier("expected resource name")?;
+                self.expect_simple(TokenKind::Equal, "expected `=` in `try` resource")?;
+                let initializer = self.parse_expression(0)?;
+                resources.push(TryResource {
+                    name,
+                    name_span,
+                    initializer,
+                });
+                if self.consume(&TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        self.expect_simple(TokenKind::RightParen, "expected `)` after `try` resources")?;
+        let (_, body) = self.parse_block()?;
+        Ok(StatementKind::Try { resources, body })
+    }
+
+    fn parse_deref_assignment(&mut self) -> Result<StatementKind, Diagnostic> {
+        self.advance(); // consume `*`
+        let target = self.parse_expression(70)?;
+        let operator = self.parse_assignment_operator();
+        let value = self.parse_expression(0)?;
+        self.expect_simple(TokenKind::Semicolon, "expected `;` after assignment")?;
+        Ok(StatementKind::DerefAssignment {
+            target,
+            operator,
+            value,
+        })
+    }
+
+    fn parse_ptr_field_assignment(&mut self) -> Result<StatementKind, Diagnostic> {
+        // 首版指针字段赋值的 base 为变量名（指针存放在局部变量中）。
+        let (base_name, base_span) = self.expect_identifier("expected pointer variable")?;
+        let base = Expr {
+            kind: ExprKind::Name(base_name),
+            span: base_span,
+        };
+        self.expect_simple(
+            TokenKind::Arrow,
+            "expected `->` in pointer field assignment",
+        )?;
+        let (field, field_span) = self.expect_identifier("expected field name after `->`")?;
+        let operator = self.parse_assignment_operator();
+        let value = self.parse_expression(0)?;
+        self.expect_simple(TokenKind::Semicolon, "expected `;` after assignment")?;
+        Ok(StatementKind::PtrFieldAssignment {
+            base,
+            field,
+            field_span,
+            operator,
+            value,
+        })
+    }
+
     fn parse_expression(&mut self, minimum_precedence: u8) -> Result<Expr, Diagnostic> {
         let mut left = self.parse_prefix()?;
         loop {
@@ -551,6 +657,28 @@ impl<'a> Parser<'a> {
                     span,
                 }
             }
+            TokenKind::Amper => {
+                // 取址 `&e`（M14）：产生 `*T`。
+                let operand = self.parse_expression(70)?;
+                let span = token.span.merge(operand.span);
+                Expr {
+                    kind: ExprKind::AddressOf {
+                        operand: Box::new(operand),
+                    },
+                    span,
+                }
+            }
+            TokenKind::Star => {
+                // 解引用 `*e`（M14）：读取指针指向的值。
+                let operand = self.parse_expression(70)?;
+                let span = token.span.merge(operand.span);
+                Expr {
+                    kind: ExprKind::Deref {
+                        operand: Box::new(operand),
+                    },
+                    span,
+                }
+            }
             TokenKind::LeftParen => {
                 let expression = self.parse_expression(0)?;
                 let right =
@@ -588,6 +716,18 @@ impl<'a> Parser<'a> {
                 let span = expression.span.merge(field_span);
                 expression = Expr {
                     kind: ExprKind::Field {
+                        base: Box::new(expression),
+                        field,
+                        field_span,
+                    },
+                    span,
+                };
+            } else if self.consume(&TokenKind::Arrow).is_some() {
+                let (field, field_span) =
+                    self.expect_identifier("expected field name after `->`")?;
+                let span = expression.span.merge(field_span);
+                expression = Expr {
+                    kind: ExprKind::PtrField {
                         base: Box::new(expression),
                         field,
                         field_span,
@@ -729,6 +869,13 @@ impl<'a> Parser<'a> {
                     | TokenKind::SlashEqual
                     | TokenKind::PercentEqual
             )
+        )
+    }
+
+    fn is_ptr_field_assignment(&self) -> bool {
+        matches!(
+            self.tokens.get(self.position + 1).map(|token| &token.kind),
+            Some(TokenKind::Arrow)
         )
     }
 

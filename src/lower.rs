@@ -1,13 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     self, AssignmentOperator, BinaryOperator, ExprKind, ForIterable, Statement, StatementKind,
-    TypeRefKind, UnaryOperator,
+    TryResource, TypeRefKind, UnaryOperator,
 };
 use crate::diagnostic::Diagnostic;
 use crate::ir::{
-    self, BasicBlock, BlockId, EnumVariant, Expr, FunctionId, Instruction, LocalId, PrintPart,
-    StructField, Terminator, Type, TypeDef, TypeId,
+    self, BasicBlock, BlockId, EnumVariant, Expr, FunctionId, Instruction, LocalId, Pointer,
+    PrintPart, StructField, Terminator, Type, TypeDef, TypeId,
 };
 use crate::source::{SourceFile, Span};
 
@@ -181,28 +181,11 @@ impl<'a> ProgramLowerer<'a> {
             let mut parameters = Vec::with_capacity(function.parameters.len());
             for parameter in &function.parameters {
                 let ty = resolve_type(source, &parameter.ty, &self.types, &self.type_ids)?;
-                if is_user_type(ty) {
-                    return Err(Diagnostic::at(
-                        source,
-                        parameter.ty.span,
-                        "user-defined types cannot be passed to functions yet (M14)",
-                    ));
-                }
                 parameters.push(ty);
             }
             let is_main = function.name == "main";
             let return_type = match &function.return_type {
-                Some(ty) => {
-                    let resolved = resolve_type(source, ty, &self.types, &self.type_ids)?;
-                    if is_user_type(resolved) {
-                        return Err(Diagnostic::at(
-                            source,
-                            ty.span,
-                            "user-defined types cannot be returned from functions yet (M14)",
-                        ));
-                    }
-                    resolved
-                }
+                Some(ty) => resolve_type(source, ty, &self.types, &self.type_ids)?,
                 None if is_main => Type::I32,
                 None => Type::Unit,
             };
@@ -276,6 +259,10 @@ struct FunctionLowerer<'a> {
     parameters: Vec<LocalId>,
     locals: Vec<Type>,
     scopes: Vec<HashMap<String, Binding>>,
+    /// 词法块作用域的 `defer` 动作栈（每层一个逆序待执行列表，见 §12.8）。
+    deferred: Vec<Vec<Expr>>,
+    /// 词法块作用域的 `try` 资源名栈（用于逃逸检查，见 §4.2/§12.2）。
+    try_resources: Vec<HashSet<String>>,
     blocks: Vec<WorkingBlock>,
     current: BlockId,
     loops: Vec<LoopTargets>,
@@ -300,6 +287,8 @@ impl<'a> FunctionLowerer<'a> {
             parameters: Vec::new(),
             locals: Vec::new(),
             scopes: vec![HashMap::new()],
+            deferred: vec![Vec::new()],
+            try_resources: vec![HashSet::new()],
             blocks: vec![WorkingBlock {
                 instructions: Vec::new(),
                 terminator: None,
@@ -403,6 +392,7 @@ impl<'a> FunctionLowerer<'a> {
                 type_name,
                 initializer,
             } => {
+                self.check_try_escape(initializer, *name_span)?;
                 let value = self.lower_expr(initializer)?;
                 if value.ty == Type::Unit {
                     return Err(Diagnostic::at(
@@ -469,6 +459,7 @@ impl<'a> FunctionLowerer<'a> {
                 let targets = self.loops.last().copied().ok_or_else(|| {
                     Diagnostic::at(self.source, statement.span, "`break` used outside a loop")
                 })?;
+                self.emit_pending_defers();
                 self.terminate(Terminator::Jump(targets.break_block));
             }
             StatementKind::Continue => {
@@ -479,9 +470,24 @@ impl<'a> FunctionLowerer<'a> {
                         "`continue` used outside a loop",
                     )
                 })?;
+                self.emit_pending_defers();
                 self.terminate(Terminator::Jump(targets.continue_block));
             }
             StatementKind::Return(value) => self.lower_return(value.as_ref(), statement.span)?,
+            StatementKind::Defer { value } => self.lower_defer(value, statement.span)?,
+            StatementKind::Try { resources, body } => self.lower_try(resources, body)?,
+            StatementKind::DerefAssignment {
+                target,
+                operator,
+                value,
+            } => self.lower_deref_assignment(target, *operator, value)?,
+            StatementKind::PtrFieldAssignment {
+                base,
+                field,
+                field_span,
+                operator,
+                value,
+            } => self.lower_ptr_field_assignment(base, field, *field_span, *operator, value)?,
         }
         Ok(())
     }
@@ -493,6 +499,7 @@ impl<'a> FunctionLowerer<'a> {
         operator: AssignmentOperator,
         value: &ast::Expr,
     ) -> Result<(), Diagnostic> {
+        self.check_try_escape(value, name_span)?;
         let binding = self.lookup(name, name_span)?.clone();
         if !binding.mutable {
             return Err(Diagnostic::at(
@@ -552,63 +559,119 @@ impl<'a> FunctionLowerer<'a> {
                 format!("cannot modify immutable array `{name}`"),
             ));
         }
-        let Type::Array { element, length } = binding.ty else {
-            return Err(Diagnostic::at(
-                self.source,
-                name_span,
-                format!("cannot index value of type `{}`", binding.ty),
-            ));
-        };
-        check_constant_index(self.source, index, length)?;
+        if let Type::Array { length, .. } = binding.ty {
+            check_constant_index(self.source, index, length)?;
+        }
         let index = self.lower_expr(index)?;
         self.require_type(index.ty, Type::I32, name_span)?;
         let index_local = self.store_temporary(index);
         let right = self.lower_expr(value)?;
-        let element_type = element.as_type();
-        let assigned = match operator {
-            AssignmentOperator::Assign => {
-                self.require_type(right.ty, element_type, value.span)?;
-                right
-            }
-            operator => {
-                if !(element_type.is_integer() || element_type.is_float()) {
-                    return Err(Diagnostic::at(
-                        self.source,
-                        name_span,
-                        "compound assignment requires a numeric element",
-                    ));
-                }
-                self.require_type(right.ty, element_type, value.span)?;
-                Expr {
-                    kind: ir::ExprKind::Binary {
-                        operator: assignment_binary(operator),
-                        left: Box::new(Expr {
-                            kind: ir::ExprKind::Index {
-                                array: Box::new(Expr {
-                                    kind: ir::ExprKind::Local(binding.local),
-                                    ty: binding.ty,
+        match binding.ty {
+            Type::Array { element, .. } => {
+                let element_type = element.as_type();
+                let assigned = match operator {
+                    AssignmentOperator::Assign => {
+                        self.require_type(right.ty, element_type, value.span)?;
+                        right
+                    }
+                    operator => {
+                        if !(element_type.is_integer() || element_type.is_float()) {
+                            return Err(Diagnostic::at(
+                                self.source,
+                                name_span,
+                                "compound assignment requires a numeric element",
+                            ));
+                        }
+                        self.require_type(right.ty, element_type, value.span)?;
+                        Expr {
+                            kind: ir::ExprKind::Binary {
+                                operator: assignment_binary(operator),
+                                left: Box::new(Expr {
+                                    kind: ir::ExprKind::Index {
+                                        array: Box::new(Expr {
+                                            kind: ir::ExprKind::Local(binding.local),
+                                            ty: binding.ty,
+                                        }),
+                                        index: Box::new(Expr {
+                                            kind: ir::ExprKind::Local(index_local),
+                                            ty: Type::I32,
+                                        }),
+                                    },
+                                    ty: element_type,
                                 }),
-                                index: Box::new(Expr {
-                                    kind: ir::ExprKind::Local(index_local),
-                                    ty: Type::I32,
-                                }),
+                                right: Box::new(right),
                             },
                             ty: element_type,
-                        }),
-                        right: Box::new(right),
+                        }
+                    }
+                };
+                self.emit(Instruction::SetIndex {
+                    local: binding.local,
+                    index: Expr {
+                        kind: ir::ExprKind::Local(index_local),
+                        ty: Type::I32,
                     },
-                    ty: element_type,
-                }
+                    value: assigned,
+                });
             }
-        };
-        self.emit(Instruction::SetIndex {
-            local: binding.local,
-            index: Expr {
-                kind: ir::ExprKind::Local(index_local),
-                ty: Type::I32,
-            },
-            value: assigned,
-        });
+            Type::Slice(element) => {
+                let element_type = element.as_type();
+                let assigned = match operator {
+                    AssignmentOperator::Assign => {
+                        self.require_type(right.ty, element_type, value.span)?;
+                        right
+                    }
+                    operator => {
+                        if !(element_type.is_integer() || element_type.is_float()) {
+                            return Err(Diagnostic::at(
+                                self.source,
+                                name_span,
+                                "compound assignment requires a numeric element",
+                            ));
+                        }
+                        self.require_type(right.ty, element_type, value.span)?;
+                        Expr {
+                            kind: ir::ExprKind::Binary {
+                                operator: assignment_binary(operator),
+                                left: Box::new(Expr {
+                                    kind: ir::ExprKind::SliceIndex {
+                                        slice: Box::new(Expr {
+                                            kind: ir::ExprKind::Local(binding.local),
+                                            ty: binding.ty,
+                                        }),
+                                        index: Box::new(Expr {
+                                            kind: ir::ExprKind::Local(index_local),
+                                            ty: Type::I32,
+                                        }),
+                                    },
+                                    ty: element_type,
+                                }),
+                                right: Box::new(right),
+                            },
+                            ty: element_type,
+                        }
+                    }
+                };
+                self.emit(Instruction::SetSliceIndex {
+                    slice: Expr {
+                        kind: ir::ExprKind::Local(binding.local),
+                        ty: binding.ty,
+                    },
+                    index: Expr {
+                        kind: ir::ExprKind::Local(index_local),
+                        ty: Type::I32,
+                    },
+                    value: assigned,
+                });
+            }
+            other => {
+                return Err(Diagnostic::at(
+                    self.source,
+                    name_span,
+                    format!("cannot index value of type `{other}`"),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -706,6 +769,7 @@ impl<'a> FunctionLowerer<'a> {
                 ));
             }
             (expected, Some(value)) => {
+                self.check_try_escape(value, span)?;
                 let value = self.lower_expr(value)?;
                 self.require_type(value.ty, expected, span)?;
                 Some(value)
@@ -718,7 +782,215 @@ impl<'a> FunctionLowerer<'a> {
                 ));
             }
         };
+        self.emit_pending_defers();
         self.terminate(Terminator::Return(value));
+        Ok(())
+    }
+
+    fn lower_defer(&mut self, value: &ast::Expr, span: Span) -> Result<(), Diagnostic> {
+        let action = self.lower_expr(value)?;
+        if action.ty != Type::Unit {
+            return Err(Diagnostic::at(
+                self.source,
+                span,
+                "`defer` expects a statement-like expression (e.g. a function call)",
+            ));
+        }
+        self.deferred
+            .last_mut()
+            .expect("defer scope is balanced")
+            .push(action);
+        Ok(())
+    }
+
+    fn lower_try(
+        &mut self,
+        resources: &[TryResource],
+        body: &[Statement],
+    ) -> Result<(), Diagnostic> {
+        // 先 lower 各资源的初始化表达式（在外层作用域，避免后续逃逸检查误判）。
+        let mut resource_inits = Vec::with_capacity(resources.len());
+        for resource in resources {
+            let value = self.lower_expr(&resource.initializer)?;
+            let Type::Slice(crate::ir::ScalarType::U8) = value.ty else {
+                return Err(Diagnostic::at(
+                    self.source,
+                    resource.initializer.span,
+                    "`try` resource must be a `[]u8` slice (e.g. from `allocate`)",
+                ));
+            };
+            resource_inits.push((resource.name.clone(), resource.name_span, value));
+        }
+        // 建立 try 作用域：绑定资源变量 + 标记资源名 + 逆序 defer free。
+        self.scopes.push(HashMap::new());
+        self.deferred.push(Vec::new());
+        self.try_resources.push(HashSet::new());
+        for (name, _name_span, _value) in resource_inits.iter() {
+            self.try_resources
+                .last_mut()
+                .expect("try scope is balanced")
+                .insert(name.clone());
+        }
+        // 按声明顺序 allocate + 注册 defer free；出块时 deferred 栈 LIFO 逆序释放
+        // （§12.8：声明顺序的逆序，即后声明的资源先释放）。
+        for (name, _name_span, value) in resource_inits.into_iter() {
+            let local = LocalId(self.locals.len());
+            self.locals.push(value.ty);
+            self.emit(Instruction::SetLocal { local, value });
+            self.scopes.last_mut().unwrap().insert(
+                name.clone(),
+                Binding {
+                    local,
+                    ty: Type::Slice(crate::ir::ScalarType::U8),
+                    mutable: true,
+                },
+            );
+            let free = Expr {
+                kind: ir::ExprKind::Free(Box::new(Expr {
+                    kind: ir::ExprKind::Local(local),
+                    ty: Type::Slice(crate::ir::ScalarType::U8),
+                })),
+                ty: Type::Unit,
+            };
+            self.deferred
+                .last_mut()
+                .expect("try scope is balanced")
+                .push(free);
+        }
+        let result = self.lower_statements(body);
+        let layer = self.deferred.pop().expect("try scope is balanced");
+        for action in layer.into_iter().rev() {
+            self.emit(Instruction::Evaluate(action));
+        }
+        self.try_resources.pop();
+        self.scopes.pop();
+        result
+    }
+
+    fn lower_deref_assignment(
+        &mut self,
+        target: &ast::Expr,
+        operator: AssignmentOperator,
+        value: &ast::Expr,
+    ) -> Result<(), Diagnostic> {
+        let target_span = target.span;
+        let target = self.lower_expr(target)?;
+        let Type::Ptr(pointer) = target.ty else {
+            return Err(Diagnostic::at(
+                self.source,
+                target_span,
+                format!("cannot dereference value of type `{}`", target.ty),
+            ));
+        };
+        let pointee = pointer_type(pointer, self.types);
+        let pointer_local = self.store_temporary(target);
+        let pointer_expr = local_expr(pointer_local, Type::Ptr(pointer));
+        let right = self.lower_expr(value)?;
+        let assigned = match operator {
+            AssignmentOperator::Assign => {
+                self.require_type(right.ty, pointee, value.span)?;
+                right
+            }
+            operator => {
+                if !(pointee.is_integer() || pointee.is_float()) {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        value.span,
+                        "compound assignment requires a numeric pointee",
+                    ));
+                }
+                self.require_type(right.ty, pointee, value.span)?;
+                Expr {
+                    kind: ir::ExprKind::Binary {
+                        operator: assignment_binary(operator),
+                        left: Box::new(Expr {
+                            kind: ir::ExprKind::Deref(Box::new(pointer_expr.clone())),
+                            ty: pointee,
+                        }),
+                        right: Box::new(right),
+                    },
+                    ty: pointee,
+                }
+            }
+        };
+        self.emit(Instruction::SetDeref {
+            pointer: pointer_expr,
+            value: assigned,
+        });
+        Ok(())
+    }
+
+    fn lower_ptr_field_assignment(
+        &mut self,
+        base: &ast::Expr,
+        field: &str,
+        field_span: Span,
+        operator: AssignmentOperator,
+        value: &ast::Expr,
+    ) -> Result<(), Diagnostic> {
+        let base_value = self.lower_expr(base)?;
+        let Type::Ptr(crate::ir::Pointer::Struct(id)) = base_value.ty else {
+            return Err(Diagnostic::at(
+                self.source,
+                field_span,
+                format!(
+                    "`->` requires a pointer to a struct, found `{}`",
+                    base_value.ty
+                ),
+            ));
+        };
+        let TypeDef::Struct { fields, .. } = &self.types[id.0] else {
+            unreachable!("pointer field access resolves a struct type");
+        };
+        let index = fields
+            .iter()
+            .position(|field_def| field_def.name == field)
+            .ok_or_else(|| {
+                Diagnostic::at(
+                    self.source,
+                    field_span,
+                    format!("struct has no field named `{field}`"),
+                )
+            })?;
+        let field_ty = fields[index].ty;
+        let pointer_local = self.store_temporary(base_value);
+        let pointer_expr = local_expr(pointer_local, Type::Ptr(crate::ir::Pointer::Struct(id)));
+        let right = self.lower_expr(value)?;
+        let assigned = match operator {
+            AssignmentOperator::Assign => {
+                self.require_type(right.ty, field_ty, value.span)?;
+                right
+            }
+            operator => {
+                if !(field_ty.is_integer() || field_ty.is_float()) {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        value.span,
+                        "compound assignment requires a numeric field",
+                    ));
+                }
+                self.require_type(right.ty, field_ty, value.span)?;
+                Expr {
+                    kind: ir::ExprKind::Binary {
+                        operator: assignment_binary(operator),
+                        left: Box::new(Expr {
+                            kind: ir::ExprKind::PtrField {
+                                base: Box::new(pointer_expr.clone()),
+                                field: index,
+                            },
+                            ty: field_ty,
+                        }),
+                        right: Box::new(right),
+                    },
+                    ty: field_ty,
+                }
+            }
+        };
+        self.emit(Instruction::SetPtrField {
+            pointer: pointer_expr,
+            field: index,
+            value: assigned,
+        });
         Ok(())
     }
 
@@ -1081,23 +1353,32 @@ impl<'a> FunctionLowerer<'a> {
             }
             ExprKind::Index { array, index } => {
                 let array_value = self.lower_expr(array)?;
-                let Type::Array { element, length } = array_value.ty else {
-                    return Err(Diagnostic::at(
-                        self.source,
-                        array.span,
-                        format!("cannot index value of type `{}`", array_value.ty),
-                    ));
-                };
-                check_constant_index(self.source, index, length)?;
                 let index_value = self.lower_expr(index)?;
                 self.require_type(index_value.ty, Type::I32, index.span)?;
-                Ok(Expr {
-                    kind: ir::ExprKind::Index {
-                        array: Box::new(array_value),
-                        index: Box::new(index_value),
-                    },
-                    ty: element.as_type(),
-                })
+                match array_value.ty {
+                    Type::Array { element, length } => {
+                        check_constant_index(self.source, index, length)?;
+                        Ok(Expr {
+                            kind: ir::ExprKind::Index {
+                                array: Box::new(array_value),
+                                index: Box::new(index_value),
+                            },
+                            ty: element.as_type(),
+                        })
+                    }
+                    Type::Slice(element) => Ok(Expr {
+                        kind: ir::ExprKind::SliceIndex {
+                            slice: Box::new(array_value),
+                            index: Box::new(index_value),
+                        },
+                        ty: element.as_type(),
+                    }),
+                    other => Err(Diagnostic::at(
+                        self.source,
+                        array.span,
+                        format!("cannot index value of type `{other}`"),
+                    )),
+                }
             }
             ExprKind::Name(name) => {
                 let binding = self.lookup(name, expression.span)?;
@@ -1170,6 +1451,13 @@ impl<'a> FunctionLowerer<'a> {
                 field,
                 field_span,
             } => self.lower_field(base, field, *field_span),
+            ExprKind::AddressOf { operand } => self.lower_address_of(operand, expression.span),
+            ExprKind::Deref { operand } => self.lower_deref(operand, expression.span),
+            ExprKind::PtrField {
+                base,
+                field,
+                field_span,
+            } => self.lower_ptr_field(base, field, *field_span),
             ExprKind::Match { value, arms } => self.lower_match(value, arms),
         }
     }
@@ -1189,10 +1477,69 @@ impl<'a> FunctionLowerer<'a> {
                 ));
             }
             let value = self.lower_expr(&arguments[0])?;
-            self.require_type(value.ty, Type::String, arguments[0].span)?;
+            match value.ty {
+                Type::String => {
+                    return Ok(Expr {
+                        kind: ir::ExprKind::StringLength(Box::new(value)),
+                        ty: Type::I32,
+                    });
+                }
+                Type::Slice(_) => {
+                    return Ok(Expr {
+                        kind: ir::ExprKind::SliceLen(Box::new(value)),
+                        ty: Type::I32,
+                    });
+                }
+                other => {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        arguments[0].span,
+                        format!("`length` expects a string or slice, found `{other}`"),
+                    ));
+                }
+            }
+        }
+        if callee == "allocate" {
+            if arguments.len() != 1 {
+                return Err(Diagnostic::at(
+                    self.source,
+                    callee_span,
+                    "`allocate` expects one argument",
+                ));
+            }
+            let value = self.lower_expr(&arguments[0])?;
+            if !value.ty.is_integer() {
+                return Err(Diagnostic::at(
+                    self.source,
+                    arguments[0].span,
+                    format!("`allocate` expects an integer length, found `{}`", value.ty),
+                ));
+            }
             return Ok(Expr {
-                kind: ir::ExprKind::StringLength(Box::new(value)),
-                ty: Type::I32,
+                kind: ir::ExprKind::Allocate(Box::new(value)),
+                ty: Type::Slice(crate::ir::ScalarType::U8),
+            });
+        }
+        if callee == "free" {
+            if arguments.len() != 1 {
+                return Err(Diagnostic::at(
+                    self.source,
+                    callee_span,
+                    "`free` expects one argument",
+                ));
+            }
+            let value = self.lower_expr(&arguments[0])?;
+            // §12.3a：`string` 与 `[]u8` 别名等价，`free` 直接复用字节切片通道。
+            if !matches!(value.ty, Type::Slice(_) | Type::String) {
+                return Err(Diagnostic::at(
+                    self.source,
+                    arguments[0].span,
+                    format!("`free` expects a `[]u8` slice, found `{}`", value.ty),
+                ));
+            }
+            return Ok(Expr {
+                kind: ir::ExprKind::Free(Box::new(value)),
+                ty: Type::Unit,
             });
         }
         if matches!(callee, "print" | "println") {
@@ -1391,6 +1738,92 @@ impl<'a> FunctionLowerer<'a> {
         })
     }
 
+    fn lower_address_of(&mut self, operand: &ast::Expr, span: Span) -> Result<Expr, Diagnostic> {
+        // 首版最小模型：`&` 仅作用于局部变量（`&p`）。字段地址 `&s.field` 属文档约定
+        // 的安全子集（§12.7），本里程碑不实现。
+        if !matches!(operand.kind, ExprKind::Name(_)) {
+            return Err(Diagnostic::at(
+                self.source,
+                span,
+                "`&` can only take the address of a local variable in this milestone",
+            ));
+        }
+        let value = self.lower_expr(operand)?;
+        let pointer = match value.ty {
+            Type::Struct(id) => crate::ir::Pointer::Struct(id),
+            Type::Enum(id) => crate::ir::Pointer::Enum(id),
+            ty => match ty.as_scalar() {
+                Some(scalar) => crate::ir::Pointer::Scalar(scalar),
+                None => {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        span,
+                        format!("cannot take the address of a value of type `{ty}`"),
+                    ));
+                }
+            },
+        };
+        Ok(Expr {
+            kind: ir::ExprKind::AddressOf(Box::new(value)),
+            ty: Type::Ptr(pointer),
+        })
+    }
+
+    fn lower_deref(&mut self, operand: &ast::Expr, span: Span) -> Result<Expr, Diagnostic> {
+        let value = self.lower_expr(operand)?;
+        let Type::Ptr(pointer) = value.ty else {
+            return Err(Diagnostic::at(
+                self.source,
+                span,
+                format!("cannot dereference value of type `{}`", value.ty),
+            ));
+        };
+        let pointee = pointer_type(pointer, self.types);
+        Ok(Expr {
+            kind: ir::ExprKind::Deref(Box::new(value)),
+            ty: pointee,
+        })
+    }
+
+    fn lower_ptr_field(
+        &mut self,
+        base: &ast::Expr,
+        field: &str,
+        field_span: Span,
+    ) -> Result<Expr, Diagnostic> {
+        let base_value = self.lower_expr(base)?;
+        let Type::Ptr(crate::ir::Pointer::Struct(id)) = base_value.ty else {
+            return Err(Diagnostic::at(
+                self.source,
+                field_span,
+                format!(
+                    "`->` requires a pointer to a struct, found `{}`",
+                    base_value.ty
+                ),
+            ));
+        };
+        let TypeDef::Struct { fields, .. } = &self.types[id.0] else {
+            unreachable!("pointer field access resolves a struct type");
+        };
+        let index = fields
+            .iter()
+            .position(|field_def| field_def.name == field)
+            .ok_or_else(|| {
+                Diagnostic::at(
+                    self.source,
+                    field_span,
+                    format!("struct has no field named `{field}`"),
+                )
+            })?;
+        Ok(Expr {
+            kind: ir::ExprKind::PtrField {
+                base: Box::new(base_value),
+                field: index,
+            },
+            ty: fields[index].ty,
+        })
+    }
+
     fn lower_match(
         &mut self,
         value: &ast::Expr,
@@ -1541,6 +1974,17 @@ impl<'a> FunctionLowerer<'a> {
     ) -> Result<Expr, Diagnostic> {
         let left = self.lower_expr(left)?;
         let right = self.lower_expr(right)?;
+        // 字符串拼接 `a + b`（M14 §12.3b）：唯一隐式分配点。
+        if matches!(operator, BinaryOperator::Add) && left.ty == Type::String {
+            self.require_type(right.ty, Type::String, span)?;
+            return Ok(Expr {
+                kind: ir::ExprKind::StringConcat {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                ty: Type::String,
+            });
+        }
         let ty = match operator {
             BinaryOperator::Add
             | BinaryOperator::Subtract
@@ -1637,9 +2081,54 @@ impl<'a> FunctionLowerer<'a> {
         operation: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
     ) -> Result<T, Diagnostic> {
         self.scopes.push(HashMap::new());
+        self.deferred.push(Vec::new());
+        self.try_resources.push(HashSet::new());
         let result = operation(self);
+        // fall-through：本层 defer 动作逆序执行（提前 return 已由 emit_pending_defers drain）。
+        let layer = self.deferred.pop().expect("defer scope is balanced");
+        for action in layer.into_iter().rev() {
+            self.emit(Instruction::Evaluate(action));
+        }
+        self.try_resources.pop();
         self.scopes.pop();
         result
+    }
+
+    /// 在提前退出（return / break / continue）前，从最内到最外执行所有挂起的 defer。
+    fn emit_pending_defers(&mut self) {
+        let mut pending = Vec::new();
+        for layer in self.deferred.iter_mut().rev() {
+            for action in layer.drain(..).rev() {
+                pending.push(action);
+            }
+        }
+        for action in pending {
+            self.emit(Instruction::Evaluate(action));
+        }
+    }
+
+    /// 判断当前作用域链中，`name` 是否为 `try` 资源。
+    fn is_try_resource(&self, name: &str) -> bool {
+        self.try_resources
+            .iter()
+            .rev()
+            .any(|layer| layer.contains(name))
+    }
+
+    /// `try` 资源逃逸检查（§4.2/§12.2）：资源名作为「值」被复制/绑定/返回即报错。
+    ///
+    /// 语法级检查：只要 `value` 顶层直接是资源名（`Name(resource)`），即判定逃逸；
+    /// 原地写入（`buf[i] = ...`）与只读传入（`print(buf)`）不受影响，因为它们
+    /// 不把资源名作为「值」绑定给新变量。
+    fn check_try_escape(&self, value: &ast::Expr, span: Span) -> Result<(), Diagnostic> {
+        if matches!(&value.kind, ast::ExprKind::Name(name) if self.is_try_resource(name)) {
+            return Err(Diagnostic::at(
+                self.source,
+                span,
+                "`try` resource cannot escape its block (re-bind, assign out, or return)",
+            ));
+        }
+        Ok(())
     }
 
     fn new_block(&mut self) -> BlockId {
@@ -1780,6 +2269,39 @@ fn resolve_type(
                 length: *length,
             })
         }
+        TypeRefKind::Slice { element } => {
+            // 首版切片仅支持 `[]u8`（与 `string` 别名等价，见提案 §12.3a/§12.4）。
+            let element_type = resolve_type(source, element, types, type_ids)?;
+            let scalar = element_type.as_scalar().ok_or_else(|| {
+                Diagnostic::at(source, element.span, "slice elements must be scalar values")
+            })?;
+            if !matches!(scalar, crate::ir::ScalarType::U8) {
+                return Err(Diagnostic::at(
+                    source,
+                    element.span,
+                    "only `[]u8` slices are supported in this milestone",
+                ));
+            }
+            Ok(Type::Slice(scalar))
+        }
+        TypeRefKind::Pointer { inner } => {
+            let inner_type = resolve_type(source, inner, types, type_ids)?;
+            let pointer = match inner_type {
+                Type::Struct(id) => crate::ir::Pointer::Struct(id),
+                Type::Enum(id) => crate::ir::Pointer::Enum(id),
+                ty => match ty.as_scalar() {
+                    Some(scalar) => crate::ir::Pointer::Scalar(scalar),
+                    None => {
+                        return Err(Diagnostic::at(
+                            source,
+                            inner.span,
+                            format!("cannot form a pointer to `{ty}` in this milestone"),
+                        ));
+                    }
+                },
+            };
+            Ok(Type::Ptr(pointer))
+        }
     }
 }
 
@@ -1788,6 +2310,15 @@ fn type_of(def: &TypeDef, id: TypeId) -> Type {
     match def {
         TypeDef::Struct { .. } => Type::Struct(id),
         TypeDef::Enum { .. } => Type::Enum(id),
+    }
+}
+
+/// 解引用指针后的类型（M14）。
+fn pointer_type(pointer: Pointer, types: &[TypeDef]) -> Type {
+    match pointer {
+        Pointer::Scalar(scalar) => scalar.as_type(),
+        Pointer::Struct(id) => type_of(&types[id.0], id),
+        Pointer::Enum(id) => type_of(&types[id.0], id),
     }
 }
 
@@ -1940,10 +2471,6 @@ fn is_castable(ty: Type) -> bool {
     ty.is_integer() || ty.is_float() || ty == Type::Char
 }
 
-fn is_user_type(ty: Type) -> bool {
-    matches!(ty, Type::Struct(_) | Type::Enum(_))
-}
-
 fn parse_unsuffixed_integer(value: &str) -> Option<i64> {
     (!value.contains('_') && !value.contains(['.', 'e', 'E']))
         .then(|| value.parse::<i64>().ok())
@@ -2084,21 +2611,12 @@ mod tests {
     }
 
     #[test]
-    fn m13_rejects_user_types_in_function_signatures() {
-        let param = lower_text(
-            "struct Point { x: i32 } fn area(p: Point): i32 { return p.x; } fn main() {}",
-        )
-        .unwrap_err();
-        assert!(param.to_string().contains("cannot be passed to functions"));
-
-        let ret = lower_text(
-            "struct Point { x: i32 } fn make(): Point { return Point(1); } fn main() {}",
-        )
-        .unwrap_err();
-        assert!(
-            ret.to_string()
-                .contains("cannot be returned from functions")
-        );
+    fn m14_allows_user_types_in_function_signatures() {
+        // M14 起结构体可作为函数参数与返回值（按值传递，浅拷贝）。
+        lower_text("struct Point { x: i32 } fn area(p: Point): i32 { return p.x; } fn main() {}")
+            .unwrap();
+        lower_text("struct Point { x: i32 } fn make(): Point { return Point(1); } fn main() {}")
+            .unwrap();
     }
 
     #[test]

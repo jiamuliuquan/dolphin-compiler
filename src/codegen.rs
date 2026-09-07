@@ -77,7 +77,12 @@ fn declare_user_functions(
 ) -> Result<Vec<FuncId>, Diagnostic> {
     let mut ids = Vec::with_capacity(program.functions.len());
     for function in &program.functions {
-        let signature = function_signature(module, function, function.id == program.main);
+        let signature = function_signature(
+            module,
+            function,
+            function.id == program.main,
+            &program.types,
+        );
         let symbol = if function.id == program.main {
             // `main` 跨越 C 边界：CRT 按平台 C 符号规则查找入口。
             platform.c_symbol("main")
@@ -109,6 +114,9 @@ struct RuntimeIds {
     print_bool: FuncId,
     print_string: FuncId,
     string_equal: FuncId,
+    allocate: FuncId,
+    free: FuncId,
+    string_concat: FuncId,
 }
 
 fn declare_runtime_functions(
@@ -165,6 +173,55 @@ fn declare_runtime_functions(
                     ))
                 })?
         },
+        allocate: {
+            // dolphin_allocate(n: usize) -> *void
+            let mut signature = module.make_signature();
+            signature.params.push(AbiParam::new(pointer));
+            signature.returns.push(AbiParam::new(pointer));
+            module
+                .declare_function(
+                    &platform.c_symbol("dolphin_allocate"),
+                    Linkage::Import,
+                    &signature,
+                )
+                .map_err(|error| {
+                    Diagnostic::plain(format!("could not declare allocate runtime: {error}"))
+                })?
+        },
+        free: {
+            // dolphin_free(ptr: *void, len: usize) -> void
+            let mut signature = module.make_signature();
+            signature
+                .params
+                .extend([pointer, pointer].map(AbiParam::new));
+            module
+                .declare_function(
+                    &platform.c_symbol("dolphin_free"),
+                    Linkage::Import,
+                    &signature,
+                )
+                .map_err(|error| {
+                    Diagnostic::plain(format!("could not declare free runtime: {error}"))
+                })?
+        },
+        string_concat: {
+            // dolphin_string_concat(a: *void, a_len, b: *void, b_len) -> *void（新缓冲区指针，
+            // 长度由调用方用 a_len + b_len 计算，避免跨 C 边界返回二元组的 ABI 陷阱）。
+            let mut signature = module.make_signature();
+            signature
+                .params
+                .extend([pointer, pointer, pointer, pointer].map(AbiParam::new));
+            signature.returns.push(AbiParam::new(pointer));
+            module
+                .declare_function(
+                    &platform.c_symbol("dolphin_string_concat"),
+                    Linkage::Import,
+                    &signature,
+                )
+                .map_err(|error| {
+                    Diagnostic::plain(format!("could not declare string concat runtime: {error}"))
+                })?
+        },
     })
 }
 
@@ -181,6 +238,23 @@ fn declare_strings(
                         collect_expr_strings(value, &mut values)
                     }
                     Instruction::SetIndex { index, value, .. } => {
+                        collect_expr_strings(index, &mut values);
+                        collect_expr_strings(value, &mut values);
+                    }
+                    Instruction::SetDeref { pointer, value } => {
+                        collect_expr_strings(pointer, &mut values);
+                        collect_expr_strings(value, &mut values);
+                    }
+                    Instruction::SetPtrField { pointer, value, .. } => {
+                        collect_expr_strings(pointer, &mut values);
+                        collect_expr_strings(value, &mut values);
+                    }
+                    Instruction::SetSliceIndex {
+                        slice,
+                        index,
+                        value,
+                    } => {
+                        collect_expr_strings(slice, &mut values);
                         collect_expr_strings(index, &mut values);
                         collect_expr_strings(value, &mut values);
                     }
@@ -269,6 +343,21 @@ fn collect_expr_strings(expression: &Expr, values: &mut HashSet<String>) {
             }
         }
         ExprKind::Field { base, .. } => collect_expr_strings(base, values),
+        ExprKind::PtrField { base, .. } => collect_expr_strings(base, values),
+        ExprKind::AddressOf(operand) | ExprKind::Deref(operand) => {
+            collect_expr_strings(operand, values)
+        }
+        ExprKind::Allocate(operand) | ExprKind::Free(operand) | ExprKind::SliceLen(operand) => {
+            collect_expr_strings(operand, values)
+        }
+        ExprKind::StringConcat { left, right } => {
+            collect_expr_strings(left, values);
+            collect_expr_strings(right, values);
+        }
+        ExprKind::SliceIndex { slice, index } => {
+            collect_expr_strings(slice, values);
+            collect_expr_strings(index, values);
+        }
         ExprKind::Match { value, arms } => {
             collect_expr_strings(value, values);
             for arm in arms {
@@ -294,7 +383,12 @@ fn define_function(
     let target_config = module.target_config();
     let pointer_type = target_config.pointer_type();
     let mut context = module.make_context();
-    context.func.signature = function_signature(module, function, function.id == program.main);
+    context.func.signature = function_signature(
+        module,
+        function,
+        function.id == program.main,
+        &program.types,
+    );
 
     let user_refs: Vec<FuncRef> = function_ids
         .iter()
@@ -310,6 +404,9 @@ fn define_function(
         print_bool: module.declare_func_in_func(runtime_ids.print_bool, &mut context.func),
         print_string: module.declare_func_in_func(runtime_ids.print_string, &mut context.func),
         string_equal: module.declare_func_in_func(runtime_ids.string_equal, &mut context.func),
+        allocate: module.declare_func_in_func(runtime_ids.allocate, &mut context.func),
+        free: module.declare_func_in_func(runtime_ids.free, &mut context.func),
+        string_concat: module.declare_func_in_func(runtime_ids.string_concat, &mut context.func),
     };
     let string_refs: HashMap<String, GlobalValue> = strings
         .iter()
@@ -340,7 +437,12 @@ fn define_function(
             .collect();
 
         builder.switch_to_block(entry);
-        let shape = FunctionShape::of(function, function.id == program.main);
+        let shape = FunctionShape::of(
+            function,
+            function.id == program.main,
+            &program.types,
+            pointer_type,
+        );
         let sret_param = initialize_parameters(
             &mut builder,
             function,
@@ -398,9 +500,9 @@ struct FunctionShape {
 }
 
 impl FunctionShape {
-    fn of(function: &ir::Function, is_main: bool) -> Self {
+    fn of(function: &ir::Function, is_main: bool, types: &[TypeDef], pointer: clif::Type) -> Self {
         // main 返回 i32，永不使用 sret。
-        let uses_sret = !is_main && abi_width(function.return_type) > 2;
+        let uses_sret = !is_main && abi_width(function.return_type, types, pointer) > 2;
         Self { uses_sret }
     }
 }
@@ -409,6 +511,7 @@ fn function_signature(
     module: &ObjectModule,
     function: &ir::Function,
     is_main: bool,
+    types: &[TypeDef],
 ) -> clif::Signature {
     let pointer = module.target_config().pointer_type();
     let mut signature = module.make_signature();
@@ -418,7 +521,7 @@ fn function_signature(
         signature.returns.push(AbiParam::new(types::I32));
         return signature;
     }
-    let shape = FunctionShape::of(function, is_main);
+    let shape = FunctionShape::of(function, is_main, types, pointer);
     if shape.uses_sret {
         // 隐藏的 sret 指针参数（第 0 个）。按 Cranelift 约定，此时 returns 必须为空：
         // sret 指针由 lowering 自动作为返回值返回。
@@ -427,32 +530,40 @@ fn function_signature(
             .push(AbiParam::special(pointer, ArgumentPurpose::StructReturn));
     }
     for parameter in &function.parameters {
-        append_abi_type(&mut signature.params, function.locals[parameter.0], pointer);
+        append_abi_type(
+            &mut signature.params,
+            function.locals[parameter.0],
+            types,
+            pointer,
+        );
     }
     if !shape.uses_sret {
-        append_abi_type(&mut signature.returns, function.return_type, pointer);
+        append_abi_type(&mut signature.returns, function.return_type, types, pointer);
     }
     signature
 }
 
-fn append_abi_type(parameters: &mut Vec<AbiParam>, ty: Type, pointer: clif::Type) {
-    match ty {
-        Type::Unit => {}
-        ty if ty.is_integer() || ty.is_float() || ty == Type::Char => {
-            parameters.push(AbiParam::new(clif_type(ty, pointer)))
-        }
-        Type::Bool => parameters.push(AbiParam::new(types::I8)),
-        Type::String => {
-            parameters.push(AbiParam::new(pointer));
-            parameters.push(AbiParam::new(pointer));
-        }
-        Type::Array { element, length } => {
-            for _ in 0..length {
-                append_abi_type(parameters, element.as_type(), pointer);
-            }
-        }
-        _ => unreachable!("all ABI scalar types are covered"),
+/// 把类型展开为 ABI 参数：结构体/枚举按分量平铺（值语义），标量/切片/指针直接映射。
+fn append_abi_type(
+    parameters: &mut Vec<AbiParam>,
+    ty: Type,
+    types: &[TypeDef],
+    pointer: clif::Type,
+) {
+    if ty == Type::Unit {
+        return;
     }
+    for (component_type, _) in component_layout(ty, types, pointer) {
+        parameters.push(AbiParam::new(component_type));
+    }
+}
+
+/// 类型在 ABI 中的分量数（结构体/枚举为分量平铺后的个数）。
+fn abi_width(ty: Type, types: &[TypeDef], pointer: clif::Type) -> usize {
+    if ty == Type::Unit {
+        return 0;
+    }
+    component_layout(ty, types, pointer).len()
 }
 
 #[derive(Clone, Copy)]
@@ -504,22 +615,12 @@ fn initialize_parameters(
         None
     };
     for local in &function.parameters {
-        let width = abi_width(slots[local.0].ty);
+        let width = abi_width(slots[local.0].ty, types, pointer);
         let value = RuntimeValue::from_slice(slots[local.0].ty, &values[index..index + width]);
         store_local(builder, slots[local.0], value, types, pointer);
         index += width;
     }
     sret_param
-}
-
-fn abi_width(ty: Type) -> usize {
-    match ty {
-        Type::Unit => 0,
-        ty if ty.is_integer() || ty.is_float() || matches!(ty, Type::Char | Type::Bool) => 1,
-        Type::String => 2,
-        Type::Array { element, length } => abi_width(element.as_type()) * length,
-        _ => unreachable!("all ABI scalar types are covered"),
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -533,6 +634,9 @@ struct RuntimeRefs {
     print_bool: FuncRef,
     print_string: FuncRef,
     string_equal: FuncRef,
+    allocate: FuncRef,
+    free: FuncRef,
+    string_concat: FuncRef,
 }
 
 #[derive(Clone)]
@@ -603,7 +707,7 @@ impl Emitter<'_, '_> {
                     unreachable!("SetIndex targets an array")
                 };
                 self.bounds_check(index, length);
-                let width = abi_width(element.as_type());
+                let width = abi_width(element.as_type(), self.types, self.pointer_type);
                 let mut updated = array.values.clone();
                 for array_index in 0..length {
                     let expected = self.builder.ins().iconst(types::I32, array_index as i64);
@@ -627,6 +731,61 @@ impl Emitter<'_, '_> {
                     self.types,
                     self.pointer_type,
                 );
+            }
+            Instruction::SetDeref { pointer, value } => {
+                // `*p = v`：把 value 各分量写入 p 指向的内存。
+                let pointer_value = self.emit_expr(pointer).one();
+                let value = self.emit_expr(value);
+                let layout = component_layout(value.ty, self.types, self.pointer_type);
+                for ((_, offset), component) in layout.into_iter().zip(value.values) {
+                    self.builder
+                        .ins()
+                        .store(MemFlagsData::new(), component, pointer_value, offset);
+                }
+            }
+            Instruction::SetPtrField {
+                pointer,
+                field,
+                value,
+            } => {
+                // `q->x = v`：先计算字段在结构体里的偏移，再写入。
+                let pointer_value = self.emit_expr(pointer).one();
+                let value = self.emit_expr(value);
+                let field_offset = self.struct_field_offset(pointer.ty, *field);
+                let layout = component_layout(value.ty, self.types, self.pointer_type);
+                for ((_, offset), component) in layout.into_iter().zip(value.values) {
+                    self.builder.ins().store(
+                        MemFlagsData::new(),
+                        component,
+                        pointer_value,
+                        field_offset + offset,
+                    );
+                }
+            }
+            Instruction::SetSliceIndex {
+                slice,
+                index,
+                value,
+            } => {
+                // `s[i] = v`：运行时越界检查 + 写入底层字节。
+                let slice_value = self.emit_expr(slice);
+                let index = self.emit_expr(index).one();
+                let value = self.emit_expr(value);
+                let base = slice_value.values[0];
+                let length = slice_value.values[1];
+                self.slice_bounds_check(index, length);
+                let layout = component_layout(value.ty, self.types, self.pointer_type);
+                // 元素跨度 = 元素类型的字节大小（`[]u8` 为 1 字节），而非指针宽度。
+                let element_stride = size_of_type(value.ty, self.types, self.pointer_type) as i64;
+                let index_wide = self.builder.ins().uextend(self.pointer_type, index);
+                let scaled = self.builder.ins().imul_imm_u(index_wide, element_stride);
+                let base_addr = self.builder.ins().iadd(base, scaled);
+                for ((_, offset), component) in layout.into_iter().zip(value.values) {
+                    let address = self.builder.ins().iadd_imm_u(base_addr, offset as i64);
+                    self.builder
+                        .ins()
+                        .store(MemFlagsData::new(), component, address, 0);
+                }
             }
             Instruction::Evaluate(value) => {
                 self.emit_expr(value);
@@ -749,7 +908,8 @@ impl Emitter<'_, '_> {
                 RuntimeValue::scalar(Type::I32, length)
             }
             ExprKind::Array(elements) => {
-                let mut values = Vec::with_capacity(abi_width(expression.ty));
+                let mut values =
+                    Vec::with_capacity(abi_width(expression.ty, self.types, self.pointer_type));
                 for element in elements {
                     values.extend(self.emit_expr(element).values);
                 }
@@ -776,7 +936,7 @@ impl Emitter<'_, '_> {
                     unreachable!("index expression has an array operand")
                 };
                 self.bounds_check(index, length);
-                let width = abi_width(element.as_type());
+                let width = abi_width(element.as_type(), self.types, self.pointer_type);
                 let mut values = Vec::with_capacity(width);
                 for component in 0..width {
                     let mut selected = array.values[component];
@@ -807,7 +967,7 @@ impl Emitter<'_, '_> {
                 arguments,
             } => {
                 let mut values = Vec::new();
-                let uses_sret = abi_width(expression.ty) > 2;
+                let uses_sret = abi_width(expression.ty, self.types, self.pointer_type) > 2;
                 let sret_ptr = if uses_sret {
                     // sret 模式：分配返回缓冲区，把其地址作为隐藏的第一个参数。
                     let layout = component_layout(expression.ty, self.types, self.pointer_type);
@@ -1057,6 +1217,141 @@ impl Emitter<'_, '_> {
                 unreachable!("field index was validated during lowering");
             }
             ExprKind::Match { value, arms } => self.emit_match(expression.ty, value, arms),
+            ExprKind::Allocate(length) => {
+                // `allocate(n) -> []u8`：调用运行时 dolphin_allocate(n)，返回 {ptr, n}。
+                let length = self.emit_expr(length);
+                let length_val =
+                    self.extend_integer(length.one(), length.ty, self.pointer_type, false);
+                let call = self
+                    .builder
+                    .ins()
+                    .call(self.runtime_refs.allocate, &[length_val]);
+                let ptr = self.builder.inst_results(call)[0];
+                RuntimeValue {
+                    ty: expression.ty,
+                    values: vec![ptr, length_val],
+                }
+            }
+            ExprKind::Free(slice) => {
+                // `free(s)`：调用运行时 dolphin_free(s.ptr, s.len)。
+                let slice = self.emit_expr(slice);
+                self.builder
+                    .ins()
+                    .call(self.runtime_refs.free, &[slice.values[0], slice.values[1]]);
+                RuntimeValue {
+                    ty: Type::Unit,
+                    values: Vec::new(),
+                }
+            }
+            ExprKind::StringConcat { left, right } => {
+                // `a + b`：调用运行时 dolphin_string_concat，返回新缓冲区指针；长度 = a.len + b.len。
+                let left = self.emit_expr(left);
+                let right = self.emit_expr(right);
+                let call = self.builder.ins().call(
+                    self.runtime_refs.string_concat,
+                    &[
+                        left.values[0],
+                        left.values[1],
+                        right.values[0],
+                        right.values[1],
+                    ],
+                );
+                let ptr = self.builder.inst_results(call)[0];
+                let length = self.builder.ins().iadd(left.values[1], right.values[1]);
+                RuntimeValue {
+                    ty: Type::String,
+                    values: vec![ptr, length],
+                }
+            }
+            ExprKind::AddressOf(operand) => {
+                // `&e`：取操作数所在栈槽的地址。
+                let slot = self.expr_stack_slot(operand);
+                let addr = self.builder.ins().stack_addr(self.pointer_type, slot, 0);
+                RuntimeValue::scalar(expression.ty, addr)
+            }
+            ExprKind::Deref(operand) => {
+                // `*e`：从指针指向的内存读取各分量。
+                let pointer_value = self.emit_expr(operand).one();
+                let layout = component_layout(expression.ty, self.types, self.pointer_type);
+                let mut values = Vec::with_capacity(layout.len());
+                for (component_type, offset) in layout {
+                    values.push(self.builder.ins().load(
+                        component_type,
+                        MemFlagsData::new(),
+                        pointer_value,
+                        offset,
+                    ));
+                }
+                RuntimeValue {
+                    ty: expression.ty,
+                    values,
+                }
+            }
+            ExprKind::PtrField { base, field } => {
+                // `q->x`：等价 `(*q).x`，先解引用读结构体各分量，再取字段。
+                let pointer_value = self.emit_expr(base).one();
+                let Type::Ptr(crate::ir::Pointer::Struct(id)) = base.ty else {
+                    unreachable!("ptr field access targets a struct pointer");
+                };
+                let TypeDef::Struct { fields, .. } = &self.types[id.0] else {
+                    unreachable!("ptr field access resolves a struct type");
+                };
+                let field_ty = fields[*field].ty;
+                let field_offset = self.struct_field_offset(base.ty, *field);
+                let layout = component_layout(field_ty, self.types, self.pointer_type);
+                let mut values = Vec::with_capacity(layout.len());
+                for (component_type, offset) in layout {
+                    values.push(self.builder.ins().load(
+                        component_type,
+                        MemFlagsData::new(),
+                        pointer_value,
+                        field_offset + offset,
+                    ));
+                }
+                RuntimeValue {
+                    ty: field_ty,
+                    values,
+                }
+            }
+            ExprKind::SliceIndex { slice, index } => {
+                // `s[i]`：运行时越界检查 + 读取底层字节。
+                let slice_value = self.emit_expr(slice);
+                let index = self.emit_expr(index).one();
+                let base = slice_value.values[0];
+                let length = slice_value.values[1];
+                self.slice_bounds_check(index, length);
+                let layout = component_layout(expression.ty, self.types, self.pointer_type);
+                // 元素跨度 = 元素类型的字节大小（`[]u8` 为 1 字节），而非指针宽度。
+                let element_stride =
+                    size_of_type(expression.ty, self.types, self.pointer_type) as i64;
+                let index_wide = self.builder.ins().uextend(self.pointer_type, index);
+                let scaled = self.builder.ins().imul_imm_u(index_wide, element_stride);
+                let base_addr = self.builder.ins().iadd(base, scaled);
+                let mut values = Vec::with_capacity(layout.len());
+                for (component_type, offset) in layout {
+                    let address = self.builder.ins().iadd_imm_u(base_addr, offset as i64);
+                    values.push(self.builder.ins().load(
+                        component_type,
+                        MemFlagsData::new(),
+                        address,
+                        0,
+                    ));
+                }
+                RuntimeValue {
+                    ty: expression.ty,
+                    values,
+                }
+            }
+            ExprKind::SliceLen(slice) => {
+                let slice = self.emit_expr(slice);
+                let length = slice.values[1];
+                let length = if self.pointer_type == types::I32 {
+                    length
+                } else {
+                    self.builder.ins().ireduce(types::I32, length)
+                };
+                RuntimeValue::scalar(Type::I32, length)
+            }
         }
     }
 
@@ -1137,6 +1432,43 @@ impl Emitter<'_, '_> {
             .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length);
         self.builder.ins().trapnz(outside, TrapCode::unwrap_user(1));
+    }
+
+    /// 切片越界检查（M14）：`index >= length` 时 trap（退出码 101）。
+    /// `index` 为 I32，`length` 为 pointer 宽度整数，比较前把 index 零扩展到同宽度。
+    fn slice_bounds_check(&mut self, index: Value, length: Value) {
+        let index = self.builder.ins().uextend(self.pointer_type, index);
+        let outside = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length);
+        self.builder.ins().trapnz(outside, TrapCode::unwrap_user(1));
+    }
+
+    /// 计算结构体指针 `*Struct(id)` 中字段 `field` 的字节偏移。
+    fn struct_field_offset(&self, ptr_ty: Type, field: usize) -> i32 {
+        let Type::Ptr(crate::ir::Pointer::Struct(id)) = ptr_ty else {
+            unreachable!("struct field offset requires a struct pointer");
+        };
+        let TypeDef::Struct { fields, .. } = &self.types[id.0] else {
+            unreachable!("struct field offset resolves a struct type");
+        };
+        let mut offset = 0;
+        for (index, field_def) in fields.iter().enumerate() {
+            if index == field {
+                return offset;
+            }
+            offset += size_of_type(field_def.ty, self.types, self.pointer_type);
+        }
+        unreachable!("field index was validated during lowering");
+    }
+
+    /// 取址 `&local`：返回局部变量所在栈槽。
+    fn expr_stack_slot(&self, expression: &Expr) -> StackSlot {
+        let ExprKind::Local(local) = &expression.kind else {
+            unreachable!("address-of only targets a local variable");
+        };
+        self.slots[local.0].slot
     }
 
     fn extend_integer(&mut self, value: Value, from: Type, to: clif::Type, signed: bool) -> Value {
@@ -1481,13 +1813,21 @@ fn uniform_variant_components(
 
 /// 标量与数组的组件布局（原 component_layout 的主体）。
 fn scalar_component_layout(ty: Type, pointer: clif::Type) -> Vec<(clif::Type, i32)> {
+    // 指针：单个地址分量（M14）。
+    if let Type::Ptr(_) = ty {
+        return vec![(pointer, 0)];
+    }
     let (element, length) = match ty {
         ty if ty.is_integer() || ty.is_float() || ty == Type::Char => (ty.as_scalar().unwrap(), 1),
         Type::Bool => (ScalarType::Bool, 1),
         Type::String => (ScalarType::String, 1),
+        // 切片 `[]T` 与 `string` 别名等价（§12.3a）：同为 `{ ptr, len }` 布局。
+        Type::Slice(_) => (ScalarType::String, 1),
         Type::Array { element, length } => (element, length),
         Type::Unit => unreachable!("Unit has no runtime value"),
-        Type::Struct(_) | Type::Enum(_) => unreachable!("user types handled by component_layout"),
+        Type::Struct(_) | Type::Enum(_) | Type::Ptr(_) => {
+            unreachable!("user types and pointers handled elsewhere")
+        }
         _ => unreachable!("all scalar types are covered"),
     };
     let pointer_bytes = pointer.bytes() as i32;
@@ -1530,10 +1870,12 @@ fn size_of_type(ty: Type, types: &[TypeDef], pointer: clif::Type) -> i32 {
 fn scalar_alignment(ty: Type, _types: &[TypeDef], pointer: clif::Type) -> u8 {
     match ty {
         Type::String
+        | Type::Slice(_)
         | Type::Array {
             element: ScalarType::String,
             ..
         } => pointer.bytes().trailing_zeros() as u8,
+        Type::Ptr(_) => pointer.bytes().trailing_zeros() as u8,
         ty if ty.is_integer() || ty.is_float() || ty == Type::Char => {
             clif_type(ty, pointer).bytes().trailing_zeros() as u8
         }
@@ -1559,7 +1901,8 @@ fn clif_type(ty: Type, pointer: clif::Type) -> clif::Type {
         Type::F32 => types::F32,
         Type::F64 => types::F64,
         Type::String => pointer,
-        Type::Unit | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
+        Type::Ptr(_) => pointer,
+        Type::Unit | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) | Type::Slice(_) => {
             unreachable!("type has no single runtime value")
         }
     }

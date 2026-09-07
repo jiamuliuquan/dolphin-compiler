@@ -304,6 +304,19 @@ fn resolve_modules(sources: &[SourceFile], units: &mut [Unit]) -> Result<(), Dia
             }
         }
         for function in &mut unit.program.functions {
+            // M14 起结构体/枚举可作为参数与返回类型，需 qualify 签名中的类型引用。
+            for parameter in &mut function.parameters {
+                resolve_type_ref(
+                    source,
+                    &unit.module,
+                    &bindings,
+                    &type_infos,
+                    &mut parameter.ty,
+                )?;
+            }
+            if let Some(return_type) = &mut function.return_type {
+                resolve_type_ref(source, &unit.module, &bindings, &type_infos, return_type)?;
+            }
             resolve_block(
                 source,
                 &unit.module,
@@ -400,6 +413,37 @@ fn resolve_block(
                 resolve_expr(
                     source, module, locals, imports, functions, type_infos, value,
                 )?;
+            }
+            StatementKind::DerefAssignment { target, value, .. } => {
+                resolve_expr(
+                    source, module, locals, imports, functions, type_infos, target,
+                )?;
+                resolve_expr(
+                    source, module, locals, imports, functions, type_infos, value,
+                )?;
+            }
+            StatementKind::PtrFieldAssignment { base, value, .. } => {
+                resolve_expr(source, module, locals, imports, functions, type_infos, base)?;
+                resolve_expr(
+                    source, module, locals, imports, functions, type_infos, value,
+                )?;
+            }
+            StatementKind::Defer { value } => resolve_expr(
+                source, module, locals, imports, functions, type_infos, value,
+            )?,
+            StatementKind::Try { resources, body } => {
+                for resource in resources {
+                    resolve_expr(
+                        source,
+                        module,
+                        locals,
+                        imports,
+                        functions,
+                        type_infos,
+                        &mut resource.initializer,
+                    )?;
+                }
+                resolve_block(source, module, locals, imports, functions, type_infos, body)?;
             }
             StatementKind::Expression(expression) => resolve_expr(
                 source, module, locals, imports, functions, type_infos, expression,
@@ -504,11 +548,14 @@ fn resolve_expr(
                     source, module, locals, imports, functions, type_infos, argument,
                 )?;
             }
-            if matches!(callee.as_str(), "print" | "println" | "length") {
+            if matches!(
+                callee.as_str(),
+                "print" | "println" | "length" | "allocate" | "free"
+            ) {
                 return Ok(());
             }
             // 结构体/枚举构造的 callee 是类型名或枚举项名：qualify 后不按函数解析。
-            if is_constructor_target(callee, imports, type_infos) {
+            if is_constructor_target(module, callee, imports, type_infos) {
                 *callee = qualify_constructor(module, imports, type_infos, callee);
                 return Ok(());
             }
@@ -525,8 +572,13 @@ fn resolve_expr(
             }
             *callee = resolved;
         }
-        ExprKind::Field { base, .. } => {
+        ExprKind::Field { base, .. } | ExprKind::PtrField { base, .. } => {
             resolve_expr(source, module, locals, imports, functions, type_infos, base)?;
+        }
+        ExprKind::AddressOf { operand } | ExprKind::Deref { operand } => {
+            resolve_expr(
+                source, module, locals, imports, functions, type_infos, operand,
+            )?;
         }
         ExprKind::Match { value, arms } => {
             resolve_expr(
@@ -558,6 +610,7 @@ fn resolve_expr(
 
 /// 判断 callee 是否为结构体构造（类型名后跟 `(`）或枚举项构造。
 fn is_constructor_target(
+    module: &str,
     callee: &str,
     imports: &HashMap<String, ImportBinding>,
     type_infos: &HashMap<String, TypeInfo>,
@@ -566,6 +619,10 @@ fn is_constructor_target(
     let resolved = resolve_imported(imports, callee);
     // 结构体构造：`TypeName(...)` 或 `mod.TypeName(...)`。
     if type_infos.contains_key(&resolved) {
+        return true;
+    }
+    // 本模块内构造：短名 `TypeName` 需 qualify 到全限定名后判定。
+    if type_infos.contains_key(&qualify(module, callee)) {
         return true;
     }
     // 枚举项构造：`Enum.Variant(...)` 或 `mod.Enum.Variant(...)`，其中 Enum 是类型名。
@@ -668,6 +725,12 @@ fn resolve_type_ref(
         }
         ast::TypeRefKind::Array { element, .. } => {
             resolve_type_ref(source, module, imports, type_infos, element)
+        }
+        ast::TypeRefKind::Slice { element } => {
+            resolve_type_ref(source, module, imports, type_infos, element)
+        }
+        ast::TypeRefKind::Pointer { inner } => {
+            resolve_type_ref(source, module, imports, type_infos, inner)
         }
     }
 }

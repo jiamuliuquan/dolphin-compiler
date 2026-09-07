@@ -23,6 +23,8 @@ pub enum TokenKind {
     Struct,
     Enum,
     Match,
+    Defer,
+    Try,
     Identifier(String),
     Number(String),
     Character(char),
@@ -61,6 +63,10 @@ pub enum TokenKind {
     FatArrow,
     Underscore,
     Dot,
+    /// 指针字段访问 `q->x`（M14）。
+    Arrow,
+    /// 取址 `&e`（M14，单个 `&`，区别于 `&&`）。
+    Amper,
     Eof,
 }
 

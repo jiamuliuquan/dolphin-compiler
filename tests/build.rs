@@ -447,6 +447,158 @@ fn m13_rejects_missing_match_arms_and_duplicate_fields() {
     assert!(duplicate.to_string().contains("already defined"));
 }
 
+#[test]
+fn m14_structs_passed_by_value() {
+    // 结构体作为函数参数与返回值（按值传递，浅拷贝）。
+    assert_program_exit(
+        r#"
+        struct Point { x: i32, y: i32 }
+        fn add(a: Point, b: Point): Point {
+            return Point(a.x + b.x, a.y + b.y);
+        }
+        fn main() {
+            var p = Point(3, 4);
+            var q = Point(10, 20);
+            var r = add(p, q);
+            return r.x + r.y;
+        }
+        "#,
+        37,
+    );
+}
+
+#[test]
+fn m14_explicit_pointers() {
+    // 显式指针：取址 `&`、解引用 `*`、字段访问 `->`。
+    assert_program_exit(
+        r#"
+        struct Point { x: i32, y: i32 }
+        fn main() {
+            var p = Point(1, 2);
+            var q: *Point = &p;
+            q->x = 100;
+            var deref = *q;
+            return p.x + deref.y;
+        }
+        "#,
+        102,
+    );
+}
+
+#[test]
+fn m14_allocate_free_and_slice_indexing() {
+    // 动态切片：allocate + 索引读写 + length + free。
+    assert_program_exit(
+        r#"
+        fn fill(): []u8 {
+            var buf = allocate(3);
+            buf[0] = 5_u8;
+            buf[1] = 6_u8;
+            buf[2] = 7_u8;
+            return buf;
+        }
+        fn main() {
+            var buf = fill();
+            var total = buf[0] as i32 + buf[1] as i32 + buf[2] as i32;
+            total += length(buf);
+            free(buf);
+            return total;
+        }
+        "#,
+        21,
+    );
+}
+
+#[test]
+fn m14_try_and_defer() {
+    assert_program_exit(
+        r#"
+        fn main() {
+            var sum = 0;
+            try (var a = allocate(2), var b = allocate(2)) {
+                a[0] = 1_u8;
+                a[1] = 2_u8;
+                b[0] = 3_u8;
+                b[1] = 4_u8;
+                sum = a[0] as i32 + a[1] as i32 + b[0] as i32 + b[1] as i32;
+            }
+            var d = allocate(1);
+            defer free(d);
+            d[0] = 9_u8;
+            return sum + d[0] as i32;
+        }
+        "#,
+        19,
+    );
+}
+
+#[test]
+fn m14_string_concatenation() {
+    assert_program_exit(
+        r#"
+        fn main() {
+            var s = "hello" + " " + "world";
+            var result = 0;
+            if s == "hello world" {
+                result = 42;
+            }
+            free(s);
+            return result;
+        }
+        "#,
+        42,
+    );
+}
+
+#[test]
+fn m14_double_free_is_detected() {
+    // 双重释放：运行时退出码 103。
+    let output = run_program(
+        r#"
+        fn main() {
+            var buf = allocate(4);
+            free(buf);
+            free(buf);
+            return 0;
+        }
+        "#,
+    );
+    assert_eq!(output.status.code(), Some(103));
+}
+
+#[test]
+fn m14_try_resource_cannot_escape() {
+    // try 资源禁止逃逸（return / 赋值 / 重新绑定）。
+    let returned = build_project(&[(
+        "src/main.do",
+        r#"
+        fn build(): []u8 {
+            try (var buf = allocate(4)) {
+                return buf;
+            }
+            return allocate(1);
+        }
+        fn main() { return 0; }
+        "#,
+    )])
+    .unwrap_err();
+    assert!(returned.to_string().contains("cannot escape"));
+
+    let rebound = build_project(&[(
+        "src/main.do",
+        r#"
+        fn main() {
+            try (var buf = allocate(4)) {
+                var x = buf;
+            }
+            return 0;
+        }
+        "#,
+    )])
+    .unwrap_err();
+    assert!(rebound.to_string().contains("cannot escape"));
+}
+
 fn assert_program_exit(source: &str, expected: i32) {
     let output = run_program(source);
     assert_eq!(output.status.code(), Some(expected));

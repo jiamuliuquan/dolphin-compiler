@@ -408,7 +408,9 @@ fn xcrun(arg: &str) -> Option<String> {
 /// 选择 `cc` 命令：优先 `CC` 环境变量，回退 `cc`。
 fn env_cc() -> String {
     std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
-}/// 用 `cc -print-file-name=<name>` 探测系统对象路径；找不到时返回 `None`。
+}
+
+/// 用 `cc -print-file-name=<name>` 探测系统对象路径；找不到时返回 `None`。
 ///
 /// 返回前做路径规范化（`cc` 常返回含 `../../` 的路径，`rust-lld` 不会自行
 /// 规范化，导致 `-L` 或对象路径失效）。

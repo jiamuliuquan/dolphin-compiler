@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <windows.h>
 
 static void dolphin_write_all(const char *data, size_t length) {
@@ -227,4 +228,17 @@ extern "C" void *dolphin_string_concat(
         memcpy(buffer + a_len, b, (size_t)b_len);
     }
     return buffer;
+}
+
+/* M15 进程样板：把命令交给 shell 执行，返回退出码（-1 表示失败）。 */
+extern "C" int64_t dolphin_process_run(const char *cmd, uintptr_t len) {
+    char *buffer = (char *)malloc((size_t)len + 1);
+    if (buffer == NULL) {
+        return -1;
+    }
+    memcpy(buffer, cmd, (size_t)len);
+    buffer[len] = '\0';
+    int status = system(buffer);
+    free(buffer);
+    return (int64_t)status;
 }

@@ -25,6 +25,7 @@
 | M12 | 已完成 | 自包含工具链：内嵌运行时、`rust-lld` 链接、`--system-linker` 回退、发行包与冒烟测试 |
 | M13 | 已完成 | 用户自定义类型：结构体、枚举、`match` 模式匹配和跨模块类型引用 |
 | M14 | 已完成 | 内存模型：显式指针、动态切片、`allocate`/`free`/`defer`/`try`、字符串拼接 |
+| M15 | 已完成 | 泛型（单态化）、trait/方法/关联类型、`Option`/`Result`/`Iterator`/`string` 工具标准库、`for` 泛型化、进程 `run` |
 
 ## 2. 构建和使用
 
@@ -795,19 +796,114 @@ dolphin_runtime_exit
 
 诊断包含稳定类别 `E0000`/`E0001`、文件路径、Unicode 字符列号、多行源码标记。CLI 支持 `--color auto|always|never`。当前编译器通常在第一个错误处停止，多错误恢复明确延后到 MVP 之后。
 
-## 16. 明确未实现
+## 16. 泛型、trait 与标准库（M15）
+
+M15 引入类型抽象层（泛型 + trait + 方法）与不依赖编译器特判的标准库。
+
+### 16.1 泛型
+
+泛型通过**单态化**实现：泛型函数/类型在调用点按具体类型实参展开。实例名用稳定 mangling（`id<T=i32>` → `id$i32`），跨模块去重、无重复符号。
+
+```dc
+fn id<T>(x: T): T { return x; }
+struct Pair<T> { first: T, second: T }
+enum Option<T> { Some(T), None }
+
+fn main() {
+    var a = id(1);          // id<i32>
+    var p = Pair(1, 2);     // Pair<i32>
+    var o = Option.Some(5); // Option<i32>
+    return a;
+}
+```
+
+- 泛型约束 `fn f<T: trait>(...)`：`T` 未实现契约时在调用点报错。
+- `allocate<T>(n) -> []T`：分配 `n` 个 `T` 元素；`allocate(n)` 等价 `allocate<u8>(n)`。
+
+### 16.2 trait、方法与关联类型
+
+```dc
+trait Shape {
+    fn area(self): f64;
+}
+
+trait Iterator {
+    type Item;                          // 关联类型
+    fn next(self: *Self): Option<Self::Item>;
+}
+
+struct Circle { radius: f64 }
+
+impl Shape for Circle {
+    fn area(self): f64 { return self.radius; }
+}
+```
+
+- 关键字 `trait`；`impl Type { ... }` 定义固有方法，`impl Trait for Type { ... }` 实现契约。
+- 方法调用 `x.foo()`；关联函数 `Type::func()`；`self` 值传递、`*Self` 指针传递（原地修改）。
+- 关联类型 `type Item;` 声明 + `type Item = T;` 绑定 + `Self::Item` 引用。
+
+### 16.3 标准库
+
+标准库作为**内置源码**随编译器分发（模块 `std`，自动注入）。
+
+- `Option<T>`、`Result<T, E>`：泛型枚举。
+- `Iterator` 契约：`type Item` + `next()`。
+- `string` 工具：`is_empty` / `starts_with` / `ends_with` / `contains` / `substring` / `trim`。
+
+```dc
+use std;
+
+fn main() {
+    var x = std.Option.Some(5);
+    var r = std.Result.Ok(10);
+    return match x { std.Option.Some(v) => v, std.Option.None => 0 };
+}
+```
+
+### 16.4 `for` 泛型化与迭代器
+
+`for x in iterable` 展开为「`iterable.into_iter()` + 循环 `next()` + Option 判别」。任意实现 `into_iter`/`next` 的类型都可被 `for` 遍历：
+
+```dc
+struct Counter { value: i32 }
+
+impl Counter {
+    fn into_iter(self): Counter { return self; }
+    fn next(self: *Counter): Option<i32> { ... }
+}
+
+fn main() {
+    var c = Counter(0);
+    for x in c { ... }   // 自定义迭代器
+}
+```
+
+### 16.5 `string` 与 `[]u8` 转换
+
+- `s.bytes()`：`string` → `[]u8` 零成本视图（布局等价，仅重标类型）。
+- `string.from_bytes(buf)`：`[]u8` → `string` 零成本视图。
+
+### 16.6 进程样板
+
+- `run(cmd: string): i64`：把命令交给 shell 执行，返回退出码（`-1` 失败）。
+
+## 17. 明确未实现
 
 当前不能编译：
 
-- 嵌套数组、空数组（`[]T` 之外的）切片和自动扩容容器（`ArrayList`）。
+- 嵌套数组、空数组（`[]T` 之外的）切片和自动扩容容器（`Vec<T>` / `ArrayList`，类型擦除延后）。
 - 数组整体比较、直接格式化和数组方法。
 - 通配符导入、导入别名、重导出和外部模块依赖。
 - 三元表达式和隐式数值转换。
 - `?T` 可选类型与 null（可空指针）。
-- 指针算术、指针悬垂检查。
+- 指针算术、指针悬垂检查、指针 reinterpret cast / 类型擦除。
 - `Allocator` 类型与参数传递（arena/测试注入）。
 - 枚举 payload 中的 `string` 字段。
-- 泛型、trait、闭包和异常。
+- `?` 错误传播运算符（延后）。
+- 无参枚举项作为表达式（跨模块 + 泛型场景，如 `return std.Option.None;`）。
+- 文件 I/O（句柄/缓冲 ABI 延后）。
+- 闭包和异常。
 - 外部依赖、远程依赖解析和交叉编译。
 - DWARF 源码调试信息和多错误恢复。
 

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/wait.h>
 
 static void dolphin_write_all(const char *data, size_t length) {
     while (length > 0) {
@@ -218,4 +219,23 @@ void dolphin_print_char(uint32_t value) {
 
 uint8_t dolphin_string_equal(const char *a, uintptr_t a_length, const char *b, uintptr_t b_length) {
     return a_length == b_length && memcmp(a, b, (size_t)a_length) == 0;
+}
+
+/* M15 进程样板：把命令交给 shell 执行，返回退出码（-1 表示失败）。 */
+int64_t dolphin_process_run(const char *cmd, uintptr_t len) {
+    char *buffer = (char *)malloc((size_t)len + 1);
+    if (buffer == NULL) {
+        return -1;
+    }
+    memcpy(buffer, cmd, (size_t)len);
+    buffer[len] = '\0';
+    int status = system(buffer);
+    free(buffer);
+    if (status == -1) {
+        return -1;
+    }
+    if (WIFEXITED(status)) {
+        return (int64_t)WEXITSTATUS(status);
+    }
+    return -1;
 }

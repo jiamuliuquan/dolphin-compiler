@@ -252,7 +252,7 @@ fn resolve_modules(sources: &[SourceFile], units: &mut [Unit]) -> Result<(), Dia
     for unit in units.iter() {
         let source = &sources[unit.source_id];
         for function in &unit.program.functions {
-            if matches!(function.name.as_str(), "print" | "println" | "length") {
+            if matches!(function.name.as_str(), "print" | "println" | "length" | "run") {
                 return Err(Diagnostic::at(
                     source,
                     function.name_span,
@@ -643,7 +643,7 @@ fn resolve_expr(
             }
             if matches!(
                 callee.as_str(),
-                "print" | "println" | "length" | "allocate" | "free"
+                "print" | "println" | "length" | "allocate" | "free" | "run"
             ) {
                 return Ok(());
             }

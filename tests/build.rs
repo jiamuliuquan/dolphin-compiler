@@ -1135,3 +1135,17 @@ fn m15_associated_type() {
     );
 }
 
+#[test]
+fn m15_process_run_exit_code() {
+    // 进程样板：run(cmd) 执行命令，返回退出码。
+    assert_program_exit(
+        r#"
+        fn main() {
+            var code = run("exit 7");
+            return code as i32;
+        }
+        "#,
+        7,
+    );
+}
+

@@ -117,6 +117,7 @@ struct RuntimeIds {
     allocate: FuncId,
     free: FuncId,
     string_concat: FuncId,
+    process_run: FuncId,
 }
 
 fn declare_runtime_functions(
@@ -220,6 +221,23 @@ fn declare_runtime_functions(
                 )
                 .map_err(|error| {
                     Diagnostic::plain(format!("could not declare string concat runtime: {error}"))
+                })?
+        },
+        process_run: {
+            // dolphin_process_run(cmd: *void, cmd_len) -> i64（退出码，-1 失败）。
+            let mut signature = module.make_signature();
+            signature
+                .params
+                .extend([pointer, pointer].map(AbiParam::new));
+            signature.returns.push(AbiParam::new(types::I64));
+            module
+                .declare_function(
+                    &platform.c_symbol("dolphin_process_run"),
+                    Linkage::Import,
+                    &signature,
+                )
+                .map_err(|error| {
+                    Diagnostic::plain(format!("could not declare process run runtime: {error}"))
                 })?
         },
     })
@@ -334,6 +352,7 @@ fn collect_expr_strings(expression: &Expr, values: &mut HashSet<String>) {
         ExprKind::StringLength(value) => collect_expr_strings(value, values),
         ExprKind::StringBytes(value) => collect_expr_strings(value, values),
         ExprKind::BytesToString(value) => collect_expr_strings(value, values),
+        ExprKind::ProcessRun(value) => collect_expr_strings(value, values),
         ExprKind::StructInit { fields } => {
             for field in fields {
                 collect_expr_strings(field, values);
@@ -411,6 +430,7 @@ fn define_function(
         allocate: module.declare_func_in_func(runtime_ids.allocate, &mut context.func),
         free: module.declare_func_in_func(runtime_ids.free, &mut context.func),
         string_concat: module.declare_func_in_func(runtime_ids.string_concat, &mut context.func),
+        process_run: module.declare_func_in_func(runtime_ids.process_run, &mut context.func),
     };
     let string_refs: HashMap<String, GlobalValue> = strings
         .iter()
@@ -641,6 +661,7 @@ struct RuntimeRefs {
     allocate: FuncRef,
     free: FuncRef,
     string_concat: FuncRef,
+    process_run: FuncRef,
 }
 
 #[derive(Clone)]
@@ -926,6 +947,18 @@ impl Emitter<'_, '_> {
                     ty: expression.ty,
                     values: value.values,
                 }
+            }
+            ExprKind::ProcessRun(command) => {
+                // `run(cmd)`：调用 dolphin_process_run(cmd.ptr, cmd.len) 返回退出码 i64。
+                let command = self.emit_expr(command);
+                let ptr = command.values[0];
+                let len = command.values[1];
+                let call = self
+                    .builder
+                    .ins()
+                    .call(self.runtime_refs.process_run, &[ptr, len]);
+                let code = self.builder.inst_results(call)[0];
+                RuntimeValue::scalar(Type::I64, code)
             }
             ExprKind::Array(elements) => {
                 let mut values =

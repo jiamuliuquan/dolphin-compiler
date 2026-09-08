@@ -254,6 +254,8 @@ pub enum ExprKind {
     StringBytes(Box<Expr>),
     /// `string.from_bytes(buf)`（M15）：[]u8 → string 零成本视图（StringBytes 的反向）。
     BytesToString(Box<Expr>),
+    /// `run(cmd)`（M15 进程样板）：执行命令，返回退出码 i64。
+    ProcessRun(Box<Expr>),
     Array(Vec<Expr>),
     RepeatArray {
         value: Box<Expr>,

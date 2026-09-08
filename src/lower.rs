@@ -179,7 +179,7 @@ impl<'a> ProgramLowerer<'a> {
     fn collect_signatures(&mut self) -> Result<(), Diagnostic> {
         for (index, function) in self.ast.functions.iter().enumerate() {
             let source = &self.sources[function.source_id];
-            if matches!(function.name.as_str(), "print" | "println" | "length") {
+            if matches!(function.name.as_str(), "print" | "println" | "length" | "run") {
                 return Err(Diagnostic::at(
                     source,
                     function.name_span,
@@ -1684,6 +1684,27 @@ impl<'a> FunctionLowerer<'a> {
             return Ok(Expr {
                 kind: ir::ExprKind::BytesToString(Box::new(value)),
                 ty: Type::String,
+            });
+        }
+        if callee == "run" {
+            if arguments.len() != 1 {
+                return Err(Diagnostic::at(
+                    self.source,
+                    callee_span,
+                    "`run` expects one argument",
+                ));
+            }
+            let value = self.lower_expr(&arguments[0])?;
+            if value.ty != Type::String {
+                return Err(Diagnostic::at(
+                    self.source,
+                    arguments[0].span,
+                    format!("`run` expects a string command, found `{}`", value.ty),
+                ));
+            }
+            return Ok(Expr {
+                kind: ir::ExprKind::ProcessRun(Box::new(value)),
+                ty: Type::I64,
             });
         }
         if callee == "length" {

@@ -27,6 +27,7 @@ pub enum TokenKind {
     Try,
     Trait,
     Impl,
+    Type,
     Identifier(String),
     Number(String),
     Character(char),

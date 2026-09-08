@@ -160,6 +160,24 @@ fn total_area<T: Shape>(xs: []T): f64 {
 }
 ```
 
+4. **关联类型（M15 纳入，用于表达「契约的产出类型」）**：契约可声明关联类型 `type 名称;`，方法签名通过 `Self::名称` 引用；`impl` 块内用 `type 名称 = 具体类型;` 提供绑定。这是 `Iterator` 表达「迭代产出类型」的唯一自然载体。
+
+```dc
+trait Iterator {
+    type Item;
+    fn next(self: *Self): Option<Self::Item>;
+}
+
+struct Counter { value: i32 }
+
+impl Iterator for Counter {
+    type Item = i32;
+    fn next(self: *Counter): Option<i32> { ... }
+}
+```
+
+> 说明：本提案原 §9 将「关联类型」列为「不在 M15」，现**改为纳入 M15**。理由见 §7——`Iterator` 契约的产出类型若不用关联类型、trait 又不支持类型参数，则无处表达（两者皆缺）。关联类型是 Rust 式标准做法，表达力最强。
+
 ### 4.4 `self` 传递语义（已确定）
 
 - **读方法拿 `self`（值）**：调用时复制一份，方法内修改不影响原值，与 M14 §5.2「无移动语义、一律复制」一致。
@@ -242,15 +260,23 @@ M14 已冻结「值语义 + 显式指针」，方法要原地修改容器**必�
 
 #### 6.2.1 第一档：纯用户态（不碰 OS，M15 首批核心）
 
-| 模块 | 内容 | 依赖 |
-|------|------|------|
-| `Option<T>` | 可选值（`?T` 语法糖，§11.3） | 纯泛型枚举，无 OS 依赖 |
-| `Result<T,E>` | 错误值（§8） | 纯泛型枚举 |
-| `Iterator` 契约 | `next()` 抽象 | trait + `Option<T>` |
-| `Range` | 把 `0..3` 下沉为值类型 | `Iterator` |
-| `Vec<T>` | 自动扩容动态容器（M14 的 `ArrayList` 演进） | `allocate<T>` + `free` |
-| 数组/`Vec` 迭代器 | 各实现 `Iterator` | `Iterator` |
-| `string` 工具 | split / trim / 查找 / 拼接等 | `string`/`[]u8` 之上 |
+| 模块 | 内容 | 依赖 | 状态 |
+|------|------|------|------|
+| `Option<T>` | 可选值（`?T` 语法糖，§11.3） | 纯泛型枚举，无 OS 依赖 | ✅ 已实现 |
+| `Result<T,E>` | 错误值（§8） | 纯泛型枚举 | ✅ 已实现 |
+| `Iterator` 契约 | `next()` 抽象（关联类型产出，§4.3） | trait 关联类型 + `Option<T>` | ⏳ 待实现（依赖关联类型） |
+| `Range` | 标准库值类型（`0..3` 保持 for 专属语法糖） | `Iterator` | ⏳ 待实现 |
+| 数组/`Vec` 迭代器 | 各实现 `Iterator` | `Iterator` | ⏳ 待实现（依赖 Iterator） |
+| `Vec<T>` | 自动扩容动态容器 | `allocate` + 类型擦除 | ❌ 明确延后（见 §6.2.1a） |
+| `string` 工具 | is_empty/starts_with/ends_with 等 | `s.bytes()` | ✅ 已实现基础子集 |
+
+**明确不在首批**（延后，见 §9）：`HashMap`/`HashSet`（需先定 `Hash`/`Eq` 契约）、网络（socket/DNS/HTTP/TLS）、异步文件 I/O。
+
+#### 6.2.1a `Vec<T>` 的类型擦除（延后决策）
+
+`Vec<T>` 要存「任意 `T` 的元素」，必须能把 `T` 值 reinterpret 成字节再存回 `[]u8` 缓冲，这需要**类型擦除 / 指针 reinterpret cast**（类似 Zig 的 `@ptrCast`/`@bitCast`）。本语言尚无此能力，且它属于「指针/切片语义」的底层设计，不应塞进标准库。
+
+**决策**：`Vec<T>` **明确延后**，与「切片容量字段、指针 reinterpret」一起作为一个独立的语言能力决策，不在 M15 标准库落地。首版动态数据仍以 M14 的「`[]u8` + 手动管理」为最小可用形态。
 
 #### 6.2.2 第二档：OS 穿透（文件 + 进程，M15 一并打通）
 
@@ -306,18 +332,20 @@ for x in my_custom_iter { ... } // 用户自定义迭代器（验收标准核心
 ## 7. 迭代器与 `for` 泛型化（已确定）
 
 - `for x in iterable` 展开为：`var it = iterable.into_iter(); loop { match it.next() { Option.Some(x) => { body }, Option.None => break } }`（§11.6 已确定）。
-- `Iterator` 契约最小含 `next(self: *Self): Option<T>`；`T` 为迭代产出类型。
+- `Iterator` 契约用**关联类型**表达产出类型（§4.3）：`trait Iterator { type Item; fn next(self: *Self): Option<Self::Item>; }`。
 - 采用 `into_iter()` 分层：可迭代对象（`Range`、数组、`Vec`）各自实现 `into_iter()` 返回迭代器，容器与迭代器分离。
-- 循环变量 `x` 类型由 `Iterator` 的产出类型推导。
+- 循环变量 `x` 类型由 `Iterator` 的产出类型（关联类型 `Item`）推导。
 - 与 M14 指针语义咬合：`next` 拿 `*Self` 以推进内部游标，是 M14 显式指针的又一落地场景。
+
+> **实现现状**：`for` 泛型化的**控制流机制**已实现（`into_iter`/`next` 方法调用 + Option tag 判别 + 字段解包，见 [ir.rs `EnumTag`/`EnumField`](../src/ir.rs)）。当前采用「鸭子类型」约定（不强制 `Iterator` trait），`Iterator` 作为**可约束的契约**需待关联类型（§4.3）落地后补齐。
 
 ---
 
-## 8. 错误处理：`Result` 与 `?`（已确定）
+## 8. 错误处理：`Result`（已确定）
 
 - `Result<T, E>` 用泛型枚举实现，对齐 M13 已有的「基于枚举的非泛型错误处理样例」，避免两套风格打架。
-- `?` 传播语法（已确定引入）：函数内 `expr?` 等价于「`Err(e)` 则提前 `return Err(e)`，`Ok` 则解包」。
-- 首版 `?` **仅作用于 `Result<T,E>`**，不作用 `Option`；错误类型不自动转换，要求 `?` 所在函数返回的 `E` 与 `expr` 的 `E` 完全一致（§11.7 已确定）。
+- **`?` 传播语法：不引入（已确定，后续再说）**。错误传播首版用 `match` 显式展开——`Err(e)` 分支提前 `return`、`Ok` 解包，与 M13 的枚举错误处理风格一致。
+- 理由：`?` 是纯语法糖（等价于「`Err` 提前 return + `Ok` 解包」），不引入不损失任何能力；且它自身有设计包袱（作用域、错误类型转换、与 `defer` 交互），待 `Result` 经过实战、确认手写 `match` 确实啰嗦后再评估。原 §11.7 关于 `?` 的「仅 Result、不作用 Option」等细则随之作废。
 
 ---
 
@@ -332,7 +360,8 @@ for x in my_custom_iter { ... } // 用户自定义迭代器（验收标准核心
 - 文件缓冲层、目录遍历、文件系统元数据。
 - 闭包与高阶函数（`for_each` 等）。
 - 泛型特化（specialization）。
-- 关联类型（associated types）与常量泛型（`const` 泛型参数）。
+- 常量泛型（`const` 泛型参数）。
+- 指针 reinterpret cast / 类型擦除（`Vec<T>` 依赖，见 §6.2.1a）。
 - 宏 / 编译期元编程。
 - 异步 / 协程。
 
@@ -343,13 +372,15 @@ for x in my_custom_iter { ... } // 用户自定义迭代器（验收标准核心
 1. 类型参数参与名称解析、类型检查和代码生成（单态化后每个具体实例正确生成）。
 2. 泛型函数/类型可跨模块使用，实例化规则一致、无重复定义冲突。
 3. `Option<T>`、`Result<T,E>` 用泛型真实实现，非编译器硬编码。
-4. `for` 循环重构为对 `Iterator` 契约的展开，`for x in my_custom_iter` 可用（迭代器抽象立住）。
+4. `for` 循环重构为对迭代器协议的展开，`for x in my_custom_iter` 可用（迭代器抽象立住）。
 5. 方法语法 `x.foo()` 可用，标准库 API 为链式风格；`*Self` 方法可原地修改容器。
-6. 契约作为编译期约束生效，`fn f<T: 契约>` 约束错误在编译期、调用点报告。
+6. 契约作为编译期约束生效，`fn f<T: 契约>` 约束错误在编译期、调用点报告；关联类型 `type Item` / `Self::Item` 可用（§4.3）。
 7. 标准库不依赖编译器对每个具体类型硬编码（内建原语边界如 §6.1 冻结）。
-8. `Vec<T>` 作为自动扩容容器可用，`string` 常用工具可用。
+8. `string` 常用工具可用（is_empty/starts_with/ends_with 等，基于 `s.bytes()`）。
 9. 文件 I/O（同步）与进程（同步）可用，错误经 `Result` 表达；OS 穿透原语路径（§6.2.2）跑通。
 10. 全部现有 M0-M14 测试仍通过；新增 M15 示例（含跨模块泛型、自定义迭代器、文件 I/O）通过。
+
+> 注：`Vec<T>` 从验收标准移除（类型擦除延后，见 §6.2.1a）；`Iterator` 契约的可约束形态依赖关联类型（§4.3），其控制流机制已就绪。
 
 ---
 
@@ -397,10 +428,8 @@ for x in my_custom_iter { ... } // 用户自定义迭代器（验收标准核心
 
 ### 11.7 `?` 传播语法与 `Result`/`Option` 的交互 — ✅ 已确定
 
-- **决策**：**引入 `?`，首版仅作用于 `Result<T,E>`**。已确定。
-  - `expr?` 等价于「`Err(e)` 则提前 `return Err(e)`，`Ok` 则解包」。
-  - **不作用于 `Option`**：`Option` 的可空处理用 `match` 显式做，避免首版引入 `From`/`Into` 转换体系。
-  - 错误类型收敛：首版要求 `?` 所在函数返回的 `E` 与 `expr` 的 `E` 完全一致，不做自动转换（`From`/`Into` 延后）。
+- **决策**：**不引入 `?`**。错误传播首版用 `match` 显式展开（`Err` 提前 `return`、`Ok` 解包），与 M13 枚举错误处理风格一致。已确定。
+- 理由：`?` 是纯语法糖，不引入不损失能力；其设计包袱（作用域、错误类型转换、与 `defer` 交互）待 `Result` 实战后再评估。后续若要引入，再回到本条目补细节。
 
 ### 11.8 契约与 `struct` 的定位关系（评审新增）— ✅ 已确定
 
@@ -421,7 +450,7 @@ for x in my_custom_iter { ... } // 用户自定义迭代器（验收标准核心
 | 11.2 | 递归泛型 | **天然支持**（`TypeId` 间接 + 全程序去重），仅需补自引用字段间接性校验 |
 | 11.3 | `?T` 与 `Option<T>` | **`?T` = `Option<T>` 语法糖** |
 | 11.6 | `for` 展开形态 | `into_iter()` 分层 + `Iterator::next`，`Iterator` 最小含 `next(self: *Self): Option<T>` |
-| 11.7 | `?` 与 `Result`/`Option` | **`?` 仅 `Result<T,E>`**，不作用 `Option`，错误类型不自动转换 |
+| 11.7 | `?` 与 `Result`/`Option` | **不引入 `?`**，错误传播用 `match` 显式展开，后续再说 |
 | 11.8 | 契约与 struct 定位关系 | struct（数据容器）与契约（行为抽象）正交，不冲突 |
 | 3.4 | 单态化实现落点与 IR 表示 | **AST 层预处理 pass，IR/codegen 零改动**；实例化类型用 mangling 名复用 `TypeId`（方案 A） |
 | 6.2 | 标准库模块清单 | 纯用户态（Option/Result/Iterator/Range/Vec/string）+ OS 穿透（文件 I/O 同步 + 进程同步）；网络整体延后 |

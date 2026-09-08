@@ -63,6 +63,8 @@ pub struct TraitDecl {
     pub public: bool,
     pub name: String,
     pub name_span: Span,
+    /// 关联类型名列表（`type Item;`）。
+    pub assoc_types: Vec<String>,
     pub methods: Vec<MethodSignature>,
 }
 
@@ -84,6 +86,8 @@ pub struct ImplBlock {
     /// `None` 表示固有方法（`impl Type`）；`Some(name)` 表示契约实现（`impl Trait for Type`）。
     pub trait_name: Option<String>,
     pub type_name: String,
+    /// 关联类型绑定（`type Item = i32;`）。
+    pub assoc_bindings: Vec<(String, TypeRef)>,
     pub methods: Vec<Function>,
 }
 
@@ -153,6 +157,8 @@ pub enum TypeRefKind {
         name: String,
         args: Vec<TypeRef>,
     },
+    /// 关联类型引用 `Self::Item`（M15）。
+    SelfAssoc(String),
 }
 
 pub type Block = Vec<Statement>;

@@ -947,3 +947,191 @@ fn m15_generic_trait_bound() {
     );
 }
 
+// ── M15 标准库 ────────────────────────────────────────────────────────────
+
+#[test]
+fn m15_stdlib_option() {
+    // 内置标准库：use std 引用 Option<T>。
+    assert_program_exit(
+        r#"
+        use std;
+
+        fn main() {
+            var x = std.Option.Some(5);
+            return match x {
+                std.Option.Some(v) => v,
+                std.Option.None => 0,
+            };
+        }
+        "#,
+        5,
+    );
+}
+
+#[test]
+fn m15_for_custom_iterator() {
+    // for 泛型化：自定义迭代器（into_iter/next 方法）走迭代器协议。
+    assert_program_exit(
+        r#"
+        enum MaybeInt {
+            Some(i32),
+            None,
+        }
+
+        struct Counter { value: i32 }
+
+        impl Counter {
+            fn into_iter(self): Counter { return self; }
+            fn next(self: *Counter): MaybeInt {
+                if self->value < 3 {
+                    self->value += 1;
+                    return MaybeInt.Some(self->value);
+                }
+                return MaybeInt.None;
+            }
+        }
+
+        fn main() {
+            var total = 0;
+            var c = Counter(0);
+            for x in c {
+                total += x;
+            }
+            return total;
+        }
+        "#,
+        6,
+    );
+}
+
+#[test]
+fn m15_stdlib_result() {
+    // Result<T, E>：双类型参数泛型枚举 + match 解构。
+    assert_program_exit(
+        r#"
+        use std;
+
+        fn safe_div(a: i32, b: i32): std.Result<i32, i32> {
+            if b == 0 {
+                return std.Result.Err(0);
+            }
+            return std.Result.Ok(a / b);
+        }
+
+        fn main() {
+            var r = safe_div(10, 2);
+            return match r {
+                std.Result.Ok(v) => v,
+                std.Result.Err(_) => -1,
+            };
+        }
+        "#,
+        5,
+    );
+}
+
+#[test]
+fn m15_string_bytes() {
+    // s.bytes()：string → []u8 零成本视图，可索引、可取长度。
+    assert_program_exit(
+        r#"
+        fn main() {
+            var s = "ABC";
+            var b = s.bytes();
+            val first = b[0] as i32;
+            val len = length(b);
+            return first + len;
+        }
+        "#,
+        68,
+    );
+}
+
+#[test]
+fn m15_stdlib_string_tools() {
+    // string 工具：is_empty / starts_with / ends_with。
+    assert_program_exit(
+        r#"
+        use std;
+
+        fn main() {
+            var total = 0;
+            if std.is_empty("") {
+                total += 1;
+            }
+            if std.starts_with("hello", "he") {
+                total += 2;
+            }
+            if std.ends_with("hello", "lo") {
+                total += 4;
+            }
+            if !std.starts_with("hello", "x") {
+                total += 8;
+            }
+            return total;
+        }
+        "#,
+        15,
+    );
+}
+
+#[test]
+fn m15_string_from_bytes_and_more_tools() {
+    // from_bytes + contains / substring / trim（返回新 string）。
+    assert_program_exit(
+        r#"
+        use std;
+
+        fn main() {
+            var total = 0;
+            if std.contains("hello", "ell") {
+                total += 1;
+            }
+            if !std.contains("hello", "xyz") {
+                total += 2;
+            }
+            var sub = std.substring("hello", 1, 3);
+            if sub == "ell" {
+                total += 4;
+            }
+            free(sub);
+            var t = std.trim("  hi  ");
+            if t == "hi" {
+                total += 8;
+            }
+            free(t);
+            return total;
+        }
+        "#,
+        15,
+    );
+}
+
+#[test]
+fn m15_associated_type() {
+    // 关联类型：trait 声明 type V + impl 绑定 + Self::V 替换成具体类型。
+    assert_program_exit(
+        r#"
+        trait HasValue {
+            type V;
+            fn get(self): Self::V;
+        }
+
+        struct Wrapper { value: i32 }
+
+        impl HasValue for Wrapper {
+            type V = i32;
+            fn get(self): Self::V {
+                return self.value;
+            }
+        }
+
+        fn main() {
+            var w = Wrapper(42);
+            return w.get();
+        }
+        "#,
+        42,
+    );
+}
+

@@ -336,8 +336,16 @@ impl<'a> Parser<'a> {
         let (name, name_span) = self.expect_identifier("expected trait name")?;
         self.expect_simple(TokenKind::LeftBrace, "expected `{` after trait name")?;
         let mut methods = Vec::new();
+        let mut assoc_types = Vec::new();
         while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
-            methods.push(self.parse_method_signature()?);
+            if self.consume(&TokenKind::Type).is_some() {
+                // 关联类型声明 `type Item;`。
+                let (assoc_name, _) = self.expect_identifier("expected associated type name")?;
+                self.expect_simple(TokenKind::Semicolon, "expected `;` after associated type")?;
+                assoc_types.push(assoc_name);
+            } else {
+                methods.push(self.parse_method_signature()?);
+            }
         }
         self.expect_simple(TokenKind::RightBrace, "expected `}` after trait body")?;
         Ok(TraitDecl {
@@ -345,6 +353,7 @@ impl<'a> Parser<'a> {
             public,
             name,
             name_span,
+            assoc_types,
             methods,
         })
     }
@@ -361,14 +370,25 @@ impl<'a> Parser<'a> {
         };
         self.expect_simple(TokenKind::LeftBrace, "expected `{` after impl")?;
         let mut methods = Vec::new();
+        let mut assoc_bindings = Vec::new();
         while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
-            methods.push(self.parse_function()?);
+            if self.consume(&TokenKind::Type).is_some() {
+                // 关联类型绑定 `type Item = Type;`。
+                let (assoc_name, _) = self.expect_identifier("expected associated type name")?;
+                self.expect_simple(TokenKind::Equal, "expected `=` after associated type name")?;
+                let ty = self.parse_type("expected associated type")?;
+                self.expect_simple(TokenKind::Semicolon, "expected `;` after associated type binding")?;
+                assoc_bindings.push((assoc_name, ty));
+            } else {
+                methods.push(self.parse_function()?);
+            }
         }
         self.expect_simple(TokenKind::RightBrace, "expected `}` after impl body")?;
         Ok(ImplBlock {
             source_id: 0,
             trait_name,
             type_name,
+            assoc_bindings,
             methods,
         })
     }
@@ -435,7 +455,25 @@ impl<'a> Parser<'a> {
             });
         }
         let (name, span) = self.expect_identifier(message)?;
-        // 泛型实例 `Vec<i32>`（M15）。
+        // 关联类型引用 `Self::Item`（M15）。
+        if name == "Self" && self.consume(&TokenKind::ColonColon).is_some() {
+            let (assoc_name, assoc_span) =
+                self.expect_identifier("expected associated type name after `Self::`")?;
+            return Ok(TypeRef {
+                kind: TypeRefKind::SelfAssoc(assoc_name),
+                span: span.merge(assoc_span),
+            });
+        }
+        // 收集 `.` 路径段（如 `std.Result`），组成完整类型名。
+        let mut full_name = name;
+        let mut full_span = span;
+        while self.consume(&TokenKind::Dot).is_some() {
+            let (segment, seg_span) = self.expect_identifier("expected name after `.`")?;
+            full_name.push('.');
+            full_name.push_str(&segment);
+            full_span = full_span.merge(seg_span);
+        }
+        // 泛型实例 `Vec<i32>` / `std.Result<i32, i32>`（M15）。
         if let Some(less) = self.consume(&TokenKind::Less) {
             let mut args = Vec::new();
             if !self.check(&TokenKind::Greater) {
@@ -446,15 +484,19 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            let right = self.expect_simple(TokenKind::Greater, "expected `>` after type arguments")?;
+            let right =
+                self.expect_simple(TokenKind::Greater, "expected `>` after type arguments")?;
             return Ok(TypeRef {
-                kind: TypeRefKind::Generic { name, args },
-                span: span.merge(right).merge(less),
+                kind: TypeRefKind::Generic {
+                    name: full_name,
+                    args,
+                },
+                span: full_span.merge(right).merge(less),
             });
         }
         Ok(TypeRef {
-            kind: TypeRefKind::Name(name),
-            span,
+            kind: TypeRefKind::Name(full_name),
+            span: full_span,
         })
     }
 

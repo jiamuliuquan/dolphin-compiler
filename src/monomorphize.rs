@@ -29,6 +29,8 @@ struct Generics {
     fns: HashSet<String>,
     structs: HashSet<String>,
     enums: HashSet<String>,
+    /// 泛型类型（struct/enum）名 → 类型参数数量（用于构造点实例收集的参数校验）。
+    param_counts: HashMap<String, usize>,
 }
 
 /// 收集阶段的作用域：变量名 → 类型，以及所有类型名（用于构造推断）。
@@ -82,6 +84,17 @@ impl Monomorphizer {
                 .iter()
                 .filter(|e| !e.type_params.is_empty())
                 .map(|e| e.name.clone())
+                .collect(),
+            param_counts: program
+                .structs
+                .iter()
+                .map(|s| (s.name.clone(), s.type_params.len()))
+                .chain(
+                    program
+                        .enums
+                        .iter()
+                        .map(|e| (e.name.clone(), e.type_params.len())),
+                )
                 .collect(),
         };
 
@@ -147,7 +160,7 @@ impl Monomorphizer {
         program.enums = concrete_enums;
 
         // 4. 重写残留的泛型引用为 mangling 名。
-        rewrite_program(program, &generics);
+        rewrite_program(program, &generics, &type_instances);
 
         Ok(())
     }
@@ -311,17 +324,17 @@ fn collect_expr(
         ExprKind::Call {
             callee, arguments, ..
         } => {
-            // 枚举构造 `Enum.Variant(args)`。
+            // 枚举构造 `Enum.Variant(args)`：多参数枚举依赖类型引用，构造点推断失败/不足则跳过。
             if let Some((enum_name, _variant)) = callee.rsplit_once('.')
                 && generics.enums.contains(enum_name)
             {
-                type_instances.insert((enum_name.to_string(), infer_args(arguments, scopes)?));
+                collect_type_instance(enum_name, arguments, generics, scopes, type_instances, true);
             } else if generics.fns.contains(callee.as_str()) {
-                // 泛型函数调用。
+                // 泛型函数调用：实参推断失败则报错（函数实例化依赖调用点实参）。
                 fn_instances.insert((callee.clone(), infer_args(arguments, scopes)?));
             } else if generics.structs.contains(callee.as_str()) {
-                // 泛型结构体构造 `Struct(args)`。
-                type_instances.insert((callee.clone(), infer_args(arguments, scopes)?));
+                // 泛型结构体构造 `Struct(args)`：推断失败则跳过；多字段由 zip 截断容忍。
+                collect_type_instance(callee, arguments, generics, scopes, type_instances, false);
             }
             for argument in arguments {
                 collect_expr(argument, generics, fn_instances, type_instances, scopes)?;
@@ -374,6 +387,47 @@ fn collect_expr(
 }
 
 /// 推断一组实参的类型（MVP：字面量）。
+/// 收集泛型类型（struct/enum）构造点的实例；推断失败或参数数量不匹配则跳过。
+fn collect_type_instance(
+    name: &str,
+    arguments: &[Expr],
+    generics: &Generics,
+    scopes: &Scopes,
+    type_instances: &mut HashSet<(String, TypeArgs)>,
+    check_arity: bool,
+) {
+    let Ok(args) = infer_args(arguments, scopes) else {
+        // 推断失败（复杂表达式），实例应从类型引用（返回类型/变量标注）收集。
+        return;
+    };
+    if check_arity
+        && let Some(&count) = generics.param_counts.get(name)
+        && args.len() < count
+    {
+        // 多参数枚举（如 Result<T,E>）：单个构造点的实参不足以推断全部类型参数，
+        // 实例从类型引用收集。
+        return;
+    }
+    type_instances.insert((name.to_string(), args));
+}
+
+/// 查找某个泛型类型的唯一实例；有多个实例则返回 None（无法从构造点确定）。
+fn unique_instance<'a>(
+    name: &str,
+    type_instances: &'a HashSet<(String, TypeArgs)>,
+) -> Option<&'a TypeArgs> {
+    let mut found = None;
+    for (n, args) in type_instances {
+        if n == name {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(args);
+        }
+    }
+    found
+}
+
 fn infer_args(arguments: &[Expr], scopes: &Scopes) -> Result<TypeArgs, Diagnostic> {
     arguments.iter().map(|a| infer_expr_type(a, scopes)).collect()
 }
@@ -443,7 +497,11 @@ fn infer_expr_type(expr: &Expr, scopes: &Scopes) -> Result<TypeRef, Diagnostic> 
 
 // ── 重写 ──────────────────────────────────────────────────────────────────
 
-fn rewrite_program(program: &mut ast::Program, generics: &Generics) {
+fn rewrite_program(
+    program: &mut ast::Program,
+    generics: &Generics,
+    type_instances: &HashSet<(String, TypeArgs)>,
+) {
     let generic_types = union_types(generics);
     let mut scopes = Scopes::new(program);
     for function in &mut program.functions {
@@ -453,7 +511,7 @@ fn rewrite_program(program: &mut ast::Program, generics: &Generics) {
         if let Some(ret) = &mut function.return_type {
             rewrite_type_ref(ret, &generic_types);
         }
-        rewrite_block(&mut function.body, generics, &mut scopes);
+        rewrite_block(&mut function.body, generics, &mut scopes, type_instances);
     }
     for structure in &mut program.structs {
         for field in &mut structure.fields {
@@ -469,13 +527,23 @@ fn rewrite_program(program: &mut ast::Program, generics: &Generics) {
     }
 }
 
-fn rewrite_block(block: &mut [Statement], generics: &Generics, scopes: &mut Scopes) {
+fn rewrite_block(
+    block: &mut [Statement],
+    generics: &Generics,
+    scopes: &mut Scopes,
+    type_instances: &HashSet<(String, TypeArgs)>,
+) {
     for statement in block {
-        rewrite_statement(statement, generics, scopes);
+        rewrite_statement(statement, generics, scopes, type_instances);
     }
 }
 
-fn rewrite_statement(statement: &mut Statement, generics: &Generics, scopes: &mut Scopes) {
+fn rewrite_statement(
+    statement: &mut Statement,
+    generics: &Generics,
+    scopes: &mut Scopes,
+    type_instances: &HashSet<(String, TypeArgs)>,
+) {
     match &mut statement.kind {
         StatementKind::Variable {
             name,
@@ -489,112 +557,121 @@ fn rewrite_statement(statement: &mut Statement, generics: &Generics, scopes: &mu
             } else if let Ok(ty) = infer_expr_type(initializer, scopes) {
                 scopes.declare_var(name, ty);
             }
-            rewrite_expr(initializer, generics, scopes);
+            rewrite_expr(initializer, generics, scopes, type_instances);
         }
-        StatementKind::Assignment { value, .. } => rewrite_expr(value, generics, scopes),
+        StatementKind::Assignment { value, .. } => rewrite_expr(value, generics, scopes, type_instances),
         StatementKind::IndexAssignment { index, value, .. } => {
-            rewrite_expr(index, generics, scopes);
-            rewrite_expr(value, generics, scopes);
+            rewrite_expr(index, generics, scopes, type_instances);
+            rewrite_expr(value, generics, scopes, type_instances);
         }
         StatementKind::DerefAssignment { target, value, .. } => {
-            rewrite_expr(target, generics, scopes);
-            rewrite_expr(value, generics, scopes);
+            rewrite_expr(target, generics, scopes, type_instances);
+            rewrite_expr(value, generics, scopes, type_instances);
         }
         StatementKind::PtrFieldAssignment { base, value, .. } => {
-            rewrite_expr(base, generics, scopes);
-            rewrite_expr(value, generics, scopes);
+            rewrite_expr(base, generics, scopes, type_instances);
+            rewrite_expr(value, generics, scopes, type_instances);
         }
-        StatementKind::Defer { value } => rewrite_expr(value, generics, scopes),
+        StatementKind::Defer { value } => rewrite_expr(value, generics, scopes, type_instances),
         StatementKind::Try { resources, body } => {
             for resource in resources {
-                rewrite_expr(&mut resource.initializer, generics, scopes);
+                rewrite_expr(&mut resource.initializer, generics, scopes, type_instances);
             }
-            rewrite_block(body, generics, scopes);
+            rewrite_block(body, generics, scopes, type_instances);
         }
-        StatementKind::Expression(expr) => rewrite_expr(expr, generics, scopes),
+        StatementKind::Expression(expr) => rewrite_expr(expr, generics, scopes, type_instances),
         StatementKind::If {
             condition,
             then_block,
             else_block,
         } => {
-            rewrite_expr(condition, generics, scopes);
-            rewrite_block(then_block, generics, scopes);
+            rewrite_expr(condition, generics, scopes, type_instances);
+            rewrite_block(then_block, generics, scopes, type_instances);
             if let Some(else_block) = else_block {
-                rewrite_block(else_block, generics, scopes);
+                rewrite_block(else_block, generics, scopes, type_instances);
             }
         }
-        StatementKind::Loop(body) => rewrite_block(body, generics, scopes),
+        StatementKind::Loop(body) => rewrite_block(body, generics, scopes, type_instances),
         StatementKind::While { condition, body } => {
-            rewrite_expr(condition, generics, scopes);
-            rewrite_block(body, generics, scopes);
+            rewrite_expr(condition, generics, scopes, type_instances);
+            rewrite_block(body, generics, scopes, type_instances);
         }
         StatementKind::For {
             iterable, body, ..
         } => {
             match iterable {
                 ast::ForIterable::Range { start, end, .. } => {
-                    rewrite_expr(start, generics, scopes);
-                    rewrite_expr(end, generics, scopes);
+                    rewrite_expr(start, generics, scopes, type_instances);
+                    rewrite_expr(end, generics, scopes, type_instances);
                 }
-                ast::ForIterable::Array(array) => rewrite_expr(array, generics, scopes),
+                ast::ForIterable::Array(array) => rewrite_expr(array, generics, scopes, type_instances),
             }
-            rewrite_block(body, generics, scopes);
+            rewrite_block(body, generics, scopes, type_instances);
         }
         StatementKind::Break | StatementKind::Continue => {}
         StatementKind::Return(expr) => {
             if let Some(expr) = expr {
-                rewrite_expr(expr, generics, scopes);
+                rewrite_expr(expr, generics, scopes, type_instances);
             }
         }
     }
 }
 
-fn rewrite_expr(expr: &mut Expr, generics: &Generics, scopes: &mut Scopes) {
+fn rewrite_expr(
+    expr: &mut Expr,
+    generics: &Generics,
+    scopes: &mut Scopes,
+    type_instances: &HashSet<(String, TypeArgs)>,
+) {
     match &mut expr.kind {
         ExprKind::Call { callee, arguments, .. } => {
             if let Some((enum_name, variant)) = callee.rsplit_once('.')
                 && generics.enums.contains(enum_name)
             {
-                let args = infer_args(arguments, scopes).expect("collected enum args");
-                *callee = format!("{}.{}", mangle(enum_name, &args), variant);
+                // 枚举构造：用已收集的实例 mangle（实例从类型引用/构造点收集）。
+                if let Some(args) = unique_instance(enum_name, type_instances) {
+                    *callee = format!("{}.{}", mangle(enum_name, args), variant);
+                }
             } else if generics.fns.contains(callee.as_str()) {
                 let args = infer_args(arguments, scopes).expect("collected fn args");
                 *callee = mangle(callee, &args);
             } else if generics.structs.contains(callee.as_str()) {
-                let args = infer_args(arguments, scopes).expect("collected struct args");
-                *callee = mangle(callee, &args);
+                // 结构体构造：从构造实参推断实例（多字段由 zip 截断容忍）。
+                if let Ok(args) = infer_args(arguments, scopes) {
+                    *callee = mangle(callee, &args);
+                }
             }
             for argument in arguments {
-                rewrite_expr(argument, generics, scopes);
+                rewrite_expr(argument, generics, scopes, type_instances);
             }
         }
         ExprKind::Cast { value, ty } => {
-            rewrite_expr(value, generics, scopes);
+            rewrite_expr(value, generics, scopes, type_instances);
             rewrite_type_ref(ty, &union_types(generics));
         }
         ExprKind::Array(values) => {
             for value in values {
-                rewrite_expr(value, generics, scopes);
+                rewrite_expr(value, generics, scopes, type_instances);
             }
         }
-        ExprKind::RepeatArray { value, .. } => rewrite_expr(value, generics, scopes),
+        ExprKind::RepeatArray { value, .. } => rewrite_expr(value, generics, scopes, type_instances),
         ExprKind::Index { array, index } => {
-            rewrite_expr(array, generics, scopes);
-            rewrite_expr(index, generics, scopes);
+            rewrite_expr(array, generics, scopes, type_instances);
+            rewrite_expr(index, generics, scopes, type_instances);
         }
-        ExprKind::Unary { operand, .. } => rewrite_expr(operand, generics, scopes),
+        ExprKind::Unary { operand, .. } => rewrite_expr(operand, generics, scopes, type_instances),
         ExprKind::Binary { left, right, .. } => {
-            rewrite_expr(left, generics, scopes);
-            rewrite_expr(right, generics, scopes);
+            rewrite_expr(left, generics, scopes, type_instances);
+            rewrite_expr(right, generics, scopes, type_instances);
         }
-        ExprKind::Field { base, .. } => rewrite_expr(base, generics, scopes),
+        ExprKind::Field { base, .. } => rewrite_expr(base, generics, scopes, type_instances),
         ExprKind::AddressOf { operand }
         | ExprKind::Deref { operand }
-        | ExprKind::PtrField { base: operand, .. } => rewrite_expr(operand, generics, scopes),
+        | ExprKind::PtrField { base: operand, .. } => rewrite_expr(operand, generics, scopes, type_instances),
         ExprKind::Match { value, arms } => {
-            rewrite_expr(value, generics, scopes);
+            rewrite_expr(value, generics, scopes, type_instances);
             for arm in arms {
-                rewrite_expr(&mut arm.body, generics, scopes);
+                rewrite_expr(&mut arm.body, generics, scopes, type_instances);
             }
         }
         ExprKind::Number(_)
@@ -719,6 +796,8 @@ fn substitute_type(ty: &TypeRef, map: &HashMap<String, TypeRef>) -> TypeRef {
             },
             span: ty.span,
         },
+        // 关联类型 `Self::Item` 不在单态化范围（methods 提升时已替换），原样保留。
+        TypeRefKind::SelfAssoc(_) => ty.clone(),
     }
 }
 
@@ -864,7 +943,7 @@ fn collect_type_ref(
         | TypeRefKind::Pointer { inner: element } => {
             collect_type_ref(element, generic_types, type_instances);
         }
-        TypeRefKind::Name(_) => {}
+        TypeRefKind::Name(_) | TypeRefKind::SelfAssoc(_) => {}
     }
 }
 
@@ -885,7 +964,7 @@ fn rewrite_type_ref(ty: &mut TypeRef, generic_types: &HashSet<String>) {
         | TypeRefKind::Pointer { inner: element } => {
             rewrite_type_ref(element, generic_types);
         }
-        TypeRefKind::Name(_) => {}
+        TypeRefKind::Name(_) | TypeRefKind::SelfAssoc(_) => {}
     }
 }
 
@@ -911,6 +990,7 @@ fn mangle(name: &str, args: &TypeArgs) -> String {
 fn type_mangle_name(ty: &TypeRef) -> String {
     match &ty.kind {
         TypeRefKind::Name(name) => name.clone(),
+        TypeRefKind::SelfAssoc(name) => name.clone(),
         TypeRefKind::Slice { element } => format!("slice${}", type_mangle_name(element)),
         TypeRefKind::Pointer { inner } => format!("ptr${}", type_mangle_name(inner)),
         TypeRefKind::Array { element, length } => {

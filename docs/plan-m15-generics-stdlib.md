@@ -119,12 +119,12 @@ M15 的核心是「首次引入类型抽象层」。按 §3.4 已确定的方案
 - 把 `for` 从硬编码两条路径（[ast.rs `ForIterable`](../src/ast.rs:168)）重构为「对实现 `Iterator` 的类型展开」。
 - 展开：`var it = iterable.into_iter(); loop { match it.next() { Some(x) => { body }, None => break } }`。
 
-### 4.3 错误处理 `?`（§8/§11.7）
+### 4.3 错误处理（§8/§11.7）
 
 - `Result<T,E>` 用泛型枚举实现。
-- `?` 仅作用于 `Result`，`expr?` = 「`Err` 提前 return，`Ok` 解包」；错误类型不自动转换。
+- `?` 传播语法**不引入**（已确定），错误传播用 `match` 显式展开。
 
-**验证（验收试金石）**：`for x in my_custom_iter` 能跑通（用户自定义迭代器）；`Vec<i32>.push/pop` 链式可用；`?` 传播在错误路径正确提前返回。新增 `examples/m15` 示例。
+**验证（验收试金石）**：`for x in my_custom_iter` 能跑通（用户自定义迭代器）；`Result` 错误路径经 `match` 正确提前返回。新增 `examples/m15` 示例。
 
 ---
 

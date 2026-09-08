@@ -348,6 +348,7 @@ impl<'a> Lexer<'a> {
             "try" => TokenKind::Try,
             "trait" => TokenKind::Trait,
             "impl" => TokenKind::Impl,
+            "type" => TokenKind::Type,
             value => TokenKind::Identifier(value.to_string()),
         }
     }

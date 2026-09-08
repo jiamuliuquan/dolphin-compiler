@@ -1217,17 +1217,14 @@ impl<'a> FunctionLowerer<'a> {
     fn lower_array_for(
         &mut self,
         name: &str,
-        _name_span: Span,
+        name_span: Span,
         array: &ast::Expr,
         statements: &[Statement],
     ) -> Result<(), Diagnostic> {
         let array_value = self.lower_expr(array)?;
         let Type::Array { element, length } = array_value.ty else {
-            return Err(Diagnostic::at(
-                self.source,
-                array.span,
-                "`for` expects an array or integer range",
-            ));
+            // 非数组：走迭代器协议（`into_iter`/`next`，M15 for 泛型化）。
+            return self.lower_iterator_for(name, name_span, array_value, statements);
         };
         let array_local = self.store_temporary(array_value);
         let index_local = self.store_temporary(Expr::i32(0));
@@ -1297,6 +1294,176 @@ impl<'a> FunctionLowerer<'a> {
             },
         });
         self.terminate(Terminator::Jump(condition_block));
+        self.current = exit;
+        Ok(())
+    }
+
+    /// 给定接收者类型与 local，生成方法调用 IR（self 值或指针由方法签名决定）。
+    fn lower_method_call_ir(
+        &mut self,
+        receiver_ty: Type,
+        receiver_local: LocalId,
+        method_name: &str,
+        span: Span,
+    ) -> Result<Expr, Diagnostic> {
+        let Type::Struct(id) = receiver_ty else {
+            return Err(Diagnostic::at(
+                self.source,
+                span,
+                format!("cannot call method `{method_name}` on `{receiver_ty}`"),
+            ));
+        };
+        let type_name = self
+            .type_names
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| Diagnostic::at(self.source, span, "unknown type"))?;
+        let fn_name = self
+            .methods
+            .lookup(&type_name, method_name)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                Diagnostic::at(
+                    self.source,
+                    span,
+                    format!("type `{type_name}` has no method `{method_name}`"),
+                )
+            })?;
+        let signature = self
+            .signatures
+            .get(&fn_name)
+            .cloned()
+            .ok_or_else(|| Diagnostic::at(self.source, span, format!("unknown method `{method_name}`")))?;
+        let self_arg = if matches!(signature.parameters.first(), Some(Type::Ptr(_))) {
+            let pointer = match receiver_ty {
+                Type::Struct(id) => crate::ir::Pointer::Struct(id),
+                Type::Enum(id) => crate::ir::Pointer::Enum(id),
+                other => {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        span,
+                        format!("cannot take the address of `{other}`"),
+                    ));
+                }
+            };
+            Expr {
+                kind: ir::ExprKind::AddressOf(Box::new(Expr {
+                    kind: ir::ExprKind::Local(receiver_local),
+                    ty: receiver_ty,
+                })),
+                ty: Type::Ptr(pointer),
+            }
+        } else {
+            Expr {
+                kind: ir::ExprKind::Local(receiver_local),
+                ty: receiver_ty,
+            }
+        };
+        Ok(Expr {
+            kind: ir::ExprKind::Call {
+                function: signature.id,
+                arguments: vec![self_arg],
+            },
+            ty: signature.return_type,
+        })
+    }
+
+    /// for 迭代器协议（M15）：`for x in iterable` 展开为
+    /// `var it = iterable.into_iter(); loop { var opt = it.next(); 若 opt 是 None 则 break；解包 Some 绑定 x }`。
+    fn lower_iterator_for(
+        &mut self,
+        name: &str,
+        name_span: Span,
+        iterable: Expr,
+        statements: &[Statement],
+    ) -> Result<(), Diagnostic> {
+        let iterable_ty = iterable.ty;
+        let iterable_local = self.store_temporary(iterable);
+        // var it = iterable.into_iter();
+        let iter_expr = self.lower_method_call_ir(iterable_ty, iterable_local, "into_iter", name_span)?;
+        let iter_ty = iter_expr.ty;
+        let iter_local = self.store_temporary(iter_expr);
+
+        let condition_block = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.terminate(Terminator::Jump(condition_block));
+
+        self.current = condition_block;
+        // var opt = it.next() → Option<T>
+        let next_expr = self.lower_method_call_ir(iter_ty, iter_local, "next", name_span)?;
+        let Type::Enum(option_id) = next_expr.ty else {
+            return Err(Diagnostic::at(
+                self.source,
+                name_span,
+                "iterator `next` must return an `Option<T>`",
+            ));
+        };
+        let (some_index, none_index, field_ty) = {
+            let TypeDef::Enum { variants, .. } = &self.types[option_id.0] else {
+                unreachable!("option resolves an enum type");
+            };
+            let some_index = variants.iter().position(|v| v.name == "Some").ok_or_else(|| {
+                Diagnostic::at(self.source, name_span, "iterator `next` return type has no `Some` variant")
+            })?;
+            let none_index = variants.iter().position(|v| v.name == "None").ok_or_else(|| {
+                Diagnostic::at(self.source, name_span, "iterator `next` return type has no `None` variant")
+            })?;
+            let field_ty = variants[some_index].fields[0];
+            (some_index, none_index, field_ty)
+        };
+        let opt_ty = Type::Enum(option_id);
+        let opt_local = self.store_temporary(next_expr);
+
+        // 读 tag，判断是否 None → exit。
+        let tag = Expr {
+            kind: ir::ExprKind::EnumTag(Box::new(local_expr(opt_local, opt_ty))),
+            ty: Type::I32,
+        };
+        self.terminate(Terminator::Branch {
+            condition: Expr {
+                kind: ir::ExprKind::Binary {
+                    operator: BinaryOperator::Equal,
+                    left: Box::new(tag),
+                    right: Box::new(Expr::i32(none_index as i32)),
+                },
+                ty: Type::Bool,
+            },
+            then_block: exit,
+            else_block: body,
+        });
+
+        // body：解包 Some 字段，绑定到循环变量，执行循环体。
+        self.current = body;
+        let item_expr = Expr {
+            kind: ir::ExprKind::EnumField {
+                value: Box::new(local_expr(opt_local, opt_ty)),
+                variant: some_index,
+                field: 0,
+            },
+            ty: field_ty,
+        };
+        let item_local = self.store_temporary(item_expr);
+        self.loops.push(LoopTargets {
+            break_block: exit,
+            continue_block: condition_block,
+        });
+        let result = self.with_scope(|lowerer| {
+            lowerer.scopes.last_mut().unwrap().insert(
+                name.to_string(),
+                Binding {
+                    local: item_local,
+                    ty: field_ty,
+                    mutable: false,
+                },
+            );
+            lowerer.lower_statements(statements)
+        });
+        self.loops.pop();
+        result?;
+        if !self.is_terminated(self.current) {
+            self.terminate(Terminator::Jump(condition_block));
+        }
         self.current = exit;
         Ok(())
     }
@@ -1498,6 +1665,27 @@ impl<'a> FunctionLowerer<'a> {
                 return Ok(call);
             }
         }
+        if callee == "string.from_bytes" {
+            if arguments.len() != 1 {
+                return Err(Diagnostic::at(
+                    self.source,
+                    callee_span,
+                    "`string.from_bytes` expects one argument",
+                ));
+            }
+            let value = self.lower_expr(&arguments[0])?;
+            if !matches!(value.ty, Type::Slice(_)) {
+                return Err(Diagnostic::at(
+                    self.source,
+                    arguments[0].span,
+                    format!("`string.from_bytes` expects a `[]u8` slice, found `{}`", value.ty),
+                ));
+            }
+            return Ok(Expr {
+                kind: ir::ExprKind::BytesToString(Box::new(value)),
+                ty: Type::String,
+            });
+        }
         if callee == "length" {
             if arguments.len() != 1 {
                 return Err(Diagnostic::at(
@@ -1670,6 +1858,16 @@ impl<'a> FunctionLowerer<'a> {
             Ok(binding) => binding.clone(),
             Err(_) => return Ok(None),
         };
+        // 内建方法 `s.bytes()`：string → []u8 零成本视图（布局等价，仅重标类型）。
+        if binding.ty == Type::String && method_name == "bytes" && arguments.is_empty() {
+            return Ok(Some(Expr {
+                kind: ir::ExprKind::StringBytes(Box::new(Expr {
+                    kind: ir::ExprKind::Local(binding.local),
+                    ty: Type::String,
+                })),
+                ty: Type::Slice(crate::ir::ScalarType::U8),
+            }));
+        }
         let Type::Struct(id) = binding.ty else {
             return Ok(None);
         };
@@ -2368,6 +2566,11 @@ fn resolve_type(
             source,
             type_ref.span,
             format!("generic type `{name}<..>` was not monomorphized"),
+        )),
+        TypeRefKind::SelfAssoc(name) => Err(Diagnostic::at(
+            source,
+            type_ref.span,
+            format!("associated type `Self::{name}` was not resolved (missing impl binding)"),
         )),
         TypeRefKind::Name(name) => match name.as_str() {
             "i8" => Ok(Type::I8),

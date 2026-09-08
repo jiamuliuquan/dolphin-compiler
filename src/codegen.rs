@@ -332,6 +332,8 @@ fn collect_expr_strings(expression: &Expr, values: &mut HashSet<String>) {
         }
         ExprKind::Cast { value, .. } => collect_expr_strings(value, values),
         ExprKind::StringLength(value) => collect_expr_strings(value, values),
+        ExprKind::StringBytes(value) => collect_expr_strings(value, values),
+        ExprKind::BytesToString(value) => collect_expr_strings(value, values),
         ExprKind::StructInit { fields } => {
             for field in fields {
                 collect_expr_strings(field, values);
@@ -364,6 +366,8 @@ fn collect_expr_strings(expression: &Expr, values: &mut HashSet<String>) {
                 collect_expr_strings(&arm.body, values);
             }
         }
+        ExprKind::EnumTag(value) => collect_expr_strings(value, values),
+        ExprKind::EnumField { value, .. } => collect_expr_strings(value, values),
         ExprKind::Integer(_)
         | ExprKind::Float(_)
         | ExprKind::Char(_)
@@ -907,6 +911,22 @@ impl Emitter<'_, '_> {
                 };
                 RuntimeValue::scalar(Type::I32, length)
             }
+            ExprKind::StringBytes(value) => {
+                // string → []u8 零成本视图：布局等价，直接复用 {ptr, len} 分量。
+                let value = self.emit_expr(value);
+                RuntimeValue {
+                    ty: expression.ty,
+                    values: value.values,
+                }
+            }
+            ExprKind::BytesToString(value) => {
+                // []u8 → string 零成本视图：StringBytes 的反向。
+                let value = self.emit_expr(value);
+                RuntimeValue {
+                    ty: expression.ty,
+                    values: value.values,
+                }
+            }
             ExprKind::Array(elements) => {
                 let mut values =
                     Vec::with_capacity(abi_width(expression.ty, self.types, self.pointer_type));
@@ -1213,6 +1233,48 @@ impl Emitter<'_, '_> {
                         };
                     }
                     start += width;
+                }
+                unreachable!("field index was validated during lowering");
+            }
+            ExprKind::EnumTag(value) => {
+                // 读枚举判别 tag（M15 for 泛型化）：values[0] 即 I32 tag。
+                let value = self.emit_expr(value);
+                let tag = value.values[0];
+                RuntimeValue::scalar(Type::I32, tag)
+            }
+            ExprKind::EnumField {
+                value,
+                variant,
+                field,
+            } => {
+                // 解包枚举 variant 的字段（M15 for 泛型化）。
+                let value = self.emit_expr(value);
+                let Type::Enum(id) = value.ty else {
+                    unreachable!("enum field access targets an enum");
+                };
+                let TypeDef::Enum { variants, .. } = &self.types[id.0] else {
+                    unreachable!("enum field access resolves an enum type");
+                };
+                let variant_def = &variants[*variant];
+                let field_ty = variant_def.fields[*field];
+                // 字段从 values[1]（tag 之后）开始。
+                let mut offset = 1;
+                for (index, f) in variant_def.fields.iter().enumerate() {
+                    let component_types: Vec<clif::Type> =
+                        component_layout(*f, self.types, self.pointer_type)
+                            .into_iter()
+                            .map(|(ty, _)| ty)
+                            .collect();
+                    let width = component_types.len();
+                    if index == *field {
+                        let uniform_values = &value.values[offset..offset + width];
+                        let field_values = self.uniform_decode(uniform_values, &component_types);
+                        return RuntimeValue {
+                            ty: field_ty,
+                            values: field_values,
+                        };
+                    }
+                    offset += width;
                 }
                 unreachable!("field index was validated during lowering");
             }

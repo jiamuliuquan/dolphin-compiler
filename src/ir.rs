@@ -250,6 +250,10 @@ pub enum ExprKind {
     Bool(bool),
     String(String),
     StringLength(Box<Expr>),
+    /// `s.bytes()`（M15）：string → []u8 零成本视图（布局等价，仅重标类型）。
+    StringBytes(Box<Expr>),
+    /// `string.from_bytes(buf)`（M15）：[]u8 → string 零成本视图（StringBytes 的反向）。
+    BytesToString(Box<Expr>),
     Array(Vec<Expr>),
     RepeatArray {
         value: Box<Expr>,
@@ -317,6 +321,14 @@ pub enum ExprKind {
     },
     /// 切片长度 `length(s)`（M14）：取 `{ ptr, len }` 的 len 分量。
     SliceLen(Box<Expr>),
+    /// 读枚举的判别 tag（M15 for 泛型化）：返回 I32。
+    EnumTag(Box<Expr>),
+    /// 解包枚举 variant 的字段（M15 for 泛型化）。
+    EnumField {
+        value: Box<Expr>,
+        variant: usize,
+        field: usize,
+    },
 }
 
 #[derive(Clone, Debug)]

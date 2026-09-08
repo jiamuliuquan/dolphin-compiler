@@ -7,6 +7,9 @@ use crate::diagnostic::Diagnostic;
 use crate::source::SourceFile;
 use crate::{lexer, parser};
 
+/// 内置标准库源码（模块 `std`），随编译器分发（见提案 §6.1）。
+const STD_SOURCE: &str = include_str!("stdlib/std.do");
+
 pub struct LoadedProgram {
     pub sources: Vec<SourceFile>,
     pub program: ast::Program,
@@ -94,6 +97,9 @@ pub fn load_sources(
         });
     }
 
+    // 注入内置标准库（模块 `std`），随编译器分发。
+    push_stdlib_unit(&mut sources, &mut units)?;
+
     resolve_modules(&sources, &mut units)?;
     let mut functions = Vec::new();
     let mut structs = Vec::new();
@@ -119,6 +125,39 @@ pub fn load_sources(
             impls,
         },
     })
+}
+
+/// 解析并注入内置标准库源码（模块 `std`）。
+fn push_stdlib_unit(
+    sources: &mut Vec<SourceFile>,
+    units: &mut Vec<Unit>,
+) -> Result<(), Diagnostic> {
+    let source = SourceFile::new(PathBuf::from("<stdlib>/std.do"), STD_SOURCE.to_string());
+    let tokens = lexer::lex(&source)?;
+    let mut program = parser::parse(&source, tokens)?;
+    let source_id = sources.len();
+    for function in &mut program.functions {
+        function.source_id = source_id;
+    }
+    for structure in &mut program.structs {
+        structure.source_id = source_id;
+    }
+    for enumeration in &mut program.enums {
+        enumeration.source_id = source_id;
+    }
+    for trait_decl in &mut program.traits {
+        trait_decl.source_id = source_id;
+    }
+    for impl_block in &mut program.impls {
+        impl_block.source_id = source_id;
+    }
+    sources.push(source);
+    units.push(Unit {
+        source_id,
+        module: "std".to_string(),
+        program,
+    });
+    Ok(())
 }
 
 fn discover_sources(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), Diagnostic> {
@@ -799,6 +838,8 @@ fn resolve_type_ref(
             }
             Ok(())
         }
+        // 关联类型 `Self::Item`（M15）：不 qualify，留待 methods 提升时替换。
+        ast::TypeRefKind::SelfAssoc(_) => Ok(()),
     }
 }
 

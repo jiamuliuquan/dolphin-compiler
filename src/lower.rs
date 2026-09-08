@@ -19,7 +19,10 @@ pub fn lower_sources(
     sources: &[SourceFile],
     program: &ast::Program,
 ) -> Result<ir::Program, Diagnostic> {
-    ProgramLowerer::new(sources, program).lower()
+    // M15：先做单态化（AST 层泛型展开），再走原有 lowering。
+    let mut program = program.clone();
+    crate::monomorphize::monomorphize(sources, &mut program)?;
+    ProgramLowerer::new(sources, &program).lower()
 }
 
 #[derive(Clone)]
@@ -812,20 +815,20 @@ impl<'a> FunctionLowerer<'a> {
         let mut resource_inits = Vec::with_capacity(resources.len());
         for resource in resources {
             let value = self.lower_expr(&resource.initializer)?;
-            let Type::Slice(crate::ir::ScalarType::U8) = value.ty else {
+            let Type::Slice(element) = value.ty else {
                 return Err(Diagnostic::at(
                     self.source,
                     resource.initializer.span,
-                    "`try` resource must be a `[]u8` slice (e.g. from `allocate`)",
+                    "`try` resource must be a slice (e.g. from `allocate`)",
                 ));
             };
-            resource_inits.push((resource.name.clone(), resource.name_span, value));
+            resource_inits.push((resource.name.clone(), resource.name_span, value, element));
         }
         // 建立 try 作用域：绑定资源变量 + 标记资源名 + 逆序 defer free。
         self.scopes.push(HashMap::new());
         self.deferred.push(Vec::new());
         self.try_resources.push(HashSet::new());
-        for (name, _name_span, _value) in resource_inits.iter() {
+        for (name, _name_span, _value, _element) in resource_inits.iter() {
             self.try_resources
                 .last_mut()
                 .expect("try scope is balanced")
@@ -833,7 +836,7 @@ impl<'a> FunctionLowerer<'a> {
         }
         // 按声明顺序 allocate + 注册 defer free；出块时 deferred 栈 LIFO 逆序释放
         // （§12.8：声明顺序的逆序，即后声明的资源先释放）。
-        for (name, _name_span, value) in resource_inits.into_iter() {
+        for (name, _name_span, value, element) in resource_inits.into_iter() {
             let local = LocalId(self.locals.len());
             self.locals.push(value.ty);
             self.emit(Instruction::SetLocal { local, value });
@@ -841,14 +844,14 @@ impl<'a> FunctionLowerer<'a> {
                 name.clone(),
                 Binding {
                     local,
-                    ty: Type::Slice(crate::ir::ScalarType::U8),
+                    ty: Type::Slice(element),
                     mutable: true,
                 },
             );
             let free = Expr {
                 kind: ir::ExprKind::Free(Box::new(Expr {
                     kind: ir::ExprKind::Local(local),
-                    ty: Type::Slice(crate::ir::ScalarType::U8),
+                    ty: Type::Slice(element),
                 })),
                 ty: Type::Unit,
             };
@@ -1390,8 +1393,9 @@ impl<'a> FunctionLowerer<'a> {
             ExprKind::Call {
                 callee,
                 callee_span,
+                type_args,
                 arguments,
-            } => self.lower_call(callee, *callee_span, arguments),
+            } => self.lower_call(callee, *callee_span, type_args.as_deref(), arguments),
             ExprKind::Cast { value, ty } => {
                 let value = self.lower_expr(value)?;
                 let to = resolve_type(self.source, ty, self.types, self.type_ids)?;
@@ -1466,6 +1470,7 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         callee: &str,
         callee_span: Span,
+        type_args: Option<&[ast::TypeRef]>,
         arguments: &[ast::Expr],
     ) -> Result<Expr, Diagnostic> {
         if callee == "length" {
@@ -1507,6 +1512,35 @@ impl<'a> FunctionLowerer<'a> {
                     "`allocate` expects one argument",
                 ));
             }
+            // 元素类型：`allocate<T>(n)` 显式指定，否则默认 `u8`（§3.3 `allocate<u8>` 特例）。
+            let element = match type_args {
+                Some([ty]) => {
+                    let resolved = resolve_type(self.source, ty, self.types, self.type_ids)?;
+                    let scalar = resolved.as_scalar().ok_or_else(|| {
+                        Diagnostic::at(
+                            self.source,
+                            ty.span,
+                            format!("slice element must be a scalar, found `{resolved}`"),
+                        )
+                    })?;
+                    if matches!(scalar, crate::ir::ScalarType::String) {
+                        return Err(Diagnostic::at(
+                            self.source,
+                            ty.span,
+                            "`string` cannot be a slice element",
+                        ));
+                    }
+                    scalar
+                }
+                Some(_) => {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        callee_span,
+                        "`allocate` expects exactly one type argument",
+                    ));
+                }
+                None => crate::ir::ScalarType::U8,
+            };
             let value = self.lower_expr(&arguments[0])?;
             if !value.ty.is_integer() {
                 return Err(Diagnostic::at(
@@ -1517,7 +1551,7 @@ impl<'a> FunctionLowerer<'a> {
             }
             return Ok(Expr {
                 kind: ir::ExprKind::Allocate(Box::new(value)),
-                ty: Type::Slice(crate::ir::ScalarType::U8),
+                ty: Type::Slice(element),
             });
         }
         if callee == "free" {
@@ -2218,15 +2252,10 @@ fn resolve_type(
     type_ids: &HashMap<String, TypeId>,
 ) -> Result<Type, Diagnostic> {
     match &type_ref.kind {
-        TypeRefKind::TypeParam(name) => Err(Diagnostic::at(
-            source,
-            type_ref.span,
-            format!("type parameter `{name}` is not yet implemented"),
-        )),
         TypeRefKind::Generic { name, .. } => Err(Diagnostic::at(
             source,
             type_ref.span,
-            format!("generic type `{name}<..>` is not yet implemented"),
+            format!("generic type `{name}<..>` was not monomorphized"),
         )),
         TypeRefKind::Name(name) => match name.as_str() {
             "i8" => Ok(Type::I8),
@@ -2280,18 +2309,11 @@ fn resolve_type(
             })
         }
         TypeRefKind::Slice { element } => {
-            // 首版切片仅支持 `[]u8`（与 `string` 别名等价，见提案 §12.3a/§12.4）。
+            // 切片 `[]T`（M14 起仅 `[]u8`，M15 泛型化后支持任意标量元素）。
             let element_type = resolve_type(source, element, types, type_ids)?;
             let scalar = element_type.as_scalar().ok_or_else(|| {
                 Diagnostic::at(source, element.span, "slice elements must be scalar values")
             })?;
-            if !matches!(scalar, crate::ir::ScalarType::U8) {
-                return Err(Diagnostic::at(
-                    source,
-                    element.span,
-                    "only `[]u8` slices are supported in this milestone",
-                ));
-            }
             Ok(Type::Slice(scalar))
         }
         TypeRefKind::Pointer { inner } => {

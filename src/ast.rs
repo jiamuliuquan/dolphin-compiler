@@ -1,6 +1,6 @@
 use crate::source::Span;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Program {
     pub package: Option<PathRef>,
     pub uses: Vec<PathRef>,
@@ -11,38 +11,36 @@ pub struct Program {
     pub impls: Vec<ImplBlock>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StructDecl {
     pub source_id: usize,
     pub public: bool,
     pub name: String,
     pub name_span: Span,
     /// 类型参数列表 `<T, U>`（M15，阶段 1 解析、阶段 2 使用）。
-    #[allow(dead_code)]
     pub type_params: Vec<String>,
     pub fields: Vec<FieldDecl>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FieldDecl {
     pub name: String,
     pub name_span: Span,
     pub ty: TypeRef,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct EnumDecl {
     pub source_id: usize,
     pub public: bool,
     pub name: String,
     pub name_span: Span,
     /// 类型参数列表 `<T, U>`（M15，阶段 1 解析、阶段 2 使用）。
-    #[allow(dead_code)]
     pub type_params: Vec<String>,
     pub variants: Vec<VariantDecl>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct VariantDecl {
     pub name: String,
     pub name_span: Span,
@@ -50,7 +48,7 @@ pub struct VariantDecl {
 }
 
 /// 契约声明 `trait 名 { 方法签名 }`（M15）。
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)] // 阶段 3 使用。
 pub struct TraitDecl {
     pub source_id: usize,
@@ -61,7 +59,7 @@ pub struct TraitDecl {
 }
 
 /// 契约方法签名（M15）：只声明、不写函数体。
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)] // 阶段 3 使用。
 pub struct MethodSignature {
     pub name: String,
@@ -71,7 +69,7 @@ pub struct MethodSignature {
 }
 
 /// 实现块（M15）：`impl Type { ... }` 或 `impl Trait for Type { ... }`。
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)] // 阶段 3 使用。
 pub struct ImplBlock {
     pub source_id: usize,
@@ -81,20 +79,19 @@ pub struct ImplBlock {
     pub methods: Vec<Function>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PathRef {
     pub segments: Vec<String>,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Function {
     pub source_id: usize,
     pub public: bool,
     pub name: String,
     pub name_span: Span,
     /// 类型参数列表 `<T, U>`（M15，阶段 1 解析、阶段 2 使用）。
-    #[allow(dead_code)]
     pub type_params: Vec<String>,
     pub parameters: Vec<Parameter>,
     pub return_type: Option<TypeRef>,
@@ -102,20 +99,33 @@ pub struct Function {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Parameter {
     pub name: String,
     pub name_span: Span,
     pub ty: TypeRef,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TypeRef {
     pub kind: TypeRefKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+/// 类型引用的等价与哈希：忽略 `span`，只比较结构（用于单态化去重）。
+impl PartialEq for TypeRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+impl Eq for TypeRef {}
+impl std::hash::Hash for TypeRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TypeRefKind {
     Name(String),
     Array {
@@ -130,9 +140,6 @@ pub enum TypeRefKind {
     Pointer {
         inner: Box<TypeRef>,
     },
-    /// 类型参数 `T`（M15）。
-    #[allow(dead_code)] // 阶段 2 识别。
-    TypeParam(String),
     /// 泛型实例 `Vec<i32>`（M15）。
     Generic {
         name: String,
@@ -142,13 +149,13 @@ pub enum TypeRefKind {
 
 pub type Block = Vec<Statement>;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Statement {
     pub kind: StatementKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum StatementKind {
     Variable {
         mutable: bool,
@@ -215,7 +222,7 @@ pub enum StatementKind {
     Return(Option<Expr>),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ForIterable {
     Range {
         start: Expr,
@@ -226,7 +233,7 @@ pub enum ForIterable {
 }
 
 /// `try(...)` 括号内声明的资源（M14）：`var name = initializer`。
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TryResource {
     pub name: String,
     pub name_span: Span,
@@ -243,13 +250,13 @@ pub enum AssignmentOperator {
     Remainder,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ExprKind {
     Number(String),
     Character(char),
@@ -264,6 +271,8 @@ pub enum ExprKind {
     Call {
         callee: String,
         callee_span: Span,
+        /// 显式泛型实参 `allocate<T>(n)`（M15）。普通调用为 `None`。
+        type_args: Option<Vec<TypeRef>>,
         arguments: Vec<Expr>,
     },
     Index {
@@ -308,13 +317,13 @@ pub enum ExprKind {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MatchArm {
     pub pattern: MatchPattern,
     pub body: Expr,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum MatchPattern {
     Enum {
         name: String,

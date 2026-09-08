@@ -173,6 +173,34 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
+    /// 前瞻探测：当前 `<` 之后是否匹配「类型 (`,` 类型)* `>` `(`」，
+    /// 即是否构成 `foo<T>(...)` 泛型调用（而非 `a < b` 比较）。
+    fn looks_like_generic_call(&self) -> bool {
+        let mut i = self.position;
+        if !matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::Less)) {
+            return false;
+        }
+        i += 1;
+        loop {
+            match self.tokens.get(i).map(|t| &t.kind) {
+                Some(TokenKind::Identifier(_)) => i += 1,
+                _ => return false,
+            }
+            match self.tokens.get(i).map(|t| &t.kind) {
+                Some(TokenKind::Comma) => {
+                    i += 1;
+                    continue;
+                }
+                Some(TokenKind::Greater) => {
+                    i += 1;
+                    break;
+                }
+                _ => return false,
+            }
+        }
+        matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::LeftParen))
+    }
+
     /// 解析单个参数。`self` 无类型标注时（值传递 self，§4.4）记为其隐式类型 `Self`。
     fn parse_parameter(&mut self) -> Result<Parameter, Diagnostic> {
         let (name, name_span) = self.expect_identifier("expected parameter name")?;
@@ -746,6 +774,23 @@ impl<'a> Parser<'a> {
                     let (segment, _) = self.expect_identifier("expected name after `.`")?;
                     segments.push(segment);
                 }
+                // 显式泛型实参 `foo<T>(...)`（M15，如 `allocate<T>(n)`）。
+                // 仅当 `<` 后能匹配「类型列表 `>` `(`」时才是泛型调用，否则是普通比较。
+                let mut type_args = None;
+                if self.check(&TokenKind::Less) && self.looks_like_generic_call() {
+                    self.advance();
+                    let mut args = Vec::new();
+                    if !self.check(&TokenKind::Greater) {
+                        loop {
+                            args.push(self.parse_type("expected type argument")?);
+                            if self.consume(&TokenKind::Comma).is_none() {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect_simple(TokenKind::Greater, "expected `>` after type arguments")?;
+                    type_args = Some(args);
+                }
                 if self.check(&TokenKind::LeftParen) {
                     // 带括号：函数调用或结构体/枚举构造，交由 lower 按名称区分。
                     let path = segments.join(".");
@@ -767,6 +812,7 @@ impl<'a> Parser<'a> {
                         kind: ExprKind::Call {
                             callee: path,
                             callee_span: token.span,
+                            type_args,
                             arguments,
                         },
                         span: token.span.merge(right),

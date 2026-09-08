@@ -679,3 +679,152 @@ fn build_project_with_path(
         }
     }
 }
+
+// ── M15 泛型 ──────────────────────────────────────────────────────────────
+
+#[test]
+fn m15_generic_identity_function() {
+    assert_program_exit(
+        "fn id<T>(x: T): T { return x; } fn main() { return id(7); }",
+        7,
+    );
+}
+
+#[test]
+fn m15_generic_function_multiple_instances() {
+    // 同一泛型函数被两个不同类型实例化，各自生成独立代码。
+    assert_program_exit(
+        r#"
+        fn id<T>(x: T): T { return x; }
+        fn main() {
+            var a = id(3);
+            var b = id(true);
+            if b {
+                return a;
+            } else {
+                return 0;
+            }
+        }
+        "#,
+        3,
+    );
+}
+
+#[test]
+fn m15_generic_struct() {
+    assert_program_exit(
+        r#"
+        struct Pair<T> { first: T, second: T }
+        fn main() {
+            var p = Pair(1, 2);
+            return p.first + p.second;
+        }
+        "#,
+        3,
+    );
+}
+
+#[test]
+fn m15_generic_struct_two_instances() {
+    // 同一泛型结构体两个实例：Pair<i32> 与 Pair<bool> 是不同类型。
+    assert_program_exit(
+        r#"
+        struct Pair<T> { first: T, second: T }
+        fn main() {
+            var a = Pair(1, 2);
+            var b = Pair(true, false);
+            var total = a.first + a.second;
+            if b.first {
+                total += 1;
+            }
+            return total;
+        }
+        "#,
+        4,
+    );
+}
+
+#[test]
+fn m15_generic_enum() {
+    assert_program_exit(
+        r#"
+        enum Option<T> { Some(T), None }
+        fn main() {
+            var x = Option.Some(5);
+            return match x {
+                Option.Some(v) => v,
+                Option.None => 0,
+            };
+        }
+        "#,
+        5,
+    );
+}
+
+#[test]
+fn m15_generic_across_modules() {
+    let output = run_project(&[
+        ("src/main.do", "use util.id.get; fn main() { return get(9); }"),
+        ("src/util/id.do", "pkg util.id; pub fn get<T>(x: T): T { return x; }"),
+    ])
+    .expect("project should build");
+    assert_eq!(output.status.code(), Some(9));
+}
+
+#[test]
+fn m15_allocate_generic_i32() {
+    // allocate<i32>(3) 分配 3 个 i32 元素，索引读写。
+    assert_program_exit(
+        r#"
+        fn main() {
+            var buf = allocate<i32>(3);
+            buf[0] = 10;
+            buf[1] = 20;
+            buf[2] = 30;
+            var total = buf[0] + buf[1] + buf[2];
+            free(buf);
+            return total;
+        }
+        "#,
+        60,
+    );
+}
+
+#[test]
+fn m15_allocate_default_u8_still_works() {
+    // allocate(n) 向后兼容：仍是 []u8。
+    assert_program_exit(
+        r#"
+        fn main() {
+            var buf = allocate(3);
+            buf[0] = 1_u8;
+            buf[1] = 2_u8;
+            buf[2] = 3_u8;
+            val sum = buf[0] as i32 + buf[1] as i32 + buf[2] as i32;
+            free(buf);
+            return sum;
+        }
+        "#,
+        6,
+    );
+}
+
+#[test]
+fn m15_try_with_generic_slice() {
+    // try 资源支持非 u8 切片。
+    assert_program_exit(
+        r#"
+        fn main() {
+            var total = 0;
+            try (var buf = allocate<i32>(2)) {
+                buf[0] = 7;
+                buf[1] = 8;
+                total = buf[0] + buf[1];
+            }
+            return total;
+        }
+        "#,
+        15,
+    );
+}
+

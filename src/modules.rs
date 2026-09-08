@@ -553,8 +553,10 @@ fn resolve_expr(
         ExprKind::Call {
             callee,
             callee_span,
+            type_args,
             arguments,
         } => {
+            let _ = type_args;
             for argument in arguments {
                 resolve_expr(
                     source, module, locals, imports, functions, type_infos, argument,
@@ -744,8 +746,6 @@ fn resolve_type_ref(
         ast::TypeRefKind::Pointer { inner } => {
             resolve_type_ref(source, module, imports, type_infos, inner)
         }
-        // 类型参数 `T`（M15）：不 qualify，直接返回。
-        ast::TypeRefKind::TypeParam(_) => Ok(()),
         // 泛型实例 `Vec<i32>`（M15）：递归 qualify 其类型实参。
         ast::TypeRefKind::Generic { args, .. } => {
             for arg in args {

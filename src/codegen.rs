@@ -1218,14 +1218,21 @@ impl Emitter<'_, '_> {
             }
             ExprKind::Match { value, arms } => self.emit_match(expression.ty, value, arms),
             ExprKind::Allocate(length) => {
-                // `allocate(n) -> []u8`：调用运行时 dolphin_allocate(n)，返回 {ptr, n}。
+                // `allocate<T>(n)`：n 是元素个数，换算成字节数 `n * sizeof(T)` 传给运行时；
+                // 切片 len 分量存元素个数（越界检查按元素个数做）。
                 let length = self.emit_expr(length);
                 let length_val =
                     self.extend_integer(length.one(), length.ty, self.pointer_type, false);
+                let element_size = slice_element_size(expression.ty, self.pointer_type);
+                let byte_len = if element_size > 1 {
+                    self.builder.ins().imul_imm_u(length_val, element_size as i64)
+                } else {
+                    length_val
+                };
                 let call = self
                     .builder
                     .ins()
-                    .call(self.runtime_refs.allocate, &[length_val]);
+                    .call(self.runtime_refs.allocate, &[byte_len]);
                 let ptr = self.builder.inst_results(call)[0];
                 RuntimeValue {
                     ty: expression.ty,
@@ -1905,5 +1912,14 @@ fn clif_type(ty: Type, pointer: clif::Type) -> clif::Type {
         Type::Unit | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) | Type::Slice(_) => {
             unreachable!("type has no single runtime value")
         }
+    }
+}
+
+/// 切片元素的字节大小（`[]T` 的 `T`）。
+fn slice_element_size(ty: Type, pointer: clif::Type) -> i64 {
+    if let Type::Slice(element) = ty {
+        clif_type(element.as_type(), pointer).bytes() as i64
+    } else {
+        unreachable!("slice element size requires a slice type")
     }
 }

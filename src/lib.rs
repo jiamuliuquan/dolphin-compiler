@@ -7,6 +7,7 @@ mod linker;
 mod lower;
 mod manifest;
 mod modules;
+mod monomorphize;
 mod parser;
 mod platform;
 mod source;

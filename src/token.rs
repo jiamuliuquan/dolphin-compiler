@@ -25,6 +25,8 @@ pub enum TokenKind {
     Match,
     Defer,
     Try,
+    Trait,
+    Impl,
     Identifier(String),
     Number(String),
     Character(char),
@@ -67,6 +69,10 @@ pub enum TokenKind {
     Arrow,
     /// 取址 `&e`（M14，单个 `&`，区别于 `&&`）。
     Amper,
+    /// 关联函数调用 `T::func`（M15）。
+    ColonColon,
+    /// 错误传播 / 可选类型语法糖 `?`（M15）。
+    Question,
     Eof,
 }
 

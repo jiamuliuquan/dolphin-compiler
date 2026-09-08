@@ -46,7 +46,9 @@ impl<'a> Lexer<'a> {
                 b'}' => self.single(TokenKind::RightBrace),
                 b'[' => self.single(TokenKind::LeftBracket),
                 b']' => self.single(TokenKind::RightBracket),
+                b':' if self.starts_with(b"::") => self.double(TokenKind::ColonColon),
                 b':' => self.single(TokenKind::Colon),
+                b'?' => self.single(TokenKind::Question),
                 b',' => self.single(TokenKind::Comma),
                 b';' => self.single(TokenKind::Semicolon),
                 b'"' => self.string()?,
@@ -344,6 +346,8 @@ impl<'a> Lexer<'a> {
             "match" => TokenKind::Match,
             "defer" => TokenKind::Defer,
             "try" => TokenKind::Try,
+            "trait" => TokenKind::Trait,
+            "impl" => TokenKind::Impl,
             value => TokenKind::Identifier(value.to_string()),
         }
     }

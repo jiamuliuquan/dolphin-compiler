@@ -7,6 +7,8 @@ pub struct Program {
     pub functions: Vec<Function>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
+    pub traits: Vec<TraitDecl>,
+    pub impls: Vec<ImplBlock>,
 }
 
 #[derive(Debug)]
@@ -15,6 +17,9 @@ pub struct StructDecl {
     pub public: bool,
     pub name: String,
     pub name_span: Span,
+    /// 类型参数列表 `<T, U>`（M15，阶段 1 解析、阶段 2 使用）。
+    #[allow(dead_code)]
+    pub type_params: Vec<String>,
     pub fields: Vec<FieldDecl>,
 }
 
@@ -31,6 +36,9 @@ pub struct EnumDecl {
     pub public: bool,
     pub name: String,
     pub name_span: Span,
+    /// 类型参数列表 `<T, U>`（M15，阶段 1 解析、阶段 2 使用）。
+    #[allow(dead_code)]
+    pub type_params: Vec<String>,
     pub variants: Vec<VariantDecl>,
 }
 
@@ -39,6 +47,38 @@ pub struct VariantDecl {
     pub name: String,
     pub name_span: Span,
     pub fields: Vec<TypeRef>,
+}
+
+/// 契约声明 `trait 名 { 方法签名 }`（M15）。
+#[derive(Debug)]
+#[allow(dead_code)] // 阶段 3 使用。
+pub struct TraitDecl {
+    pub source_id: usize,
+    pub public: bool,
+    pub name: String,
+    pub name_span: Span,
+    pub methods: Vec<MethodSignature>,
+}
+
+/// 契约方法签名（M15）：只声明、不写函数体。
+#[derive(Debug)]
+#[allow(dead_code)] // 阶段 3 使用。
+pub struct MethodSignature {
+    pub name: String,
+    pub name_span: Span,
+    pub parameters: Vec<Parameter>,
+    pub return_type: Option<TypeRef>,
+}
+
+/// 实现块（M15）：`impl Type { ... }` 或 `impl Trait for Type { ... }`。
+#[derive(Debug)]
+#[allow(dead_code)] // 阶段 3 使用。
+pub struct ImplBlock {
+    pub source_id: usize,
+    /// `None` 表示固有方法（`impl Type`）；`Some(name)` 表示契约实现（`impl Trait for Type`）。
+    pub trait_name: Option<String>,
+    pub type_name: String,
+    pub methods: Vec<Function>,
 }
 
 #[derive(Debug)]
@@ -53,6 +93,9 @@ pub struct Function {
     pub public: bool,
     pub name: String,
     pub name_span: Span,
+    /// 类型参数列表 `<T, U>`（M15，阶段 1 解析、阶段 2 使用）。
+    #[allow(dead_code)]
+    pub type_params: Vec<String>,
     pub parameters: Vec<Parameter>,
     pub return_type: Option<TypeRef>,
     pub body: Block,
@@ -86,6 +129,14 @@ pub enum TypeRefKind {
     /// 显式指针 `*T`（M14）。
     Pointer {
         inner: Box<TypeRef>,
+    },
+    /// 类型参数 `T`（M15）。
+    #[allow(dead_code)] // 阶段 2 识别。
+    TypeParam(String),
+    /// 泛型实例 `Vec<i32>`（M15）。
+    Generic {
+        name: String,
+        args: Vec<TypeRef>,
     },
 }
 

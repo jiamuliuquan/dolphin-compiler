@@ -1,7 +1,8 @@
 use crate::ast::{
     AssignmentOperator, BinaryOperator, Block, EnumDecl, Expr, ExprKind, FieldDecl, ForIterable,
-    Function, MatchArm, MatchPattern, Parameter, PathRef, Program, Statement, StatementKind,
-    StructDecl, TryResource, TypeRef, TypeRefKind, UnaryOperator, VariantDecl,
+    Function, ImplBlock, MatchArm, MatchPattern, MethodSignature, Parameter, PathRef, Program,
+    Statement, StatementKind, StructDecl, TraitDecl, TryResource, TypeRef, TypeRefKind,
+    UnaryOperator, VariantDecl,
 };
 use crate::diagnostic::Diagnostic;
 use crate::source::{SourceFile, Span};
@@ -45,11 +46,15 @@ impl<'a> Parser<'a> {
         let mut functions = Vec::new();
         let mut structs = Vec::new();
         let mut enums = Vec::new();
+        let mut traits = Vec::new();
+        let mut impls = Vec::new();
         while !self.check(&TokenKind::Eof) {
             match self.current().kind {
                 TokenKind::Fn => functions.push(self.parse_function()?),
                 TokenKind::Struct => structs.push(self.parse_struct()?),
                 TokenKind::Enum => enums.push(self.parse_enum()?),
+                TokenKind::Trait => traits.push(self.parse_trait(false)?),
+                TokenKind::Impl => impls.push(self.parse_impl()?),
                 TokenKind::Pub => {
                     let public = self.consume(&TokenKind::Pub).is_some();
                     match self.current().kind {
@@ -68,11 +73,16 @@ impl<'a> Parser<'a> {
                             enumeration.public = public;
                             enums.push(enumeration);
                         }
+                        TokenKind::Trait => {
+                            let mut trait_decl = self.parse_trait(false)?;
+                            trait_decl.public = public;
+                            traits.push(trait_decl);
+                        }
                         _ => {
                             return Err(Diagnostic::at(
                                 self.source,
                                 self.current().span,
-                                "expected `fn`, `struct`, or `enum` after `pub`",
+                                "expected `fn`, `struct`, `enum`, or `trait` after `pub`",
                             ));
                         }
                     }
@@ -81,16 +91,21 @@ impl<'a> Parser<'a> {
                     return Err(Diagnostic::at(
                         self.source,
                         self.current().span,
-                        "expected a function, struct, or enum",
+                        "expected a function, struct, enum, trait, or impl",
                     ));
                 }
             }
         }
-        if functions.is_empty() && structs.is_empty() && enums.is_empty() {
+        if functions.is_empty()
+            && structs.is_empty()
+            && enums.is_empty()
+            && traits.is_empty()
+            && impls.is_empty()
+        {
             return Err(Diagnostic::at(
                 self.source,
                 self.current().span,
-                "expected a function, struct, or enum",
+                "expected a function, struct, enum, trait, or impl",
             ));
         }
         Ok(Program {
@@ -99,6 +114,8 @@ impl<'a> Parser<'a> {
             functions,
             structs,
             enums,
+            traits,
+            impls,
         })
     }
 
@@ -106,19 +123,12 @@ impl<'a> Parser<'a> {
         let public = self.consume(&TokenKind::Pub).is_some();
         let start = self.expect_simple(TokenKind::Fn, "expected `fn`")?;
         let (name, name_span) = self.expect_identifier("expected function name")?;
+        let type_params = self.parse_type_params()?;
         self.expect_simple(TokenKind::LeftParen, "expected `(` after function name")?;
         let mut parameters = Vec::new();
         if !self.check(&TokenKind::RightParen) {
             loop {
-                let (parameter_name, parameter_span) =
-                    self.expect_identifier("expected parameter name")?;
-                self.expect_simple(TokenKind::Colon, "expected `:` after parameter name")?;
-                let ty = self.parse_type("expected parameter type")?;
-                parameters.push(Parameter {
-                    name: parameter_name,
-                    name_span: parameter_span,
-                    ty,
-                });
+                parameters.push(self.parse_parameter()?);
                 if self.consume(&TokenKind::Comma).is_none() {
                     break;
                 }
@@ -136,6 +146,7 @@ impl<'a> Parser<'a> {
             public,
             name,
             name_span,
+            type_params,
             parameters,
             return_type,
             body,
@@ -143,9 +154,49 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// 解析可选的类型参数列表 `<T, U>`（M15）。
+    fn parse_type_params(&mut self) -> Result<Vec<String>, Diagnostic> {
+        if self.consume(&TokenKind::Less).is_none() {
+            return Ok(Vec::new());
+        }
+        let mut params = Vec::new();
+        if !self.check(&TokenKind::Greater) {
+            loop {
+                let (name, _span) = self.expect_identifier("expected type parameter name")?;
+                params.push(name);
+                if self.consume(&TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        self.expect_simple(TokenKind::Greater, "expected `>` after type parameters")?;
+        Ok(params)
+    }
+
+    /// 解析单个参数。`self` 无类型标注时（值传递 self，§4.4）记为其隐式类型 `Self`。
+    fn parse_parameter(&mut self) -> Result<Parameter, Diagnostic> {
+        let (name, name_span) = self.expect_identifier("expected parameter name")?;
+        let ty = if name == "self" && !self.check(&TokenKind::Colon) {
+            // `self` 值传递：隐式类型为当前类型 `Self`（阶段 3 识别）。
+            TypeRef {
+                kind: TypeRefKind::Name("Self".to_string()),
+                span: name_span,
+            }
+        } else {
+            self.expect_simple(TokenKind::Colon, "expected `:` after parameter name")?;
+            self.parse_type("expected parameter type")?
+        };
+        Ok(Parameter {
+            name,
+            name_span,
+            ty,
+        })
+    }
+
     fn parse_struct(&mut self) -> Result<StructDecl, Diagnostic> {
         self.expect_simple(TokenKind::Struct, "expected `struct`")?;
         let (name, name_span) = self.expect_identifier("expected struct name")?;
+        let type_params = self.parse_type_params()?;
         self.expect_simple(TokenKind::LeftBrace, "expected `{` after struct name")?;
         let mut fields = Vec::new();
         while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
@@ -169,6 +220,7 @@ impl<'a> Parser<'a> {
             public: false,
             name,
             name_span,
+            type_params,
             fields,
         })
     }
@@ -176,6 +228,7 @@ impl<'a> Parser<'a> {
     fn parse_enum(&mut self) -> Result<EnumDecl, Diagnostic> {
         self.expect_simple(TokenKind::Enum, "expected `enum`")?;
         let (name, name_span) = self.expect_identifier("expected enum name")?;
+        let type_params = self.parse_type_params()?;
         self.expect_simple(TokenKind::LeftBrace, "expected `{` after enum name")?;
         let mut variants = Vec::new();
         while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
@@ -211,7 +264,79 @@ impl<'a> Parser<'a> {
             public: false,
             name,
             name_span,
+            type_params,
             variants,
+        })
+    }
+
+    /// 解析方法签名（不含函数体），用于 trait 声明（M15）。
+    fn parse_method_signature(&mut self) -> Result<MethodSignature, Diagnostic> {
+        self.expect_simple(TokenKind::Fn, "expected `fn`")?;
+        let (name, name_span) = self.expect_identifier("expected method name")?;
+        self.expect_simple(TokenKind::LeftParen, "expected `(` after method name")?;
+        let mut parameters = Vec::new();
+        if !self.check(&TokenKind::RightParen) {
+            loop {
+                parameters.push(self.parse_parameter()?);
+                if self.consume(&TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        self.expect_simple(TokenKind::RightParen, "expected `)` after parameters")?;
+        let return_type = if self.consume(&TokenKind::Colon).is_some() {
+            Some(self.parse_type("expected return type")?)
+        } else {
+            None
+        };
+        self.expect_simple(TokenKind::Semicolon, "expected `;` after method signature")?;
+        Ok(MethodSignature {
+            name,
+            name_span,
+            parameters,
+            return_type,
+        })
+    }
+
+    fn parse_trait(&mut self, public: bool) -> Result<TraitDecl, Diagnostic> {
+        self.expect_simple(TokenKind::Trait, "expected `trait`")?;
+        let (name, name_span) = self.expect_identifier("expected trait name")?;
+        self.expect_simple(TokenKind::LeftBrace, "expected `{` after trait name")?;
+        let mut methods = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            methods.push(self.parse_method_signature()?);
+        }
+        self.expect_simple(TokenKind::RightBrace, "expected `}` after trait body")?;
+        Ok(TraitDecl {
+            source_id: 0,
+            public,
+            name,
+            name_span,
+            methods,
+        })
+    }
+
+    /// 解析 `impl` 块：`impl Type { ... }` 或 `impl Trait for Type { ... }`（M15）。
+    fn parse_impl(&mut self) -> Result<ImplBlock, Diagnostic> {
+        self.expect_simple(TokenKind::Impl, "expected `impl`")?;
+        let (first, _first_span) = self.expect_identifier("expected type or trait name")?;
+        let (trait_name, type_name) = if self.consume(&TokenKind::For).is_some() {
+            let (type_name, _type_span) = self.expect_identifier("expected type name")?;
+            (Some(first), type_name)
+        } else {
+            (None, first)
+        };
+        self.expect_simple(TokenKind::LeftBrace, "expected `{` after impl")?;
+        let mut methods = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            methods.push(self.parse_function()?);
+        }
+        self.expect_simple(TokenKind::RightBrace, "expected `}` after impl body")?;
+        Ok(ImplBlock {
+            source_id: 0,
+            trait_name,
+            type_name,
+            methods,
         })
     }
 
@@ -264,7 +389,36 @@ impl<'a> Parser<'a> {
                 span,
             });
         }
+        if let Some(question) = self.consume(&TokenKind::Question) {
+            // 可选类型语法糖 `?T`（M15），等价 `Option<T>`，见提案 §11.3。
+            let inner = self.parse_type(message)?;
+            let span = question.merge(inner.span);
+            return Ok(TypeRef {
+                kind: TypeRefKind::Generic {
+                    name: "Option".to_string(),
+                    args: vec![*Box::new(inner)],
+                },
+                span,
+            });
+        }
         let (name, span) = self.expect_identifier(message)?;
+        // 泛型实例 `Vec<i32>`（M15）。
+        if let Some(less) = self.consume(&TokenKind::Less) {
+            let mut args = Vec::new();
+            if !self.check(&TokenKind::Greater) {
+                loop {
+                    args.push(self.parse_type("expected type argument")?);
+                    if self.consume(&TokenKind::Comma).is_none() {
+                        break;
+                    }
+                }
+            }
+            let right = self.expect_simple(TokenKind::Greater, "expected `>` after type arguments")?;
+            return Ok(TypeRef {
+                kind: TypeRefKind::Generic { name, args },
+                span: span.merge(right).merge(less),
+            });
+        }
         Ok(TypeRef {
             kind: TypeRefKind::Name(name),
             span,
@@ -1031,5 +1185,76 @@ mod tests {
         assert_eq!(program.package.unwrap().segments, ["std", "math"]);
         assert_eq!(program.uses[0].segments, ["values", "limit"]);
         assert!(program.functions[0].public);
+    }
+
+    #[test]
+    fn parses_m15_generic_function() {
+        let program = parse_text("fn id<T>(x: T): T { return x; }");
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].type_params, ["T"]);
+    }
+
+    #[test]
+    fn parses_m15_generic_struct_and_enum() {
+        let program = parse_text(
+            "struct Vec<T> { data: []T, len: i32 } enum Result<T, E> { Ok(T), Err(E) }",
+        );
+        assert_eq!(program.structs[0].type_params, ["T"]);
+        assert_eq!(program.enums[0].type_params, ["T", "E"]);
+    }
+
+    #[test]
+    fn parses_m15_generic_type_arguments() {
+        let program = parse_text("fn main() { var v: Vec<i32> = Vec(); }");
+        let type_name = &program.functions[0].body[0];
+        let StatementKind::Variable { type_name: Some(ty), .. } = &type_name.kind else {
+            panic!("expected variable with type annotation");
+        };
+        match &ty.kind {
+            TypeRefKind::Generic { name, args } => {
+                assert_eq!(name, "Vec");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0].kind, TypeRefKind::Name(_)));
+            }
+            other => panic!("expected generic type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_m15_trait_decl() {
+        let program = parse_text("trait Shape { fn area(self): f64; fn scale(self: *Shape, f: f64); }");
+        assert_eq!(program.traits.len(), 1);
+        assert_eq!(program.traits[0].name, "Shape");
+        assert_eq!(program.traits[0].methods.len(), 2);
+        assert_eq!(program.traits[0].methods[0].name, "area");
+    }
+
+    #[test]
+    fn parses_m15_impl_blocks() {
+        let program = parse_text(
+            "impl Circle { fn area(self): f64 { return 1.0; } } impl Shape for Circle { fn area(self): f64 { return 1.0; } }",
+        );
+        assert_eq!(program.impls.len(), 2);
+        assert!(program.impls[0].trait_name.is_none());
+        assert_eq!(program.impls[0].type_name, "Circle");
+        assert_eq!(program.impls[1].trait_name.as_deref(), Some("Shape"));
+        assert_eq!(program.impls[1].type_name, "Circle");
+    }
+
+    #[test]
+    fn parses_m15_optional_type_sugar() {
+        let program = parse_text("fn main() { var p: ?*i32 = 0; }");
+        let StatementKind::Variable { type_name: Some(ty), .. } = &program.functions[0].body[0].kind
+        else {
+            panic!("expected variable with type annotation");
+        };
+        match &ty.kind {
+            TypeRefKind::Generic { name, args } => {
+                assert_eq!(name, "Option");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0].kind, TypeRefKind::Pointer { .. }));
+            }
+            other => panic!("expected Option sugar, got {other:?}"),
+        }
     }
 }

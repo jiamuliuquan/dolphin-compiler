@@ -80,6 +80,12 @@ pub fn load_sources(
         for enumeration in &mut program.enums {
             enumeration.source_id = source_id;
         }
+        for trait_decl in &mut program.traits {
+            trait_decl.source_id = source_id;
+        }
+        for impl_block in &mut program.impls {
+            impl_block.source_id = source_id;
+        }
         sources.push(source);
         units.push(Unit {
             source_id,
@@ -92,10 +98,14 @@ pub fn load_sources(
     let mut functions = Vec::new();
     let mut structs = Vec::new();
     let mut enums = Vec::new();
+    let mut traits = Vec::new();
+    let mut impls = Vec::new();
     for unit in &mut units {
         functions.append(&mut unit.program.functions);
         structs.append(&mut unit.program.structs);
         enums.append(&mut unit.program.enums);
+        traits.append(&mut unit.program.traits);
+        impls.append(&mut unit.program.impls);
     }
     Ok(LoadedProgram {
         sources,
@@ -105,6 +115,8 @@ pub fn load_sources(
             functions,
             structs,
             enums,
+            traits,
+            impls,
         },
     })
 }
@@ -731,6 +743,15 @@ fn resolve_type_ref(
         }
         ast::TypeRefKind::Pointer { inner } => {
             resolve_type_ref(source, module, imports, type_infos, inner)
+        }
+        // 类型参数 `T`（M15）：不 qualify，直接返回。
+        ast::TypeRefKind::TypeParam(_) => Ok(()),
+        // 泛型实例 `Vec<i32>`（M15）：递归 qualify 其类型实参。
+        ast::TypeRefKind::Generic { args, .. } => {
+            for arg in args {
+                resolve_type_ref(source, module, imports, type_infos, arg)?;
+            }
+            Ok(())
         }
     }
 }

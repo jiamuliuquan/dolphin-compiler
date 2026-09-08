@@ -2218,6 +2218,16 @@ fn resolve_type(
     type_ids: &HashMap<String, TypeId>,
 ) -> Result<Type, Diagnostic> {
     match &type_ref.kind {
+        TypeRefKind::TypeParam(name) => Err(Diagnostic::at(
+            source,
+            type_ref.span,
+            format!("type parameter `{name}` is not yet implemented"),
+        )),
+        TypeRefKind::Generic { name, .. } => Err(Diagnostic::at(
+            source,
+            type_ref.span,
+            format!("generic type `{name}<..>` is not yet implemented"),
+        )),
         TypeRefKind::Name(name) => match name.as_str() {
             "i8" => Ok(Type::I8),
             "i16" => Ok(Type::I16),

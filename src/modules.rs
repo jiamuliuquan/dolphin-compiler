@@ -340,6 +340,46 @@ fn resolve_modules(sources: &[SourceFile], units: &mut [Unit]) -> Result<(), Dia
             )?;
             function.name = qualify(&unit.module, &function.name);
         }
+        // M15 契约与方法：qualify impl 块的类型名/契约名，并 resolve 方法签名与函数体。
+        for impl_block in &mut unit.program.impls {
+            if let Some(trait_name) = &mut impl_block.trait_name {
+                *trait_name = qualify(&unit.module, trait_name);
+            }
+            impl_block.type_name = qualify(&unit.module, &impl_block.type_name);
+            for method in &mut impl_block.methods {
+                for parameter in &mut method.parameters {
+                    resolve_type_ref(
+                        source,
+                        &unit.module,
+                        &bindings,
+                        &type_infos,
+                        &mut parameter.ty,
+                    )?;
+                }
+                if let Some(return_type) = &mut method.return_type {
+                    resolve_type_ref(
+                        source,
+                        &unit.module,
+                        &bindings,
+                        &type_infos,
+                        return_type,
+                    )?;
+                }
+                resolve_block(
+                    source,
+                    &unit.module,
+                    &local_names,
+                    &bindings,
+                    &functions,
+                    &type_infos,
+                    &mut method.body,
+                )?;
+            }
+        }
+        // M15 契约声明：qualify 契约名。
+        for trait_decl in &mut unit.program.traits {
+            trait_decl.name = qualify(&unit.module, &trait_decl.name);
+        }
     }
     Ok(())
 }
@@ -571,6 +611,12 @@ fn resolve_expr(
             // 结构体/枚举构造的 callee 是类型名或枚举项名：qualify 后不按函数解析。
             if is_constructor_target(module, callee, imports, type_infos) {
                 *callee = qualify_constructor(module, imports, type_infos, callee);
+                return Ok(());
+            }
+            // 方法调用 `x.foo(args)`：前半段 x 不是模块导入（是值/变量），留给 lowering 阶段 desugar。
+            if let Some((receiver, _)) = callee.split_once('.')
+                && !matches!(imports.get(receiver), Some(ImportBinding::Module(_)))
+            {
                 return Ok(());
             }
             let resolved = resolve_callee(module, locals, imports, callee);

@@ -19,10 +19,11 @@ pub fn lower_sources(
     sources: &[SourceFile],
     program: &ast::Program,
 ) -> Result<ir::Program, Diagnostic> {
-    // M15：先做单态化（AST 层泛型展开），再走原有 lowering。
+    // M15：先做方法提升 + 单态化（AST 层预处理），再走原有 lowering。
     let mut program = program.clone();
-    crate::monomorphize::monomorphize(sources, &mut program)?;
-    ProgramLowerer::new(sources, &program).lower()
+    let (methods, trait_impls) = crate::methods::resolve_methods(&mut program);
+    crate::monomorphize::monomorphize(sources, &mut program, &trait_impls)?;
+    ProgramLowerer::new(sources, &program, methods).lower()
 }
 
 #[derive(Clone)]
@@ -39,10 +40,16 @@ struct ProgramLowerer<'a> {
     main: Option<FunctionId>,
     types: Vec<TypeDef>,
     type_ids: HashMap<String, TypeId>,
+    type_names: HashMap<TypeId, String>,
+    methods: crate::methods::MethodTable,
 }
 
 impl<'a> ProgramLowerer<'a> {
-    fn new(sources: &'a [SourceFile], ast: &'a ast::Program) -> Self {
+    fn new(
+        sources: &'a [SourceFile],
+        ast: &'a ast::Program,
+        methods: crate::methods::MethodTable,
+    ) -> Self {
         Self {
             sources,
             ast,
@@ -50,6 +57,8 @@ impl<'a> ProgramLowerer<'a> {
             main: None,
             types: Vec::new(),
             type_ids: HashMap::new(),
+            type_names: HashMap::new(),
+            methods,
         }
     }
 
@@ -68,6 +77,8 @@ impl<'a> ProgramLowerer<'a> {
                     &self.signatures,
                     &self.types,
                     &self.type_ids,
+                    &self.type_names,
+                    &self.methods,
                 )
                 .lower()?,
             );
@@ -84,11 +95,13 @@ impl<'a> ProgramLowerer<'a> {
         for structure in &self.ast.structs {
             let id = TypeId(self.types.len());
             self.type_ids.insert(structure.name.clone(), id);
+            self.type_names.insert(id, structure.name.clone());
             self.types.push(TypeDef::Struct { fields: Vec::new() });
         }
         for enumeration in &self.ast.enums {
             let id = TypeId(self.types.len());
             self.type_ids.insert(enumeration.name.clone(), id);
+            self.type_names.insert(id, enumeration.name.clone());
             self.types.push(TypeDef::Enum {
                 variants: Vec::new(),
             });
@@ -259,6 +272,8 @@ struct FunctionLowerer<'a> {
     signatures: &'a HashMap<String, FunctionSignature>,
     types: &'a [TypeDef],
     type_ids: &'a HashMap<String, TypeId>,
+    type_names: &'a HashMap<TypeId, String>,
+    methods: &'a crate::methods::MethodTable,
     parameters: Vec<LocalId>,
     locals: Vec<Type>,
     scopes: Vec<HashMap<String, Binding>>,
@@ -279,6 +294,8 @@ impl<'a> FunctionLowerer<'a> {
         signatures: &'a HashMap<String, FunctionSignature>,
         types: &'a [TypeDef],
         type_ids: &'a HashMap<String, TypeId>,
+        type_names: &'a HashMap<TypeId, String>,
+        methods: &'a crate::methods::MethodTable,
     ) -> Self {
         Self {
             source,
@@ -287,6 +304,8 @@ impl<'a> FunctionLowerer<'a> {
             signatures,
             types,
             type_ids,
+            type_names,
+            methods,
             parameters: Vec::new(),
             locals: Vec::new(),
             scopes: vec![HashMap::new()],
@@ -1473,6 +1492,12 @@ impl<'a> FunctionLowerer<'a> {
         type_args: Option<&[ast::TypeRef]>,
         arguments: &[ast::Expr],
     ) -> Result<Expr, Diagnostic> {
+        // 方法调用 `x.foo(args)`：callee 是 `x.foo`，x 为值。desugar 成 `Type.foo(x, args)`。
+        if callee.contains('.') {
+            if let Some(call) = self.try_lower_method_call(callee, callee_span, arguments)? {
+                return Ok(call);
+            }
+        }
         if callee == "length" {
             if arguments.len() != 1 {
                 return Err(Diagnostic::at(
@@ -1627,6 +1652,93 @@ impl<'a> FunctionLowerer<'a> {
             },
             ty: signature.return_type,
         })
+    }
+
+    /// 尝试把 `x.foo(args)` 识别为方法调用并 desugar 成 `Type.foo(x, args)`。
+    /// 返回 `None` 表示不是方法调用（如模块函数、枚举构造等），交由普通路径处理。
+    fn try_lower_method_call(
+        &mut self,
+        callee: &str,
+        callee_span: Span,
+        arguments: &[ast::Expr],
+    ) -> Result<Option<Expr>, Diagnostic> {
+        let Some((receiver_name, method_name)) = callee.split_once('.') else {
+            return Ok(None);
+        };
+        // 接收者必须是变量（值），且类型是结构体。
+        let binding = match self.lookup(receiver_name, callee_span) {
+            Ok(binding) => binding.clone(),
+            Err(_) => return Ok(None),
+        };
+        let Type::Struct(id) = binding.ty else {
+            return Ok(None);
+        };
+        let Some(type_name) = self.type_names.get(&id).cloned() else {
+            return Ok(None);
+        };
+        let Some(fn_name) = self.methods.lookup(&type_name, method_name).map(str::to_string) else {
+            return Ok(None);
+        };
+        let signature = self.signatures.get(&fn_name).cloned().ok_or_else(|| {
+            Diagnostic::at(
+                self.source,
+                callee_span,
+                format!("unknown method `{method_name}` for type `{type_name}`"),
+            )
+        })?;
+        // 根据方法签名第一个参数是值还是指针，决定传接收者值还是 `&receiver`。
+        let receiver_ty = binding.ty;
+        let self_arg = if matches!(signature.parameters.first(), Some(Type::Ptr(_))) {
+            let pointer = match receiver_ty {
+                Type::Struct(id) => crate::ir::Pointer::Struct(id),
+                Type::Enum(id) => crate::ir::Pointer::Enum(id),
+                other => {
+                    return Err(Diagnostic::at(
+                        self.source,
+                        callee_span,
+                        format!("cannot take the address of `{other}`"),
+                    ));
+                }
+            };
+            Expr {
+                kind: ir::ExprKind::AddressOf(Box::new(Expr {
+                    kind: ir::ExprKind::Local(binding.local),
+                    ty: receiver_ty,
+                })),
+                ty: Type::Ptr(pointer),
+            }
+        } else {
+            Expr {
+                kind: ir::ExprKind::Local(binding.local),
+                ty: receiver_ty,
+            }
+        };
+        // lower 其余参数（跳过 self）。
+        let mut lowered_args = Vec::with_capacity(1 + arguments.len());
+        lowered_args.push(self_arg);
+        for (argument, expected) in arguments.iter().zip(signature.parameters.iter().skip(1)) {
+            let value = self.lower_expr(argument)?;
+            self.require_type(value.ty, *expected, argument.span)?;
+            lowered_args.push(value);
+        }
+        if arguments.len() + 1 != signature.parameters.len() {
+            return Err(Diagnostic::at(
+                self.source,
+                callee_span,
+                format!(
+                    "method `{method_name}` expects {} arguments but {} were provided",
+                    signature.parameters.len() - 1,
+                    arguments.len()
+                ),
+            ));
+        }
+        Ok(Some(Expr {
+            kind: ir::ExprKind::Call {
+                function: signature.id,
+                arguments: lowered_args,
+            },
+            ty: signature.return_type,
+        }))
     }
 
     fn lower_struct_init(

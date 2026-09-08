@@ -17,9 +17,17 @@ pub struct StructDecl {
     pub public: bool,
     pub name: String,
     pub name_span: Span,
-    /// 类型参数列表 `<T, U>`（M15，阶段 1 解析、阶段 2 使用）。
-    pub type_params: Vec<String>,
+    /// 类型参数列表 `<T: 约束, U>`（M15）。
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
+}
+
+/// 类型参数：名字 + 可选的契约约束（`T: Shape`）（M15）。
+#[derive(Clone, Debug)]
+pub struct TypeParam {
+    pub name: String,
+    /// 契约约束 `Shape`；`None` 表示无约束。
+    pub bound: Option<TypeRef>,
 }
 
 #[derive(Clone, Debug)]
@@ -35,8 +43,8 @@ pub struct EnumDecl {
     pub public: bool,
     pub name: String,
     pub name_span: Span,
-    /// 类型参数列表 `<T, U>`（M15，阶段 1 解析、阶段 2 使用）。
-    pub type_params: Vec<String>,
+    /// 类型参数列表 `<T: 约束, U>`（M15）。
+    pub type_params: Vec<TypeParam>,
     pub variants: Vec<VariantDecl>,
 }
 
@@ -91,8 +99,8 @@ pub struct Function {
     pub public: bool,
     pub name: String,
     pub name_span: Span,
-    /// 类型参数列表 `<T, U>`（M15，阶段 1 解析、阶段 2 使用）。
-    pub type_params: Vec<String>,
+    /// 类型参数列表 `<T: 约束, U>`（M15）。
+    pub type_params: Vec<TypeParam>,
     pub parameters: Vec<Parameter>,
     pub return_type: Option<TypeRef>,
     pub body: Block,

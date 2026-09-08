@@ -15,9 +15,10 @@ use crate::source::SourceFile;
 pub fn monomorphize(
     sources: &[SourceFile],
     program: &mut ast::Program,
+    trait_impls: &crate::methods::TraitImpls,
 ) -> Result<(), Diagnostic> {
     let _ = sources;
-    Monomorphizer.run(program)
+    Monomorphizer.run(program, trait_impls)
 }
 
 /// 类型实参：一组具体的 `TypeRef`。
@@ -30,10 +31,39 @@ struct Generics {
     enums: HashSet<String>,
 }
 
+/// 收集阶段的作用域：变量名 → 类型，以及所有类型名（用于构造推断）。
+struct Scopes {
+    vars: HashMap<String, TypeRef>,
+    type_names: HashSet<String>,
+}
+
+impl Scopes {
+    fn new(program: &ast::Program) -> Self {
+        let type_names = program
+            .structs
+            .iter()
+            .map(|s| s.name.clone())
+            .chain(program.enums.iter().map(|e| e.name.clone()))
+            .collect();
+        Self {
+            vars: HashMap::new(),
+            type_names,
+        }
+    }
+
+    fn declare_var(&mut self, name: &str, ty: TypeRef) {
+        self.vars.insert(name.to_string(), ty);
+    }
+}
+
 struct Monomorphizer;
 
 impl Monomorphizer {
-    fn run(&self, program: &mut ast::Program) -> Result<(), Diagnostic> {
+    fn run(
+        &self,
+        program: &mut ast::Program,
+        trait_impls: &crate::methods::TraitImpls,
+    ) -> Result<(), Diagnostic> {
         let generics = Generics {
             fns: program
                 .functions
@@ -75,7 +105,12 @@ impl Monomorphizer {
                 if *name != function.name {
                     continue;
                 }
-                concrete_fns.push(instantiate_function(&function, &function.type_params, args));
+                concrete_fns.push(instantiate_function(
+                    &function,
+                    &function.type_params,
+                    args,
+                    trait_impls,
+                )?);
             }
         }
         program.functions = concrete_fns;
@@ -127,6 +162,7 @@ fn collect_program(
     type_instances: &mut HashSet<(String, TypeArgs)>,
 ) -> Result<(), Diagnostic> {
     let generic_types = union_types(generics);
+    let mut scopes = Scopes::new(program);
     for function in &program.functions {
         if let Some(ret) = &function.return_type {
             collect_type_ref(ret, &generic_types, type_instances);
@@ -134,7 +170,13 @@ fn collect_program(
         for param in &function.parameters {
             collect_type_ref(&param.ty, &generic_types, type_instances);
         }
-        collect_block(&function.body, generics, fn_instances, type_instances)?;
+        collect_block(
+            &function.body,
+            generics,
+            fn_instances,
+            type_instances,
+            &mut scopes,
+        )?;
     }
     for structure in &program.structs {
         for field in &structure.fields {
@@ -156,9 +198,10 @@ fn collect_block(
     generics: &Generics,
     fn_instances: &mut HashSet<(String, TypeArgs)>,
     type_instances: &mut HashSet<(String, TypeArgs)>,
+    scopes: &mut Scopes,
 ) -> Result<(), Diagnostic> {
     for statement in block {
-        collect_statement(statement, generics, fn_instances, type_instances)?;
+        collect_statement(statement, generics, fn_instances, type_instances, scopes)?;
     }
     Ok(())
 }
@@ -168,35 +211,40 @@ fn collect_statement(
     generics: &Generics,
     fn_instances: &mut HashSet<(String, TypeArgs)>,
     type_instances: &mut HashSet<(String, TypeArgs)>,
+    scopes: &mut Scopes,
 ) -> Result<(), Diagnostic> {
     let generic_types = union_types(generics);
     match &statement.kind {
         StatementKind::Variable {
+            name,
             type_name,
             initializer,
             ..
         } => {
             if let Some(ty) = type_name {
                 collect_type_ref(ty, &generic_types, type_instances);
+                scopes.declare_var(name, ty.clone());
+            } else if let Ok(ty) = infer_expr_type(initializer, scopes) {
+                scopes.declare_var(name, ty);
             }
-            collect_expr(initializer, generics, fn_instances, type_instances)?;
+            collect_expr(initializer, generics, fn_instances, type_instances, scopes)?;
         }
         StatementKind::Assignment { value, .. }
         | StatementKind::Defer { value }
         | StatementKind::Expression(value) => {
-            collect_expr(value, generics, fn_instances, type_instances)?;
+            collect_expr(value, generics, fn_instances, type_instances, scopes)?;
         }
         StatementKind::IndexAssignment { index, value, .. } => {
-            collect_expr(index, generics, fn_instances, type_instances)?;
-            collect_expr(value, generics, fn_instances, type_instances)?;
+            collect_expr(index, generics, fn_instances, type_instances, scopes)?;
+            collect_expr(value, generics, fn_instances, type_instances, scopes)?;
         }
         StatementKind::DerefAssignment { target, value, .. } => {
-            collect_expr(target, generics, fn_instances, type_instances)?;
-            collect_expr(value, generics, fn_instances, type_instances)?;
+            collect_expr(target, generics, fn_instances, type_instances, scopes)?;
+            collect_expr(value, generics, fn_instances, type_instances, scopes)?;
         }
         StatementKind::PtrFieldAssignment { base, value, .. } => {
-            collect_expr(base, generics, fn_instances, type_instances)?;
-            collect_expr(value, generics, fn_instances, type_instances)?;
+            collect_expr(base, generics, fn_instances, type_instances, scopes)?;
+            collect_expr(value, generics, fn_instances, type_instances, scopes)?;
         }
         StatementKind::Try { resources, body } => {
             for resource in resources {
@@ -205,46 +253,47 @@ fn collect_statement(
                     generics,
                     fn_instances,
                     type_instances,
+                    scopes,
                 )?;
             }
-            collect_block(body, generics, fn_instances, type_instances)?;
+            collect_block(body, generics, fn_instances, type_instances, scopes)?;
         }
         StatementKind::If {
             condition,
             then_block,
             else_block,
         } => {
-            collect_expr(condition, generics, fn_instances, type_instances)?;
-            collect_block(then_block, generics, fn_instances, type_instances)?;
+            collect_expr(condition, generics, fn_instances, type_instances, scopes)?;
+            collect_block(then_block, generics, fn_instances, type_instances, scopes)?;
             if let Some(else_block) = else_block {
-                collect_block(else_block, generics, fn_instances, type_instances)?;
+                collect_block(else_block, generics, fn_instances, type_instances, scopes)?;
             }
         }
         StatementKind::Loop(body) => {
-            collect_block(body, generics, fn_instances, type_instances)?;
+            collect_block(body, generics, fn_instances, type_instances, scopes)?;
         }
         StatementKind::While { condition, body } => {
-            collect_expr(condition, generics, fn_instances, type_instances)?;
-            collect_block(body, generics, fn_instances, type_instances)?;
+            collect_expr(condition, generics, fn_instances, type_instances, scopes)?;
+            collect_block(body, generics, fn_instances, type_instances, scopes)?;
         }
         StatementKind::For {
             iterable, body, ..
         } => {
             match iterable {
                 ast::ForIterable::Range { start, end, .. } => {
-                    collect_expr(start, generics, fn_instances, type_instances)?;
-                    collect_expr(end, generics, fn_instances, type_instances)?;
+                    collect_expr(start, generics, fn_instances, type_instances, scopes)?;
+                    collect_expr(end, generics, fn_instances, type_instances, scopes)?;
                 }
                 ast::ForIterable::Array(array) => {
-                    collect_expr(array, generics, fn_instances, type_instances)?;
+                    collect_expr(array, generics, fn_instances, type_instances, scopes)?;
                 }
             }
-            collect_block(body, generics, fn_instances, type_instances)?;
+            collect_block(body, generics, fn_instances, type_instances, scopes)?;
         }
         StatementKind::Break | StatementKind::Continue => {}
         StatementKind::Return(expr) => {
             if let Some(expr) = expr {
-                collect_expr(expr, generics, fn_instances, type_instances)?;
+                collect_expr(expr, generics, fn_instances, type_instances, scopes)?;
             }
         }
     }
@@ -256,6 +305,7 @@ fn collect_expr(
     generics: &Generics,
     fn_instances: &mut HashSet<(String, TypeArgs)>,
     type_instances: &mut HashSet<(String, TypeArgs)>,
+    scopes: &mut Scopes,
 ) -> Result<(), Diagnostic> {
     match &expr.kind {
         ExprKind::Call {
@@ -265,53 +315,53 @@ fn collect_expr(
             if let Some((enum_name, _variant)) = callee.rsplit_once('.')
                 && generics.enums.contains(enum_name)
             {
-                type_instances.insert((enum_name.to_string(), infer_args(arguments)?));
+                type_instances.insert((enum_name.to_string(), infer_args(arguments, scopes)?));
             } else if generics.fns.contains(callee.as_str()) {
                 // 泛型函数调用。
-                fn_instances.insert((callee.clone(), infer_args(arguments)?));
+                fn_instances.insert((callee.clone(), infer_args(arguments, scopes)?));
             } else if generics.structs.contains(callee.as_str()) {
                 // 泛型结构体构造 `Struct(args)`。
-                type_instances.insert((callee.clone(), infer_args(arguments)?));
+                type_instances.insert((callee.clone(), infer_args(arguments, scopes)?));
             }
             for argument in arguments {
-                collect_expr(argument, generics, fn_instances, type_instances)?;
+                collect_expr(argument, generics, fn_instances, type_instances, scopes)?;
             }
         }
         ExprKind::Cast { value, ty } => {
             collect_type_ref(ty, &union_types(generics), type_instances);
-            collect_expr(value, generics, fn_instances, type_instances)?;
+            collect_expr(value, generics, fn_instances, type_instances, scopes)?;
         }
         ExprKind::Array(values) => {
             for value in values {
-                collect_expr(value, generics, fn_instances, type_instances)?;
+                collect_expr(value, generics, fn_instances, type_instances, scopes)?;
             }
         }
         ExprKind::RepeatArray { value, .. } => {
-            collect_expr(value, generics, fn_instances, type_instances)?;
+            collect_expr(value, generics, fn_instances, type_instances, scopes)?;
         }
         ExprKind::Index { array, index } => {
-            collect_expr(array, generics, fn_instances, type_instances)?;
-            collect_expr(index, generics, fn_instances, type_instances)?;
+            collect_expr(array, generics, fn_instances, type_instances, scopes)?;
+            collect_expr(index, generics, fn_instances, type_instances, scopes)?;
         }
         ExprKind::Unary { operand, .. } => {
-            collect_expr(operand, generics, fn_instances, type_instances)?;
+            collect_expr(operand, generics, fn_instances, type_instances, scopes)?;
         }
         ExprKind::Binary { left, right, .. } => {
-            collect_expr(left, generics, fn_instances, type_instances)?;
-            collect_expr(right, generics, fn_instances, type_instances)?;
+            collect_expr(left, generics, fn_instances, type_instances, scopes)?;
+            collect_expr(right, generics, fn_instances, type_instances, scopes)?;
         }
         ExprKind::Field { base, .. } => {
-            collect_expr(base, generics, fn_instances, type_instances)?;
+            collect_expr(base, generics, fn_instances, type_instances, scopes)?;
         }
         ExprKind::AddressOf { operand }
         | ExprKind::Deref { operand }
         | ExprKind::PtrField { base: operand, .. } => {
-            collect_expr(operand, generics, fn_instances, type_instances)?;
+            collect_expr(operand, generics, fn_instances, type_instances, scopes)?;
         }
         ExprKind::Match { value, arms } => {
-            collect_expr(value, generics, fn_instances, type_instances)?;
+            collect_expr(value, generics, fn_instances, type_instances, scopes)?;
             for arm in arms {
-                collect_expr(&arm.body, generics, fn_instances, type_instances)?;
+                collect_expr(&arm.body, generics, fn_instances, type_instances, scopes)?;
             }
         }
         ExprKind::Number(_)
@@ -324,17 +374,17 @@ fn collect_expr(
 }
 
 /// 推断一组实参的类型（MVP：字面量）。
-fn infer_args(arguments: &[Expr]) -> Result<TypeArgs, Diagnostic> {
-    arguments.iter().map(infer_literal_type).collect()
+fn infer_args(arguments: &[Expr], scopes: &Scopes) -> Result<TypeArgs, Diagnostic> {
+    arguments.iter().map(|a| infer_expr_type(a, scopes)).collect()
 }
 
-/// 推断字面量表达式的类型；非字面量报错（MVP 限制）。
-fn infer_literal_type(expr: &Expr) -> Result<TypeRef, Diagnostic> {
-    let name = match &expr.kind {
+/// 推断表达式类型（AST 层）：字面量、变量名、结构体构造。
+fn infer_expr_type(expr: &Expr, scopes: &Scopes) -> Result<TypeRef, Diagnostic> {
+    match &expr.kind {
         ExprKind::Number(raw) => {
             let (digits, suffix) = raw.rsplit_once('_').unwrap_or((raw.as_str(), ""));
             let float_literal = digits.contains(['.', 'e', 'E']);
-            if float_literal || matches!(suffix, "f32" | "f64") {
+            let name = if float_literal || matches!(suffix, "f32" | "f64") {
                 if suffix == "f32" {
                     "f32"
                 } else {
@@ -356,27 +406,46 @@ fn infer_literal_type(expr: &Expr) -> Result<TypeRef, Diagnostic> {
                         )));
                     }
                 }
-            }
+            };
+            Ok(TypeRef {
+                kind: TypeRefKind::Name(name.to_string()),
+                span: expr.span,
+            })
         }
-        ExprKind::Character(_) => "char",
-        ExprKind::Boolean(_) => "bool",
-        ExprKind::String(_) => "string",
-        _ => {
-            return Err(Diagnostic::plain(
-                "cannot infer generic argument type from this expression (MVP: literals only)",
-            ));
+        ExprKind::Character(_) => Ok(TypeRef {
+            kind: TypeRefKind::Name("char".to_string()),
+            span: expr.span,
+        }),
+        ExprKind::Boolean(_) => Ok(TypeRef {
+            kind: TypeRefKind::Name("bool".to_string()),
+            span: expr.span,
+        }),
+        ExprKind::String(_) => Ok(TypeRef {
+            kind: TypeRefKind::Name("string".to_string()),
+            span: expr.span,
+        }),
+        ExprKind::Name(name) => scopes.vars.get(name).cloned().ok_or_else(|| {
+            Diagnostic::plain(format!(
+                "cannot infer type of `{name}` (MVP: variables must be declared with an inferable type)"
+            ))
+        }),
+        ExprKind::Call { callee, .. } if scopes.type_names.contains(callee.as_str()) => {
+            Ok(TypeRef {
+                kind: TypeRefKind::Name(callee.clone()),
+                span: expr.span,
+            })
         }
-    };
-    Ok(TypeRef {
-        kind: TypeRefKind::Name(name.to_string()),
-        span: expr.span,
-    })
+        _ => Err(Diagnostic::plain(
+            "cannot infer generic argument type from this expression",
+        )),
+    }
 }
 
 // ── 重写 ──────────────────────────────────────────────────────────────────
 
 fn rewrite_program(program: &mut ast::Program, generics: &Generics) {
     let generic_types = union_types(generics);
+    let mut scopes = Scopes::new(program);
     for function in &mut program.functions {
         for param in &mut function.parameters {
             rewrite_type_ref(&mut param.ty, &generic_types);
@@ -384,7 +453,7 @@ fn rewrite_program(program: &mut ast::Program, generics: &Generics) {
         if let Some(ret) = &mut function.return_type {
             rewrite_type_ref(ret, &generic_types);
         }
-        rewrite_block(&mut function.body, generics);
+        rewrite_block(&mut function.body, generics, &mut scopes);
     }
     for structure in &mut program.structs {
         for field in &mut structure.fields {
@@ -400,128 +469,132 @@ fn rewrite_program(program: &mut ast::Program, generics: &Generics) {
     }
 }
 
-fn rewrite_block(block: &mut [Statement], generics: &Generics) {
+fn rewrite_block(block: &mut [Statement], generics: &Generics, scopes: &mut Scopes) {
     for statement in block {
-        rewrite_statement(statement, generics);
+        rewrite_statement(statement, generics, scopes);
     }
 }
 
-fn rewrite_statement(statement: &mut Statement, generics: &Generics) {
+fn rewrite_statement(statement: &mut Statement, generics: &Generics, scopes: &mut Scopes) {
     match &mut statement.kind {
         StatementKind::Variable {
+            name,
             type_name,
             initializer,
             ..
         } => {
             if let Some(ty) = type_name {
                 rewrite_type_ref(ty, &union_types(generics));
+                scopes.declare_var(name, ty.clone());
+            } else if let Ok(ty) = infer_expr_type(initializer, scopes) {
+                scopes.declare_var(name, ty);
             }
-            rewrite_expr(initializer, generics);
+            rewrite_expr(initializer, generics, scopes);
         }
-        StatementKind::Assignment { value, .. } => rewrite_expr(value, generics),
+        StatementKind::Assignment { value, .. } => rewrite_expr(value, generics, scopes),
         StatementKind::IndexAssignment { index, value, .. } => {
-            rewrite_expr(index, generics);
-            rewrite_expr(value, generics);
+            rewrite_expr(index, generics, scopes);
+            rewrite_expr(value, generics, scopes);
         }
         StatementKind::DerefAssignment { target, value, .. } => {
-            rewrite_expr(target, generics);
-            rewrite_expr(value, generics);
+            rewrite_expr(target, generics, scopes);
+            rewrite_expr(value, generics, scopes);
         }
         StatementKind::PtrFieldAssignment { base, value, .. } => {
-            rewrite_expr(base, generics);
-            rewrite_expr(value, generics);
+            rewrite_expr(base, generics, scopes);
+            rewrite_expr(value, generics, scopes);
         }
-        StatementKind::Defer { value } => rewrite_expr(value, generics),
+        StatementKind::Defer { value } => rewrite_expr(value, generics, scopes),
         StatementKind::Try { resources, body } => {
             for resource in resources {
-                rewrite_expr(&mut resource.initializer, generics);
+                rewrite_expr(&mut resource.initializer, generics, scopes);
             }
-            rewrite_block(body, generics);
+            rewrite_block(body, generics, scopes);
         }
-        StatementKind::Expression(expr) => rewrite_expr(expr, generics),
+        StatementKind::Expression(expr) => rewrite_expr(expr, generics, scopes),
         StatementKind::If {
             condition,
             then_block,
             else_block,
         } => {
-            rewrite_expr(condition, generics);
-            rewrite_block(then_block, generics);
+            rewrite_expr(condition, generics, scopes);
+            rewrite_block(then_block, generics, scopes);
             if let Some(else_block) = else_block {
-                rewrite_block(else_block, generics);
+                rewrite_block(else_block, generics, scopes);
             }
         }
-        StatementKind::Loop(body) => rewrite_block(body, generics),
+        StatementKind::Loop(body) => rewrite_block(body, generics, scopes),
         StatementKind::While { condition, body } => {
-            rewrite_expr(condition, generics);
-            rewrite_block(body, generics);
+            rewrite_expr(condition, generics, scopes);
+            rewrite_block(body, generics, scopes);
         }
         StatementKind::For {
             iterable, body, ..
         } => {
             match iterable {
                 ast::ForIterable::Range { start, end, .. } => {
-                    rewrite_expr(start, generics);
-                    rewrite_expr(end, generics);
+                    rewrite_expr(start, generics, scopes);
+                    rewrite_expr(end, generics, scopes);
                 }
-                ast::ForIterable::Array(array) => rewrite_expr(array, generics),
+                ast::ForIterable::Array(array) => rewrite_expr(array, generics, scopes),
             }
-            rewrite_block(body, generics);
+            rewrite_block(body, generics, scopes);
         }
         StatementKind::Break | StatementKind::Continue => {}
         StatementKind::Return(expr) => {
             if let Some(expr) = expr {
-                rewrite_expr(expr, generics);
+                rewrite_expr(expr, generics, scopes);
             }
         }
     }
 }
 
-fn rewrite_expr(expr: &mut Expr, generics: &Generics) {
+fn rewrite_expr(expr: &mut Expr, generics: &Generics, scopes: &mut Scopes) {
     match &mut expr.kind {
         ExprKind::Call { callee, arguments, .. } => {
             if let Some((enum_name, variant)) = callee.rsplit_once('.')
                 && generics.enums.contains(enum_name)
             {
-                let args = infer_args(arguments).expect("collected enum args");
+                let args = infer_args(arguments, scopes).expect("collected enum args");
                 *callee = format!("{}.{}", mangle(enum_name, &args), variant);
             } else if generics.fns.contains(callee.as_str()) {
-                let args = infer_args(arguments).expect("collected fn args");
+                let args = infer_args(arguments, scopes).expect("collected fn args");
                 *callee = mangle(callee, &args);
             } else if generics.structs.contains(callee.as_str()) {
-                let args = infer_args(arguments).expect("collected struct args");
+                let args = infer_args(arguments, scopes).expect("collected struct args");
                 *callee = mangle(callee, &args);
             }
             for argument in arguments {
-                rewrite_expr(argument, generics);
+                rewrite_expr(argument, generics, scopes);
             }
         }
         ExprKind::Cast { value, ty } => {
-            rewrite_expr(value, generics);
+            rewrite_expr(value, generics, scopes);
             rewrite_type_ref(ty, &union_types(generics));
         }
         ExprKind::Array(values) => {
             for value in values {
-                rewrite_expr(value, generics);
+                rewrite_expr(value, generics, scopes);
             }
         }
-        ExprKind::RepeatArray { value, .. } => rewrite_expr(value, generics),
+        ExprKind::RepeatArray { value, .. } => rewrite_expr(value, generics, scopes),
         ExprKind::Index { array, index } => {
-            rewrite_expr(array, generics);
-            rewrite_expr(index, generics);
+            rewrite_expr(array, generics, scopes);
+            rewrite_expr(index, generics, scopes);
         }
-        ExprKind::Unary { operand, .. } => rewrite_expr(operand, generics),
+        ExprKind::Unary { operand, .. } => rewrite_expr(operand, generics, scopes),
         ExprKind::Binary { left, right, .. } => {
-            rewrite_expr(left, generics);
-            rewrite_expr(right, generics);
+            rewrite_expr(left, generics, scopes);
+            rewrite_expr(right, generics, scopes);
         }
-        ExprKind::Field { base, .. } => rewrite_expr(base, generics),
+        ExprKind::Field { base, .. } => rewrite_expr(base, generics, scopes),
         ExprKind::AddressOf { operand }
         | ExprKind::Deref { operand }
-        | ExprKind::PtrField { base: operand, .. } => rewrite_expr(operand, generics),
+        | ExprKind::PtrField { base: operand, .. } => rewrite_expr(operand, generics, scopes),
         ExprKind::Match { value, arms } => {
-            rewrite_expr(value, generics);
+            rewrite_expr(value, generics, scopes);
             for arm in arms {
-                rewrite_expr(&mut arm.body, generics);
+                rewrite_expr(&mut arm.body, generics, scopes);
             }
         }
         ExprKind::Number(_)
@@ -534,7 +607,26 @@ fn rewrite_expr(expr: &mut Expr, generics: &Generics) {
 
 // ── 实例化 ────────────────────────────────────────────────────────────────
 
-fn instantiate_function(function: &ast::Function, params: &[String], args: &TypeArgs) -> ast::Function {
+fn instantiate_function(
+    function: &ast::Function,
+    params: &[ast::TypeParam],
+    args: &TypeArgs,
+    trait_impls: &crate::methods::TraitImpls,
+) -> Result<ast::Function, Diagnostic> {
+    // 约束检查：`T: Shape` 时，验证实参类型实现了 Shape。
+    for (param, arg) in params.iter().zip(args) {
+        if let Some(bound) = &param.bound {
+            let TypeRefKind::Name(bound_name) = &bound.kind else {
+                continue;
+            };
+            let arg_name = type_name_of(arg);
+            if !trait_impls.contains(&(arg_name.to_string(), bound_name.clone())) {
+                return Err(Diagnostic::plain(format!(
+                    "type `{arg_name}` does not implement trait `{bound_name}`"
+                )));
+            }
+        }
+    }
     let map = param_map(params, args);
     let mut concrete = function.clone();
     concrete.name = mangle(&function.name, args);
@@ -546,12 +638,12 @@ fn instantiate_function(function: &ast::Function, params: &[String], args: &Type
         *ret = substitute_type(ret, &map);
     }
     substitute_block(&mut concrete.body, &map);
-    concrete
+    Ok(concrete)
 }
 
 fn instantiate_struct(
     structure: &ast::StructDecl,
-    params: &[String],
+    params: &[ast::TypeParam],
     args: &TypeArgs,
 ) -> ast::StructDecl {
     let map = param_map(params, args);
@@ -566,7 +658,7 @@ fn instantiate_struct(
 
 fn instantiate_enum(
     enumeration: &ast::EnumDecl,
-    params: &[String],
+    params: &[ast::TypeParam],
     args: &TypeArgs,
 ) -> ast::EnumDecl {
     let map = param_map(params, args);
@@ -581,8 +673,20 @@ fn instantiate_enum(
     concrete
 }
 
-fn param_map(params: &[String], args: &TypeArgs) -> HashMap<String, TypeRef> {
-    params.iter().cloned().zip(args.iter().cloned()).collect()
+fn param_map(params: &[ast::TypeParam], args: &TypeArgs) -> HashMap<String, TypeRef> {
+    params
+        .iter()
+        .map(|p| p.name.clone())
+        .zip(args.iter().cloned())
+        .collect()
+}
+
+/// 类型引用的名字（用于约束检查诊断）。
+fn type_name_of(ty: &TypeRef) -> &str {
+    match &ty.kind {
+        TypeRefKind::Name(name) => name.as_str(),
+        _ => "<unknown>",
+    }
 }
 
 /// 替换类型引用中的类型参数。

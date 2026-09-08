@@ -828,3 +828,122 @@ fn m15_try_with_generic_slice() {
     );
 }
 
+// ── M15 方法 ──────────────────────────────────────────────────────────────
+
+#[test]
+fn m15_inherent_method() {
+    // 固有方法：impl Type + self 值传递 + 方法调用。
+    assert_program_exit(
+        r#"
+        struct Circle { radius: f64 }
+
+        impl Circle {
+            fn area(self): f64 { return self.radius * self.radius * 3.0; }
+        }
+
+        fn main() {
+            var c = Circle(2.0);
+            var a = c.area();
+            return a as i32;
+        }
+        "#,
+        12,
+    );
+}
+
+#[test]
+fn m15_inherent_method_pointer_self() {
+    // *Self 方法：原地修改接收者。
+    assert_program_exit(
+        r#"
+        struct Counter { value: i32 }
+
+        impl Counter {
+            fn bump(self: *Counter) { self->value += 1; }
+        }
+
+        fn main() {
+            var c = Counter(0);
+            c.bump();
+            c.bump();
+            c.bump();
+            return c.value;
+        }
+        "#,
+        3,
+    );
+}
+
+#[test]
+fn m15_associated_function() {
+    // 关联函数：Type::func() 调用。
+    assert_program_exit(
+        r#"
+        struct Point { x: i32, y: i32 }
+
+        impl Point {
+            fn origin(): Point { return Point(0, 0); }
+        }
+
+        fn main() {
+            var p = Point::origin();
+            return p.x + p.y;
+        }
+        "#,
+        0,
+    );
+}
+
+#[test]
+fn m15_trait_method() {
+    // trait 声明 + impl trait for + 方法调用。
+    assert_program_exit(
+        r#"
+        trait Shape {
+            fn area(self): f64;
+        }
+
+        struct Circle { radius: f64 }
+
+        impl Shape for Circle {
+            fn area(self): f64 { return self.radius * 2.0; }
+        }
+
+        fn main() {
+            var c = Circle(3.0);
+            var a = c.area();
+            return a as i32;
+        }
+        "#,
+        6,
+    );
+}
+
+#[test]
+fn m15_generic_trait_bound() {
+    // 泛型约束：fn f<T: Shape>(x: T) 调用 T 的方法，实例化时检查约束。
+    assert_program_exit(
+        r#"
+        trait Shape {
+            fn area(self): f64;
+        }
+
+        struct Circle { radius: f64 }
+
+        impl Shape for Circle {
+            fn area(self): f64 { return self.radius; }
+        }
+
+        fn area_of<T: Shape>(x: T): f64 {
+            return x.area();
+        }
+
+        fn main() {
+            var c = Circle(5.0);
+            return area_of(c) as i32;
+        }
+        "#,
+        5,
+    );
+}
+

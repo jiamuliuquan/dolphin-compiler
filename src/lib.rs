@@ -6,6 +6,7 @@ mod lexer;
 mod linker;
 mod lower;
 mod manifest;
+mod methods;
 mod modules;
 mod monomorphize;
 mod parser;

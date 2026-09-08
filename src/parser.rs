@@ -1,7 +1,7 @@
 use crate::ast::{
     AssignmentOperator, BinaryOperator, Block, EnumDecl, Expr, ExprKind, FieldDecl, ForIterable,
     Function, ImplBlock, MatchArm, MatchPattern, MethodSignature, Parameter, PathRef, Program,
-    Statement, StatementKind, StructDecl, TraitDecl, TryResource, TypeRef, TypeRefKind,
+    Statement, StatementKind, StructDecl, TraitDecl, TryResource, TypeParam, TypeRef, TypeRefKind,
     UnaryOperator, VariantDecl,
 };
 use crate::diagnostic::Diagnostic;
@@ -154,8 +154,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// 解析可选的类型参数列表 `<T, U>`（M15）。
-    fn parse_type_params(&mut self) -> Result<Vec<String>, Diagnostic> {
+    /// 解析可选的类型参数列表 `<T: 约束, U>`（M15）。
+    fn parse_type_params(&mut self) -> Result<Vec<TypeParam>, Diagnostic> {
         if self.consume(&TokenKind::Less).is_none() {
             return Ok(Vec::new());
         }
@@ -163,7 +163,12 @@ impl<'a> Parser<'a> {
         if !self.check(&TokenKind::Greater) {
             loop {
                 let (name, _span) = self.expect_identifier("expected type parameter name")?;
-                params.push(name);
+                let bound = if self.consume(&TokenKind::Colon).is_some() {
+                    Some(self.parse_type("expected trait bound")?)
+                } else {
+                    None
+                };
+                params.push(TypeParam { name, bound });
                 if self.consume(&TokenKind::Comma).is_none() {
                     break;
                 }
@@ -768,11 +773,17 @@ impl<'a> Parser<'a> {
             TokenKind::LeftBracket => self.parse_array_literal(token.span)?,
             TokenKind::Match => self.parse_match(token.span)?,
             TokenKind::Identifier(name) => {
-                // 收集点号路径段（可能用于函数调用、构造或字段访问）。
+                // 收集路径段（`.` 或 `::`，可能用于函数调用、构造、方法或关联函数）。
                 let mut segments = vec![name];
-                while self.consume(&TokenKind::Dot).is_some() {
-                    let (segment, _) = self.expect_identifier("expected name after `.`")?;
-                    segments.push(segment);
+                loop {
+                    if self.consume(&TokenKind::Dot).is_some()
+                        || self.consume(&TokenKind::ColonColon).is_some()
+                    {
+                        let (segment, _) = self.expect_identifier("expected name after `.` or `::`")?;
+                        segments.push(segment);
+                    } else {
+                        break;
+                    }
                 }
                 // 显式泛型实参 `foo<T>(...)`（M15，如 `allocate<T>(n)`）。
                 // 仅当 `<` 后能匹配「类型列表 `>` `(`」时才是泛型调用，否则是普通比较。
@@ -1237,7 +1248,7 @@ mod tests {
     fn parses_m15_generic_function() {
         let program = parse_text("fn id<T>(x: T): T { return x; }");
         assert_eq!(program.functions.len(), 1);
-        assert_eq!(program.functions[0].type_params, ["T"]);
+        assert_eq!(program.functions[0].type_params[0].name, "T");
     }
 
     #[test]
@@ -1245,8 +1256,9 @@ mod tests {
         let program = parse_text(
             "struct Vec<T> { data: []T, len: i32 } enum Result<T, E> { Ok(T), Err(E) }",
         );
-        assert_eq!(program.structs[0].type_params, ["T"]);
-        assert_eq!(program.enums[0].type_params, ["T", "E"]);
+        assert_eq!(program.structs[0].type_params[0].name, "T");
+        assert_eq!(program.enums[0].type_params[0].name, "T");
+        assert_eq!(program.enums[0].type_params[1].name, "E");
     }
 
     #[test]

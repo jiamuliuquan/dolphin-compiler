@@ -1455,6 +1455,31 @@ jobs `test`/`llvm`/`release`、`release.needs=['test','llvm']`、新 macOS 步�
    作为本地可选复验；`examples/m18` 与发行包冒烟在新示例加入后需按 ci.yml 脚本重跑。
 4. 无阻塞；本补充不把 H18-10/H18-11 记为完成。
 
+### H18-09-CI 修复：LLVM lane 缺失 Polly 静态库
+
+- 触发：GitHub Actions 的 `llvm` job 在 `cargo build --bins --features llvm` 失败：
+
+```text
+error: could not find native static library `Polly`, perhaps an -L flag is missing?
+error: could not compile `llvm-sys` (lib) due to 1 previous error
+```
+
+- 根因：`llvm-sys` 221 的 `LinkingPreferences::init` 默认 `prefer-static`（`build.rs` 只认
+  cargo feature `prefer-static`/`prefer-dynamic`/`force-*`，没有环境变量开关），会链接
+  `llvm-config --link-static --libs` 列出的静态组件；apt.llvm.org 把 Polly 拆到单独的
+  `libpolly-22-dev`，H18-09 lane 只装了 `llvm-22-dev`，因此缺 `libPolly.a`。
+- 修复：`.github/workflows/ci.yml` 的安装步骤改为
+  `sudo apt-get install -y llvm-22-dev libpolly-22-dev`，并在版本检查步骤增加
+  `test -f "$(llvm-config --libdir)/libPolly.a"`，让环境不合格时在构建前给出明确失败；
+  `docs/installation.md` 的 LLVM 22 一节同步安装包与检查命令。
+- 证据与限制：apt.llvm.org 官方包列表包含 `libpolly-22-dev`（Ubuntu resolute 也有该包），
+  与 CI 报错一致；本机（Arch LLVM 22.1.8）的 `llvm-config --link-static --libs` 不含 Polly、
+  `libPolly.a` 也不存在，所以本地 `--features llvm` 从不触发该问题，无法在本机复现 apt 拆包
+  路径。已用 PyYAML 解析验证 `ci.yml`，并确认新增的 `libPolly.a` 检查在本机会按预期报缺库
+  （说明该守卫能拦截原先的失败条件）。
+- 状态：配置与文档已修复；远端 CI 需重新运行确认（本机不能伪造 runner 结果）。
+- 该修复不影响本批测试数量与其它结论。
+
 ## H18-10 当前文档与可运行示例核正
 
 - 批次：H18-10

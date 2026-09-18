@@ -123,19 +123,24 @@ wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
 echo "deb http://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-22 main" \
   | sudo tee /etc/apt/sources.list.d/llvm-22.list > /dev/null
 sudo apt-get update
-sudo apt-get install -y llvm-22-dev
+sudo apt-get install -y llvm-22-dev libpolly-22-dev
 export PATH="/usr/lib/llvm-22/bin:$PATH"
 export LLVM_SYS_221_PREFIX=/usr/lib/llvm-22
 
-# 版本检查：必须是 22.x，且能真正链接（`cargo build --features llvm`）
+# 版本与静态依赖检查：必须是 22.x，且 Polly 静态库存在、能真正链接
 llvm-config --version
+test -f "$(llvm-config --libdir)/libPolly.a"
 cargo clippy --workspace --all-targets --features llvm -- -D warnings
 DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm
 DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples
 cargo test -p dolphin-compiler --features llvm --test backend
 ```
 
-`llvm-config --version` 输出正确不等于 dev 库可链接；以上命令以实际编译/链接为准。若本机 LLVM 不在 `/usr/lib/llvm-22`，设置 `LLVM_SYS_221_PREFIX` 指向其前缀即可。
+`llvm-sys` 默认静态链接 LLVM 组件；apt.llvm.org 把 Polly 单独放在 `libpolly-22-dev`，只装
+`llvm-22-dev` 会在 `cargo build --features llvm` 时报
+`could not find native static library Polly`。`llvm-config --version` 输出正确不等于 dev 库可链接；
+以上命令以实际编译/链接为准。若本机 LLVM 不在 `/usr/lib/llvm-22`，设置 `LLVM_SYS_221_PREFIX`
+指向其前缀即可。
 
 
 ### 后续干净环境验收

@@ -1,0 +1,21 @@
+[package]
+name = "dolphin-driver"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["cranelift"]
+cranelift = ["dep:dolphin-codegen-cranelift"]
+llvm = ["dep:dolphin-codegen-llvm"]
+
+[dependencies]
+dolphin-source.workspace = true
+dolphin-syntax.workspace = true
+dolphin-ir.workspace = true
+dolphin-package.workspace = true
+dolphin-platform.workspace = true
+dolphin-hir.workspace = true
+dolphin-backend.workspace = true
+dolphin-linker.workspace = true
+dolphin-codegen-cranelift = { workspace = true, optional = true }
+dolphin-codegen-llvm = { workspace = true, optional = true }

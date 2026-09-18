@@ -1,0 +1,7 @@
+[package]
+name = "dolphin-ir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-syntax.workspace = true

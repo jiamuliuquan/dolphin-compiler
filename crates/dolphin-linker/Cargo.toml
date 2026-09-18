@@ -1,0 +1,8 @@
+[package]
+name = "dolphin-linker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-source.workspace = true
+dolphin-platform.workspace = true

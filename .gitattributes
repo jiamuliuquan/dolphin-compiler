@@ -1,0 +1,4 @@
+# 三平台统一按 LF 检出：dc fmt --check 与测试做字节级期望，Windows 的
+# core.autocrlf=true（GitHub windows-latest runner 默认）会把文本文件转成
+# CRLF，导致 Windows lane 的格式门禁失败。
+* text=auto eol=lf

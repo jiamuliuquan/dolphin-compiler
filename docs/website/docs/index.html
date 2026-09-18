@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Dolphin 文档：从入门到精通的语言教程与标准库参考。" />
+  <title>文档 · Dolphin</title>
+  <link rel="stylesheet" href="../assets/css/site.css" />
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem("dolphin-theme");
+        if (saved === "dark" || saved === "light") {
+          document.documentElement.setAttribute("data-theme", saved);
+        } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#doc-body" data-i18n="nav.docs">文档</a>
+
+  <header class="topbar">
+    <div class="container">
+      <a class="brand" href="../index.html">
+        <svg viewBox="0 0 64 64" aria-hidden="true">
+          <defs>
+            <linearGradient id="dolphinGradD" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#0b6fb8" />
+              <stop offset="1" stop-color="#12b3a8" />
+            </linearGradient>
+          </defs>
+          <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#dolphinGradD)" />
+          <path d="M14 38c8-2 12-8 15-15 2-4 4-7 7-8 4-1 7 1 9 5 2 4 1 9-3 15-3 5-8 9-14 11-5 2-10 2-14 0z" fill="#fff" opacity="0.94" />
+          <circle cx="37" cy="24" r="2.4" fill="#0b6fb8" />
+          <path d="M12 46c6 3 14 3 21 0 5-2 9-5 12-9" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.8" />
+        </svg>
+        <span>
+          <span data-i18n="brand.name">Dolphin</span>
+          <small data-i18n="brand.tagline">编程语言</small>
+        </span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="../index.html" data-nav data-i18n="nav.home">首页</a>
+        <a href="../install.html" data-nav data-i18n="nav.install">安装</a>
+        <a href="index.html#/tutorial/install" data-nav data-i18n="nav.tutorial">教程</a>
+        <a href="index.html#/std/overview" data-nav data-i18n="nav.stdlib">标准库</a>
+        <a href="index.html" data-nav data-i18n="nav.docs">文档</a>
+      </nav>
+      <div class="topbar-actions">
+        <div class="lang-switch" role="group" data-i18n-aria="nav.language">
+          <button type="button" data-lang-btn="zh-CN">中文</button>
+          <button type="button" data-lang-btn="en-US">EN</button>
+        </div>
+        <button type="button" class="icon-btn" data-theme-toggle data-i18n-title="nav.theme" aria-label="Toggle theme">☾</button>
+        <button type="button" class="icon-btn menu-btn" data-menu-toggle data-i18n-aria="nav.menu" aria-label="Menu">☰</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="docs-shell">
+    <aside class="docs-sidebar">
+      <div class="docs-search">
+        <input type="search" id="docs-search" data-i18n-placeholder="docs.search" placeholder="搜索文档…" autocomplete="off" />
+      </div>
+      <nav class="docs-nav" id="docs-nav"></nav>
+    </aside>
+
+    <main class="docs-main" id="doc-body">
+      <article id="doc-article">
+        <p class="docs-loading" data-i18n="docs.loading">正在加载…</p>
+      </article>
+      <nav class="doc-pager" id="doc-pager"></nav>
+    </main>
+
+    <aside class="doc-toc">
+      <div class="toc-title" data-i18n="docs.toc">本页目录</div>
+      <nav id="doc-toc-nav"></nav>
+    </aside>
+  </div>
+
+  <script src="../assets/js/i18n.js"></script>
+  <script src="../assets/js/site.js"></script>
+  <script src="../assets/js/content/zh-tutorial.js"></script>
+  <script src="../assets/js/content/zh-std.js"></script>
+  <script src="../assets/js/content/en-tutorial.js"></script>
+  <script src="../assets/js/content/en-std.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

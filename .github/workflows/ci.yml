@@ -5,9 +5,12 @@ on:
   pull_request:
 
 jobs:
+  # 三平台默认 Cranelift 质量门禁 + 发行包冒烟。
+  #
+  # PR、分支 push 和 tag push 都运行：tag 上先过同一份质量门禁与冒烟，release job
+  # 再消费本 job 上传的、已冒烟过的归档。依赖 job 失败时 release 因 `needs` 被跳过，
+  # 不使用 `always()`。
   test:
-    # 仅在分支 push 或 PR 时跑质量门禁；打 tag 时交给 release job。
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
     strategy:
       matrix:
         include:
@@ -31,16 +34,34 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - run: cargo fmt -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # Rust 1.96+ 的 rustup `rust-lld`/`rust-objcopy` 动态依赖 `@rpath/libLLVM.dylib`，
+      # 但 rustup 工具链的 rpath 不指向 `$SYSROOT/lib`（指向官方构建机路径），
+      # 导致 macOS 上 `cargo test` 的链接与 build.rs 的 strip 失败。
+      # 这里为后续步骤补上 dyld 回退路径；发行包侧由 package.py 复制 libLLVM 并
+      # 改写 rust-lld rpath，不依赖本步骤。
+      - name: Allow rust-lld to load libLLVM (macOS)
+        if: runner.os == 'macOS'
+        run: echo "DYLD_FALLBACK_LIBRARY_PATH=$(rustc --print sysroot)/lib" >> "$GITHUB_ENV"
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings
+      - run: cargo test --workspace --exclude dolphin-codegen-llvm
       - run: cargo build --release --bins
+
+      # M17：仓库内示例与源码标准库必须已符合格式化器规范。
+      - name: Check formatter
+        shell: bash
+        run: |
+          dc=./target/release/dc
+          [ -f "$dc" ] || dc=./target/release/dc.exe
+          "$dc" fmt --check examples crates/dolphin-std/src
 
       # 打包自包含发行包（dc + dolphin-compiler + rust-lld + 许可证 + 文档）。
       - name: Package release archive
         run: python scripts/package.py --target ${{ matrix.target }}
 
       # 冒烟测试：解压发行包，从空目录构建并运行示例（不依赖系统 C 编译器）。
+      # M14/M15 的“无泄漏”必须显式检查 stderr：exit=0 不能证明没有泄漏报告。
       - name: Smoke test the release archive
         shell: bash
         run: |
@@ -58,43 +79,145 @@ jobs:
           fi
           smoke/dc build examples/m8 --release
           set +e
-          ./examples/m8/target/m8
+          ./examples/m8/target/m8 >m8.stdout 2>m8.stderr
           code=$?
           set -e
           test "$code" -eq 64
 
-  release:
-    # 仅在打 v* 标签时触发，把三平台发行包上传为 GitHub Release 资产。
-    if: startsWith(github.ref, 'refs/tags/v')
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
+          # M14 手动内存示例：Debug 运行时验证无泄漏退出（stderr 必须为空）。
+          smoke/dc build examples/m14
+          set +e
+          ./examples/m14/target/m14 >m14.stdout 2>m14.stderr
+          code=$?
+          set -e
+          test "$code" -eq 0
+          test ! -s m14.stderr
+
+          # M15 泛型与源码标准库示例：Debug 无泄漏并输出预期结果。
+          smoke/dc build examples/m15
+          set +e
+          output=$(./examples/m15/target/m15 2>m15.stderr)
+          code=$?
+          set -e
+          test "$code" -eq 0
+          test "$output" = "42 22 true"
+          test ! -s m15.stderr
+
+          # M15-C/D 库打包：发行包中的 dc 也能产出确定性 `.dlib` 与摘要。
+          smoke/dc package examples/m15/mathlib
+          test -f examples/m15/mathlib/target/package/m15math-1.0.0.dlib
+          test -f examples/m15/mathlib/target/package/m15math-1.0.0.dlib.sha256
+
+          # M15-D/E/F + PKG-15：静态网站发布流程。把 `.dlib` 放到固定仓库路径，
+          # 在一个只声明坐标依赖的全新应用里消费（发行包 dc，隔离缓存）。
+          export DOLPHIN_HOME="$PWD/smoke-home"
+          repo_url=$(python -c "import pathlib; print(pathlib.Path('smoke-repo').resolve().as_uri())")
+          mkdir -p smoke-repo/me/foxlab/m15math/1.0.0 smoke-app/src
+          cp examples/m15/mathlib/target/package/m15math-1.0.0.dlib \
+             examples/m15/mathlib/target/package/m15math-1.0.0.dlib.sha256 \
+             smoke-repo/me/foxlab/m15math/1.0.0/
+          cat > smoke-app/dolphin.toml <<EOF
+          [package]
+          group = "org.example"
+          name = "smokeapp"
+          version = "0.1.0"
+
+          [[bin]]
+          name = "smokeapp"
+          path = "src/main.do"
+
+          [repositories]
+          default = "$repo_url"
+
+          [dependencies]
+          math = "me.foxlab:m15math:1.0.0"
+          EOF
+          cat > smoke-app/src/main.do <<EOF
+          use math;
+          fn main() { return math.add(40, 2); }
+          EOF
+          smoke/dc fetch smoke-app
+          smoke/dc build smoke-app --locked
+          set +e
+          ./smoke-app/target/smokeapp >smoke-app.stdout 2>smoke-app.stderr
+          code=$?
+          set -e
+          test "$code" -eq 42
+          test ! -s smoke-app.stderr
+          # 断网重建：使用缓存与锁文件，不访问任何网络。
+          smoke/dc build smoke-app --locked --offline
+
+      # 发布只消费这份已经过冒烟测试的归档，不在 release job 重新构建，
+      # 避免“测试的产物”和“上传的产物”不是同一份。
+      - name: Upload smoke-tested archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolphin-archive-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # 固定 LLVM 22 开发环境的 Linux lane：不依赖 runner 偶然预装的 LLVM。
+  # 安装到固定路径 `/usr/lib/llvm-22`，由版本检查与实际链接（`--features llvm`）证明可用。
+  llvm:
+    name: LLVM 22 (ubuntu)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+
+      - name: Install fixed LLVM 22 development environment
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y wget ca-certificates gnupg
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          . /etc/os-release
+          codename="${VERSION_CODENAME:?}"
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-22 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-22.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev
+          echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=/usr/lib/llvm-22" >> "$GITHUB_ENV"
+
+      - name: Verify LLVM 22 development environment
+        run: |
+          set -euo pipefail
+          version="$(llvm-config --version)"
+          prefix="$(llvm-config --prefix)"
+          case "$version" in
+            22.*) ;;
+            *) echo "expected LLVM 22.x, found $version" >&2; exit 1 ;;
+          esac
+          test "$prefix" = "/usr/lib/llvm-22"
+          echo "using LLVM $version at $prefix"
+
+      # 合同第 5.2 节：LLVM 环境可用、clippy、整套（含对照）与显式后端命令。
+      - run: cargo build --bins --features llvm
+      - run: cargo clippy --workspace --all-targets --features llvm -- -D warnings
+      - run: DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm
+      - run: DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples
+      - run: cargo test -p dolphin-compiler --features llvm --test backend
+
+  # 发布：仅在 tag 上触发，且必须等三平台质量门禁与 LLVM lane 全部成功。
+  # tag 上 test/llvm 不再被 skip（test 的 if 已移除），因此 `needs` 不会因 skip 放行。
+  release:
+    needs: [test, llvm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download smoke-tested archives
+        uses: actions/download-artifact@v4
         with:
-          python-version: "3.x"
+          pattern: dolphin-archive-*
+          merge-multiple: true
+          path: dist
 
-      - name: Activate MSVC environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - run: cargo build --release --bins
-
-      - name: Package release archive
-        run: python scripts/package.py --target ${{ matrix.target }}
-
-      - name: Upload release asset
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |

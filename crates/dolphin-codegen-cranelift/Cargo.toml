@@ -1,0 +1,15 @@
+[package]
+name = "dolphin-codegen-cranelift"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-backend.workspace = true
+dolphin-source.workspace = true
+dolphin-syntax.workspace = true
+dolphin-ir.workspace = true
+dolphin-platform.workspace = true
+cranelift-codegen.workspace = true
+cranelift-frontend.workspace = true
+cranelift-module.workspace = true
+cranelift-object.workspace = true

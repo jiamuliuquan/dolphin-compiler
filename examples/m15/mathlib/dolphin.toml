@@ -1,0 +1,7 @@
+[package]
+group = "me.foxlab"
+name = "m15math"
+version = "1.0.0"
+
+[lib]
+path = "src/lib.do"

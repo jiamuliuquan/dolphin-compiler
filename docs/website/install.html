@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="安装 Dolphin 编译器：下载自包含发行包，解压并加入 PATH。" />
+  <title>安装 · Dolphin</title>
+  <link rel="stylesheet" href="assets/css/site.css" />
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem("dolphin-theme");
+        if (saved === "dark" || saved === "light") {
+          document.documentElement.setAttribute("data-theme", saved);
+        } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <script defer src="assets/js/i18n.js"></script>
+  <script defer src="assets/js/site.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main" data-i18n="nav.home">首页</a>
+
+  <header class="topbar">
+    <div class="container">
+      <a class="brand" href="index.html">
+        <svg viewBox="0 0 64 64" aria-hidden="true">
+          <defs>
+            <linearGradient id="dolphinGrad2" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#0b6fb8" />
+              <stop offset="1" stop-color="#12b3a8" />
+            </linearGradient>
+          </defs>
+          <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#dolphinGrad2)" />
+          <path d="M14 38c8-2 12-8 15-15 2-4 4-7 7-8 4-1 7 1 9 5 2 4 1 9-3 15-3 5-8 9-14 11-5 2-10 2-14 0z" fill="#fff" opacity="0.94" />
+          <circle cx="37" cy="24" r="2.4" fill="#0b6fb8" />
+          <path d="M12 46c6 3 14 3 21 0 5-2 9-5 12-9" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.8" />
+        </svg>
+        <span>
+          <span data-i18n="brand.name">Dolphin</span>
+          <small data-i18n="brand.tagline">编程语言</small>
+        </span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="index.html" data-nav data-i18n="nav.home">首页</a>
+        <a href="install.html" data-nav data-i18n="nav.install">安装</a>
+        <a href="docs/index.html#/tutorial/install" data-nav data-i18n="nav.tutorial">教程</a>
+        <a href="docs/index.html#/std/overview" data-nav data-i18n="nav.stdlib">标准库</a>
+        <a href="docs/index.html" data-i18n="nav.docs">文档</a>
+      </nav>
+      <div class="topbar-actions">
+        <div class="lang-switch" role="group" data-i18n-aria="nav.language">
+          <button type="button" data-lang-btn="zh-CN">中文</button>
+          <button type="button" data-lang-btn="en-US">EN</button>
+        </div>
+        <button type="button" class="icon-btn" data-theme-toggle data-i18n-title="nav.theme" aria-label="Toggle theme">☾</button>
+        <button type="button" class="icon-btn menu-btn" data-menu-toggle data-i18n-aria="nav.menu" aria-label="Menu">☰</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="page-head">
+      <div class="container">
+        <span class="eyebrow" data-i18n="install.eyebrow">安装</span>
+        <h1 data-i18n="install.title">安装 Dolphin</h1>
+        <p data-i18n="install.lead">
+          Dolphin 以自包含发行包发布：解压后即可使用，无需安装 C/C++ 工具链，也无需 Rust。
+        </p>
+      </div>
+    </div>
+
+    <div class="page-body">
+      <div class="container">
+        <h2 data-i18n="install.requirements">系统要求</h2>
+        <p data-i18n="install.requirements.body">
+          Linux x86_64、macOS ARM64（Apple Silicon）与 Windows x86_64 为一级支持平台，均在 CI
+          中完成构建与端到端测试。
+        </p>
+        <table>
+          <thead>
+            <tr><th>Platform</th><th>Target triple</th><th>Archive</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Linux x86_64</td><td><code>x86_64-unknown-linux-gnu</code></td><td><code>.tar.gz</code></td></tr>
+            <tr><td>macOS ARM64</td><td><code>aarch64-apple-darwin</code></td><td><code>.tar.gz</code></td></tr>
+            <tr><td>Windows x86_64</td><td><code>x86_64-pc-windows-msvc</code></td><td><code>.zip</code></td></tr>
+          </tbody>
+        </table>
+
+        <div data-tabs>
+          <div class="tabs" role="tablist">
+            <button type="button" class="is-active" data-tab="tab-linux" data-i18n="install.tabs.linux">Linux</button>
+            <button type="button" data-tab="tab-macos" data-i18n="install.tabs.macos">macOS</button>
+            <button type="button" data-tab="tab-windows" data-i18n="install.tabs.windows">Windows</button>
+          </div>
+
+          <div class="tab-panel is-active" id="tab-linux">
+            <h3 data-i18n="install.step.download">1. 下载归档</h3>
+            <pre><code>curl -LO https://example.org/dolphin-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://example.org/dolphin-0.1.0-x86_64-unknown-linux-gnu.sha256</code></pre>
+            <h3 data-i18n="install.step.verify">2. 校验完整性</h3>
+            <pre><code>sha256sum -c dolphin-0.1.0-x86_64-unknown-linux-gnu.sha256</code></pre>
+            <h3 data-i18n="install.step.extract">3. 解压并加入 PATH</h3>
+            <pre><code>mkdir -p ~/.local/dolphin
+tar xzf dolphin-0.1.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
+echo 'export PATH="$HOME/.local/dolphin:$PATH"' &gt;&gt; ~/.bashrc</code></pre>
+            <h3 data-i18n="install.step.verifyenv">4. 验证安装</h3>
+            <pre><code>dc --version
+dc env</code></pre>
+          </div>
+
+          <div class="tab-panel" id="tab-macos">
+            <h3 data-i18n="install.step.download">1. 下载归档</h3>
+            <pre><code>curl -LO https://example.org/dolphin-0.1.0-aarch64-apple-darwin.tar.gz
+curl -LO https://example.org/dolphin-0.1.0-aarch64-apple-darwin.sha256</code></pre>
+            <h3 data-i18n="install.step.verify">2. 校验完整性</h3>
+            <pre><code>shasum -a 256 -c dolphin-0.1.0-aarch64-apple-darwin.sha256</code></pre>
+            <h3 data-i18n="install.step.extract">3. 解压并加入 PATH</h3>
+            <pre><code>mkdir -p ~/.local/dolphin
+tar xzf dolphin-0.1.0-aarch64-apple-darwin.tar.gz -C ~/.local/dolphin
+echo 'export PATH="$HOME/.local/dolphin:$PATH"' &gt;&gt; ~/.zshrc</code></pre>
+            <h3 data-i18n="install.step.verifyenv">4. 验证安装</h3>
+            <pre><code>dc --version
+dc env</code></pre>
+          </div>
+
+          <div class="tab-panel" id="tab-windows">
+            <h3 data-i18n="install.step.download">1. 下载归档</h3>
+            <pre><code>Invoke-WebRequest -Uri https://example.org/dolphin-0.1.0-x86_64-pc-windows-msvc.zip `
+  -OutFile dolphin-0.1.0-x86_64-pc-windows-msvc.zip</code></pre>
+            <h3 data-i18n="install.step.verify">2. 校验完整性</h3>
+            <pre><code>Get-FileHash dolphin-0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256</code></pre>
+            <h3 data-i18n="install.step.extract">3. 解压并加入 PATH</h3>
+            <pre><code>Expand-Archive dolphin-0.1.0-x86_64-pc-windows-msvc.zip `
+  -DestinationPath "$env:USERPROFILE\dolphin"
+$env:Path = "$env:USERPROFILE\dolphin;$env:Path"</code></pre>
+            <h3 data-i18n="install.step.verifyenv">4. 验证安装</h3>
+            <pre><code>dc --version
+dc env</code></pre>
+          </div>
+        </div>
+
+        <h2 data-i18n="install.package.title">发行包内容</h2>
+        <p data-i18n="install.package.body">
+          dc 与 rust-lld 必须位于同一目录；macOS 与 Linux 包还携带 rust-lld 依赖的 LLVM 动态库，请勿拆分。
+        </p>
+        <table>
+          <thead>
+            <tr><th>File</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>dc</code></td><td>Compiler entry point / 编译器主命令</td></tr>
+            <tr><td><code>dolphin-compiler</code></td><td>Alias of <code>dc</code> / 兼容名称</td></tr>
+            <tr><td><code>rust-lld</code></td><td>Bundled linker (LLD) / 自带链接器</td></tr>
+            <tr><td><code>libLLVM.dylib</code>, <code>libLLVM.so.*</code></td><td>Linker runtime (macOS / Linux) / 链接器动态依赖</td></tr>
+            <tr><td><code>LICENSE</code></td><td>GPL-3.0</td></tr>
+            <tr><td><code>README.md</code></td><td>Release notes</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="offline" data-i18n="install.offline.title">离线使用</h2>
+        <p data-i18n="install.offline.body">
+          在不声明远程依赖时，dc check/build/run 不会访问网络。运行时目标文件内嵌于 dc，链接器为同目录的
+          rust-lld。使用 Maven 风格依赖时，dc 会通过 HTTPS 下载 .dlib 到内容寻址缓存（DOLPHIN_HOME，默认
+          ~/.dolphin），并写入 dolphin.lock。
+        </p>
+        <pre><code>dc build my-project --locked --offline</code></pre>
+
+        <h2 id="upgrade" data-i18n="install.upgrade.title">升级与卸载</h2>
+        <p data-i18n="install.upgrade.body">
+          升级：用新版本覆盖旧目录，或解压到新目录后替换 PATH。卸载：删除发行目录并从 PATH
+          移除对应条目即可，Dolphin 不写注册表、不创建系统服务。
+        </p>
+
+        <h2 data-i18n="install.notes.title">说明</h2>
+        <ul class="feature-list">
+          <li data-i18n="install.notes.1">构建程序时仍会动态链接操作系统自带组件（Linux glibc、macOS libSystem、Windows UCRT）。</li>
+          <li data-i18n="install.notes.2">从源码构建编译器自身才需要 Rust 与本机 C 编译器。</li>
+          <li data-i18n="install.notes.3">当前不支持交叉编译，编译器只生成宿主平台的本机程序。</li>
+        </ul>
+
+        <div class="callout" style="margin-top: 36px">
+          <p data-i18n="install.next">安装完成后，继续阅读入门教程。</p>
+          <p style="margin-bottom: 0">
+            <a class="btn btn-primary" href="docs/index.html#/tutorial/install" data-i18n="install.next.btn">进入入门教程</a>
+          </p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-bottom">
+        <span>© <span data-year>2026</span> Dolphin <span data-i18n="footer.rights">保留所有权利。</span></span>
+        <span data-i18n="footer.license">GPL-3.0 许可证</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

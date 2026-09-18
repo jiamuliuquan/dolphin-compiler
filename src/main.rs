@@ -1,11 +1,14 @@
+use std::fs;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use dolphin_compiler::{
-    BuildArtifact, BuildOptions, BuildProfile, BuildSettings, LinkerChoice, build_manifest,
-    build_with_profile, check, check_manifest, discover_manifest, host_platform,
+    BackendChoice, BuildArtifact, BuildOptions, BuildProfile, BuildSettings, Cache, DependencyKind,
+    LibraryArtifact, LinkerChoice, Manifest, ResolveOptions, build_library_with_graph,
+    build_manifest_with_graph, build_with_profile, check, check_library_with_graph,
+    check_manifest_with_graph, discover_manifest, host_platform, publish_library, resolve_project,
 };
 
 #[derive(Parser)]
@@ -27,16 +30,22 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Parse and type-check without producing build artifacts
-    Check {
-        /// Dolphin project directory or a standalone .do file (defaults to the current directory)
-        input: Option<PathBuf>,
-    },
+    Check(CheckArgs),
 
     /// Compile to a native executable
     Build(BuildArgs),
 
     /// Compile and execute the program
     Run(BuildArgs),
+
+    /// Produce a `.dlib` library package from the current library target
+    Package(ProjectArgs),
+
+    /// Resolve and download the dependency closure, writing dolphin.lock
+    Fetch(ProjectArgs),
+
+    /// Publish the current library to a repository
+    Publish(PublishArgs),
 
     /// Show the package coordinate and build configuration of a project
     Info {
@@ -46,6 +55,79 @@ enum Commands {
 
     /// Show the host platform, target triple, and selected linker
     Env,
+
+    /// Format Dolphin source files
+    Fmt(FmtArgs),
+
+    /// Run the language server over stdin/stdout
+    Lsp,
+}
+
+#[derive(Args)]
+struct CheckArgs {
+    /// Dolphin project directory or a standalone .do file (defaults to the current directory)
+    input: Option<PathBuf>,
+
+    /// Require an up-to-date dolphin.lock and do not rewrite it
+    #[arg(long)]
+    locked: bool,
+
+    /// Do not access HTTP(S) repositories
+    #[arg(long)]
+    offline: bool,
+}
+
+#[derive(Args)]
+struct FmtArgs {
+    /// Files or directories to format (defaults to `src`)
+    paths: Vec<PathBuf>,
+
+    /// Check formatting without writing files (non-zero exit if changes are needed)
+    #[arg(long)]
+    check: bool,
+}
+
+/// 依赖解析开关，供 check/build/run/package/fetch/publish 复用。
+#[derive(Args, Clone, Copy)]
+struct DependencyArgs {
+    /// Require an up-to-date dolphin.lock and do not rewrite it
+    #[arg(long)]
+    locked: bool,
+
+    /// Do not access HTTP(S) repositories
+    #[arg(long)]
+    offline: bool,
+}
+
+impl DependencyArgs {
+    fn options(self) -> ResolveOptions {
+        ResolveOptions {
+            offline: self.offline,
+            locked: self.locked,
+        }
+    }
+}
+
+#[derive(Args)]
+struct ProjectArgs {
+    /// Dolphin project directory (defaults to the current directory)
+    input: Option<PathBuf>,
+
+    #[command(flatten)]
+    dependency: DependencyArgs,
+}
+
+#[derive(Args)]
+struct PublishArgs {
+    /// Dolphin project directory (defaults to the current directory)
+    input: Option<PathBuf>,
+
+    /// Repository id from `[repositories]` (defaults to `default`)
+    #[arg(long)]
+    repository: Option<String>,
+
+    #[command(flatten)]
+    dependency: DependencyArgs,
 }
 
 #[derive(Args)]
@@ -56,6 +138,10 @@ struct BuildArgs {
     /// Select which binary target to build or run (for dolphin.toml projects)
     #[arg(long)]
     bin: Option<String>,
+
+    /// Build the library target instead of binary targets
+    #[arg(long, conflicts_with = "bin")]
+    lib: bool,
 
     /// Write the executable to this path (single-file mode only)
     #[arg(short, long)]
@@ -72,22 +158,51 @@ struct BuildArgs {
     /// Fall back to the system linker (cc/link) instead of the bundled rust-lld
     #[arg(long)]
     system_linker: bool,
+
+    /// Select the code generation backend (defaults to $DOLPHIN_BACKEND or cranelift)
+    #[arg(long, value_enum)]
+    backend: Option<BackendArg>,
+
+    /// Require an up-to-date dolphin.lock and do not rewrite it
+    #[arg(long)]
+    locked: bool,
+
+    /// Do not access HTTP(S) repositories
+    #[arg(long)]
+    offline: bool,
 }
 
 impl BuildArgs {
-    fn profile(&self) -> BuildProfile {
+    /// 显式 profile：`--release`/`--debug` 才算显式；两者都没传返回 `None`，
+    /// 由命令在发现清单后按 `显式 > 清单 > Debug` 解析（`BuildProfile::resolve`）。
+    fn explicit_profile(&self) -> Option<BuildProfile> {
         if self.release {
-            BuildProfile::Release
+            Some(BuildProfile::Release)
+        } else if self.debug {
+            Some(BuildProfile::Debug)
         } else {
-            BuildProfile::Debug
+            None
         }
     }
 
     fn settings(&self) -> BuildSettings {
-        if self.system_linker {
-            BuildSettings::with_linker(LinkerChoice::System)
+        let linker = if self.system_linker {
+            LinkerChoice::System
         } else {
-            BuildSettings::default()
+            LinkerChoice::default()
+        };
+        let backend = match self.backend {
+            Some(BackendArg::Cranelift) => BackendChoice::Cranelift,
+            Some(BackendArg::Llvm) => BackendChoice::Llvm,
+            None => BackendChoice::default(),
+        };
+        BuildSettings { linker, backend }
+    }
+
+    fn resolve_options(&self) -> ResolveOptions {
+        ResolveOptions {
+            offline: self.offline,
+            locked: self.locked,
         }
     }
 }
@@ -97,6 +212,13 @@ enum ColorMode {
     Auto,
     Always,
     Never,
+}
+
+/// `--backend` 的取值（与 `BackendChoice` 对应，避免让 driver 依赖 clap）。
+#[derive(Clone, Copy, ValueEnum)]
+enum BackendArg {
+    Cranelift,
+    Llvm,
 }
 
 fn main() -> ExitCode {
@@ -119,14 +241,28 @@ fn main() -> ExitCode {
 fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
     let color = cli.color;
     match cli.command {
-        Commands::Check { input } => {
-            let input = input.unwrap_or_else(|| PathBuf::from("."));
+        Commands::Check(args) => {
+            let input = args.input.unwrap_or_else(|| PathBuf::from("."));
             match discover_manifest(&input).map_err(|error| (error.to_string(), color))? {
                 Some(manifest) => {
-                    check_manifest(&manifest).map_err(|error| (error.to_string(), color))?;
+                    let options = ResolveOptions {
+                        offline: args.offline,
+                        locked: args.locked,
+                    };
+                    let resolved = resolve_project(&manifest, options)
+                        .map_err(|error| (error.to_string(), color))?;
+                    check_manifest_with_graph(&manifest, &resolved.graph)
+                        .map_err(|error| (error.to_string(), color))?;
                     println!("Checked {}", manifest.package.coordinate());
                 }
                 None => {
+                    if args.locked || args.offline {
+                        return Err((
+                            "`--locked`/`--offline` require a project with a `dolphin.toml` manifest"
+                                .to_string(),
+                            color,
+                        ));
+                    }
                     check(&input).map_err(|error| (error.to_string(), color))?;
                     println!("Checked {}", input.display());
                 }
@@ -134,44 +270,195 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Build(args) => {
-            let profile = args.profile();
-            let artifacts = build_for_command(&args, profile, color)?;
+            let explicit = args.explicit_profile();
+            let settings = args.settings();
+            let input = args.input.clone().unwrap_or_else(|| PathBuf::from("."));
+            let Some(manifest) =
+                discover_manifest(&input).map_err(|error| (error.to_string(), color))?
+            else {
+                if args.lib || args.bin.is_some() {
+                    return Err((
+                        "`--lib`/`--bin` require a project with a `dolphin.toml` manifest"
+                            .to_string(),
+                        color,
+                    ));
+                }
+                if args.locked || args.offline {
+                    return Err((
+                        "`--locked`/`--offline` require a project with a `dolphin.toml` manifest"
+                            .to_string(),
+                        color,
+                    ));
+                }
+                // 单文件模式没有清单，默认 profile 为 Debug。
+                let artifact = build_with_profile(
+                    BuildOptions {
+                        input,
+                        output: args.output.clone(),
+                    },
+                    explicit.unwrap_or(BuildProfile::Debug),
+                    settings,
+                )
+                .map_err(|error| (error.to_string(), color))?;
+                println!("Built {}", artifact.executable.display());
+                return Ok(ExitCode::SUCCESS);
+            };
+
+            let profile = BuildProfile::resolve(&manifest, explicit);
+            let resolved = resolve_project(&manifest, args.resolve_options())
+                .map_err(|error| (error.to_string(), color))?;
+            if args.lib {
+                let artifact =
+                    build_library_with_graph(&manifest, profile, settings, &resolved.graph)
+                        .map_err(|error| (error.to_string(), color))?;
+                println!("Built {}", library_output(&artifact).display());
+                return Ok(ExitCode::SUCCESS);
+            }
+            // 清单声明了 `[lib]` 且未指定单个 bin 时，同时构建库与全部 bin。
+            if args.bin.is_none() && manifest.lib.is_some() {
+                let artifact =
+                    build_library_with_graph(&manifest, profile, settings, &resolved.graph)
+                        .map_err(|error| (error.to_string(), color))?;
+                println!("Built {}", library_output(&artifact).display());
+            }
+            let artifacts = build_manifest_with_graph(
+                &manifest,
+                args.bin.as_deref(),
+                profile,
+                settings,
+                &resolved.graph,
+            )
+            .map_err(|error| (error.to_string(), color))?;
             for artifact in artifacts {
                 println!("Built {}", artifact.executable.display());
             }
             Ok(ExitCode::SUCCESS)
         }
         Commands::Run(args) => {
-            let profile = args.profile();
-            let artifacts = build_for_command(&args, profile, color)?;
-            let artifact = select_run_target(&artifacts, color)?;
-            let status = Command::new(&artifact.executable)
-                .status()
-                .map_err(|error| {
-                    (
-                        format!("could not run `{}`: {error}", artifact.executable.display()),
+            if args.lib {
+                return Err((
+                    "`--lib` builds a library; use `dc run --bin <name>` for an executable"
+                        .to_string(),
+                    color,
+                ));
+            }
+            let explicit = args.explicit_profile();
+            let settings = args.settings();
+            let input = args.input.clone().unwrap_or_else(|| PathBuf::from("."));
+            let Some(manifest) =
+                discover_manifest(&input).map_err(|error| (error.to_string(), color))?
+            else {
+                if args.bin.is_some() || args.locked || args.offline {
+                    return Err((
+                        "`--bin`/`--locked`/`--offline` require a project with a `dolphin.toml` manifest"
+                            .to_string(),
                         color,
-                    )
-                })?;
-            // 正常退出码为 0..=255；Windows 异常终止会返回 0xC0000xxx 之类的
-            // 负值编码，统一映射为失败码 1，而不是被截断成 0。
-            let code = status
-                .code()
-                .filter(|code| (0..=255).contains(code))
-                .unwrap_or(1);
-            Ok(ExitCode::from(code as u8))
+                    ));
+                }
+                let artifact = build_with_profile(
+                    BuildOptions {
+                        input,
+                        output: args.output.clone(),
+                    },
+                    explicit.unwrap_or(BuildProfile::Debug),
+                    settings,
+                )
+                .map_err(|error| (error.to_string(), color))?;
+                return run_executable(&artifact);
+            };
+            let profile = BuildProfile::resolve(&manifest, explicit);
+            let resolved = resolve_project(&manifest, args.resolve_options())
+                .map_err(|error| (error.to_string(), color))?;
+            let artifacts = build_manifest_with_graph(
+                &manifest,
+                args.bin.as_deref(),
+                profile,
+                settings,
+                &resolved.graph,
+            )
+            .map_err(|error| (error.to_string(), color))?;
+            if artifacts.is_empty() {
+                return Err((
+                    "this project only declares a library and cannot be run; add a `[[bin]]` target or use `dc build --lib`".to_string(),
+                    color,
+                ));
+            }
+            let artifact = select_run_target(&artifacts, color)?;
+            run_executable(artifact)
+        }
+        Commands::Package(args) => {
+            let input = args.input.unwrap_or_else(|| PathBuf::from("."));
+            let manifest = require_manifest(&input, color)?;
+            let resolved = resolve_project(&manifest, args.dependency.options())
+                .map_err(|error| (error.to_string(), color))?;
+            check_library_with_graph(&manifest, &resolved.graph)
+                .map_err(|error| (error.to_string(), color))?;
+            let artifact = build_library_with_graph(
+                &manifest,
+                BuildProfile::Debug,
+                BuildSettings::default(),
+                &resolved.graph,
+            )
+            .map_err(|error| (error.to_string(), color))?;
+            println!("Packaged {}", library_output(&artifact).display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Fetch(args) => {
+            let input = args.input.unwrap_or_else(|| PathBuf::from("."));
+            let manifest = require_manifest(&input, color)?;
+            let resolved = resolve_project(&manifest, args.dependency.options())
+                .map_err(|error| (error.to_string(), color))?;
+            println!(
+                "Resolved {} package(s) for {}",
+                resolved.graph.packages.len(),
+                manifest.package.coordinate()
+            );
+            println!("Wrote {}", manifest.root.join("dolphin.lock").display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Publish(args) => {
+            let input = args.input.unwrap_or_else(|| PathBuf::from("."));
+            let manifest = require_manifest(&input, color)?;
+            let resolved = resolve_project(&manifest, args.dependency.options())
+                .map_err(|error| (error.to_string(), color))?;
+            check_library_with_graph(&manifest, &resolved.graph)
+                .map_err(|error| (error.to_string(), color))?;
+            let artifact = build_library_with_graph(
+                &manifest,
+                BuildProfile::Debug,
+                BuildSettings::default(),
+                &resolved.graph,
+            )
+            .map_err(|error| (error.to_string(), color))?;
+            let package = artifact
+                .package
+                .ok_or_else(|| ("publish requires a `[lib]` target".to_string(), color))?;
+            let repository = args.repository.unwrap_or_else(|| "default".to_string());
+            let published = publish_library(
+                &manifest,
+                &resolved.graph,
+                &repository,
+                &package,
+                args.dependency.options(),
+            )
+            .map_err(|error| (error.to_string(), color))?;
+            println!(
+                "Published {} to repository `{repository}` ({published})",
+                manifest.package.coordinate()
+            );
+            Ok(ExitCode::SUCCESS)
         }
         Commands::Info { input } => {
             let input = input.unwrap_or_else(|| PathBuf::from("."));
             match discover_manifest(&input).map_err(|error| (error.to_string(), color))? {
                 Some(manifest) => {
-                    println!("{}", manifest.package.coordinate());
-                    println!("source: {}", manifest.package.source.display());
-                    println!("bins:");
-                    for bin in &manifest.bins {
-                        println!("  {} -> {}", bin.name, bin.path.display());
+                    print_info(&manifest);
+                    let lock_path = manifest.root.join("dolphin.lock");
+                    if lock_path.is_file() {
+                        println!("lock: {} (present)", lock_path.display());
+                    } else {
+                        println!("lock: absent (run `dc fetch` to create it)");
                     }
-                    println!("optimization: {}", manifest.build.optimization);
                 }
                 None => {
                     return Err((
@@ -192,41 +479,165 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
                 "system linker: {} (--system-linker fallback)",
                 platform.system_linker_name()
             );
+            println!(
+                "backend: {} (default; --backend overrides)",
+                BackendChoice::default().name()
+            );
+            println!("cache: {}", Cache::from_env().home().display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Fmt(args) => run_fmt(args, color),
+        Commands::Lsp => {
+            dolphin_lsp::serve()
+                .map_err(|error| (format!("language server error: {error}"), color))?;
             Ok(ExitCode::SUCCESS)
         }
     }
 }
 
-/// 根据是否发现清单，走清单构建或旧版单文件/目录构建。
-fn build_for_command(
-    args: &BuildArgs,
-    profile: BuildProfile,
-    color: ColorMode,
-) -> Result<Vec<BuildArtifact>, (String, ColorMode)> {
-    let settings = args.settings();
-    let input = args.input.clone().unwrap_or_else(|| PathBuf::from("."));
-    match discover_manifest(&input).map_err(|error| (error.to_string(), color))? {
-        Some(manifest) => build_manifest(&manifest, args.bin.as_deref(), profile, settings)
-            .map_err(|error| (error.to_string(), color)),
-        None => {
-            if args.bin.is_some() {
-                return Err((
-                    "`--bin` requires a project with a `dolphin.toml` manifest".to_string(),
-                    color,
-                ));
-            }
-            build_with_profile(
-                BuildOptions {
-                    input,
-                    output: args.output.clone(),
-                },
-                profile,
-                settings,
+/// `dc fmt`：格式化文件或目录下的全部 `.do` 文件。
+fn run_fmt(args: FmtArgs, color: ColorMode) -> Result<ExitCode, (String, ColorMode)> {
+    let roots = if args.paths.is_empty() {
+        vec![PathBuf::from("src")]
+    } else {
+        args.paths
+    };
+    let mut files = Vec::new();
+    for root in &roots {
+        collect_sources(root, &mut files).map_err(|message| (message, color))?;
+    }
+    files.sort();
+    files.dedup();
+
+    let mut needs_format = false;
+    for file in &files {
+        let text = fs::read_to_string(file).map_err(|error| {
+            (
+                format!("could not read `{}`: {error}", file.display()),
+                color,
             )
-            .map(|artifact| vec![artifact])
-            .map_err(|error| (error.to_string(), color))
+        })?;
+        let formatted =
+            dolphin_format::format_source(&text).map_err(|error| (error.to_string(), color))?;
+        if formatted == text {
+            continue;
+        }
+        needs_format = true;
+        if args.check {
+            println!("would reformat {}", file.display());
+        } else {
+            fs::write(file, formatted).map_err(|error| {
+                (
+                    format!("could not write `{}`: {error}", file.display()),
+                    color,
+                )
+            })?;
+            println!("formatted {}", file.display());
         }
     }
+    if args.check && needs_format {
+        return Err(("some files are not formatted".to_string(), color));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 递归收集 `.do` 源文件；单文件直接加入。
+fn collect_sources(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    if path.is_dir() {
+        let entries = fs::read_dir(path)
+            .map_err(|error| format!("could not read directory `{}`: {error}", path.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("could not read source entry: {error}"))?;
+            let child = entry.path();
+            if child.is_dir() {
+                collect_sources(&child, out)?;
+            } else if child.extension().is_some_and(|ext| ext == "do") {
+                out.push(child);
+            }
+        }
+        Ok(())
+    } else if path.is_file() {
+        out.push(path.to_path_buf());
+        Ok(())
+    } else {
+        Err(format!("`{}` does not exist", path.display()))
+    }
+}
+
+/// 读取并解析项目清单；未找到时报错。
+fn require_manifest(
+    input: &std::path::Path,
+    color: ColorMode,
+) -> Result<Manifest, (String, ColorMode)> {
+    discover_manifest(input)
+        .map_err(|error| (error.to_string(), color))?
+        .ok_or_else(|| {
+            (
+                format!("no `dolphin.toml` found from `{}` upward", input.display()),
+                color,
+            )
+        })
+}
+
+/// 打印 `dc info` 的项目摘要。
+fn print_info(manifest: &Manifest) {
+    println!("{}", manifest.package.coordinate());
+    println!("source: {}", manifest.package.source.display());
+    if let Some(lib) = &manifest.lib {
+        println!("lib: {} -> {}", manifest.package.name, lib.path.display());
+    }
+    println!("bins:");
+    for bin in &manifest.bins {
+        println!("  {} -> {}", bin.name, bin.path.display());
+    }
+    if !manifest.dependencies.is_empty() {
+        println!("dependencies:");
+        for dependency in &manifest.dependencies {
+            match &dependency.kind {
+                DependencyKind::Coordinate {
+                    coordinate,
+                    repository,
+                } => println!(
+                    "  {} = {coordinate} (repository `{repository}`)",
+                    dependency.alias
+                ),
+                DependencyKind::Path(path) => {
+                    println!("  {} = path {}", dependency.alias, path.display());
+                }
+            }
+        }
+    }
+    if !manifest.repositories.is_empty() {
+        println!("repositories:");
+        for (id, base) in &manifest.repositories {
+            println!("  {id} = {base}");
+        }
+    }
+    println!("optimization: {}", manifest.build.optimization);
+}
+
+/// 运行一个已构建的可执行文件并映射退出码。
+fn run_executable(artifact: &BuildArtifact) -> Result<ExitCode, (String, ColorMode)> {
+    let status = Command::new(&artifact.executable)
+        .status()
+        .map_err(|error| {
+            (
+                format!("could not run `{}`: {error}", artifact.executable.display()),
+                ColorMode::Auto,
+            )
+        })?;
+    // 正常退出码为 0..=255；Windows 异常终止会返回 0xC0000xxx 之类的
+    // 负值编码，统一映射为失败码 1，而不是被截断成 0。
+    let code = status
+        .code()
+        .filter(|code| (0..=255).contains(code))
+        .unwrap_or(1);
+    Ok(ExitCode::from(code as u8))
+}
+
+/// 库构建对外展示的产物路径：优先 `.dlib`，否则验证目标文件。
+fn library_output(artifact: &LibraryArtifact) -> &PathBuf {
+    artifact.package.as_ref().unwrap_or(&artifact.object)
 }
 
 /// `run` 需要唯一可执行目标：多目标时必须显式 `--bin`。

@@ -1,0 +1,12 @@
+[package]
+name = "dolphin-codegen-llvm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-backend.workspace = true
+dolphin-source.workspace = true
+dolphin-syntax.workspace = true
+dolphin-ir.workspace = true
+dolphin-platform.workspace = true
+inkwell = { version = "0.10", features = ["llvm22-1"] }

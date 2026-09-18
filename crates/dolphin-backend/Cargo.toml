@@ -1,0 +1,9 @@
+[package]
+name = "dolphin-backend"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-source.workspace = true
+dolphin-ir.workspace = true
+dolphin-platform.workspace = true

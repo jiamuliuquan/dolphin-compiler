@@ -1,0 +1,8 @@
+[package]
+name = "dolphin-platform"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-source.workspace = true
+target-lexicon.workspace = true

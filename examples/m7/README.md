@@ -6,9 +6,9 @@
 
 - 递归扫描项目 `src/` 下的 `.do` 文件
 - `src/main.do` 与 `src/helper.do` 合并到根模块并省略 `pkg`
-- `src/std/math.do` 声明与路径一致的 `pkg std.math;`
-- `use std.math;` 导入模块并通过 `math.clamp(...)` 调用
-- `use std.math.min;` 导入公开成员并通过 `min(...)` 调用
+- `src/mathutil/math.do` 声明所在目录 `pkg mathutil;`（模块名为 `mathutil.math`）
+- `use mathutil.math;` 导入模块并通过 `math.clamp(...)` 调用
+- `use mathutil.math.min;` 导入公开成员并通过 `min(...)` 调用
 - `pub` 控制跨模块可见性
 - 同一模块内可以调用私有函数
 
@@ -28,4 +28,4 @@ min = 3, clamp = 10
 
 预期退出码为 `13`。
 
-当前不支持 `use std.*`、导入别名和依赖包。`std` 只是本项目 `src/std/` 下的普通源码模块；`print` 和 `println` 是编译器内建函数。
+当前不支持 `use std.*`、导入别名和依赖包。`mathutil` 只是本项目 `src/mathutil/` 下的普通源码模块；`print` 和 `println` 是编译器内建函数。

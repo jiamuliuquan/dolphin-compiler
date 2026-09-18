@@ -1,0 +1,11 @@
+[package]
+group = "me.foxlab"
+name = "m15"
+version = "0.2.0"
+
+[[bin]]
+name = "m15"
+path = "src/main.do"
+
+[dependencies]
+math = { path = "mathlib" }

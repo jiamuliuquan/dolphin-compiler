@@ -1,25 +1,32 @@
-# M14：内存模型与动态数据
+# M14：手动内存管理与 C 互操作
 
-入口：[src/main.do](src/main.do)
+本示例演示 M14 的显式内存模型：
 
-本示例验证：
+- `mem.alloc<T>(count)` 分配连续存储，`defer mem.free(buffer)` 在作用域退出时释放；
+- `mem.create<T>(value)` / `mem.destroy(ptr)` 管理单个对象；
+- 结构体数组按统一布局写入与读取，字段对齐由 `mem.size_of` / `mem.align_of` 决定；
+- `s.bytes()` 与 `string.from_bytes(...)` 在只读字节视图与 `string` 之间零分配转换。
 
-- 结构体按值传递（回溯 M13，浅拷贝 + 显式管理）
-- 显式指针：取址 `&`、解引用 `*`、字段访问 `->`
-- 动态切片：`allocate`/`free` + 索引读写 + `length`
-- `try(...)` 语法糖：局部资源出块自动释放（禁止逃逸）
-- `defer`：确定性释放
-- 字符串拼接 `+`：隐式分配，释放责任交接收者
-- 跨模块容器：手写动态数组，动态内存跨函数、跨模块使用
+## 构建与运行
 
-构建和运行：
-
-```bash
-./target/release/dc check examples/m14
-./target/release/dc build examples/m14 --release
-./target/release/dc run examples/m14 --release
+```text
+dc build examples/m14
+./examples/m14/target/m14
 ```
 
-最后一个命令输出各类值，并以退出码 `21` 结束（`moved.x = 15`，`vector.sum = 6`）。
+Debug 构建链接检测版运行时：若存在未释放的分配，正常退出时会在 stderr 打印泄漏
+报告，并保留程序退出码。Release 构建不追踪分配。
 
-内存模型要点：堆内存由用户显式 `allocate` 分配、`free` 释放；`defer`/`try` 提供确定性释放；结构体/切片/指针均为值语义（浅拷贝），不引入所有权、引用计数或垃圾回收。Debug 构建启用双重释放检测（退出码 103）与泄漏报告。
+## C 互操作示例
+
+`ffi/` 子目录演示 `extern "C"` 声明与原生链接（需要系统 C 工具链预编译 fixture）：
+
+```text
+cd examples/m14/ffi
+cc -std=c11 -c -o native/demo.o native/demo.c        # Windows: cl /c /Fonative\demo.obj native\demo.c
+dc build .
+./target/ffi
+```
+
+`ffi/dolphin.toml` 按目标三元组声明 `objects`。`dc` 消费的是预编译 C 文件，
+不负责编译 C 源码。

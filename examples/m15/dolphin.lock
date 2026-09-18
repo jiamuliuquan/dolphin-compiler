@@ -1,0 +1,12 @@
+version = 1
+compiler-version = "0.2.0"
+
+[[package]]
+coordinate = "me.foxlab:m15math:1.0.0"
+source = "path"
+path = "mathlib"
+dependencies = []
+
+[[root-dependency]]
+alias = "math"
+coordinate = "me.foxlab:m15math:1.0.0"

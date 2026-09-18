@@ -1,5 +1,5 @@
-use std.math;
-use std.math.min;
+use mathutil.math;
+use mathutil.math.min;
 
 fn main() {
     val lower = min(8, 3);

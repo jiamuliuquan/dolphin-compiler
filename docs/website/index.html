@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Dolphin 是一门面向学习与实践的静态类型编程语言，编译为本机可执行文件。" />
+  <title>Dolphin · 编程语言</title>
+  <link rel="stylesheet" href="assets/css/site.css" />
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem("dolphin-theme");
+        if (saved === "dark" || saved === "light") {
+          document.documentElement.setAttribute("data-theme", saved);
+        } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <script defer src="assets/js/i18n.js"></script>
+  <script defer src="assets/js/site.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main" data-i18n="nav.home">首页</a>
+
+  <header class="topbar">
+    <div class="container">
+      <a class="brand" href="index.html">
+        <svg viewBox="0 0 64 64" aria-hidden="true">
+          <defs>
+            <linearGradient id="dolphinGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#0b6fb8" />
+              <stop offset="1" stop-color="#12b3a8" />
+            </linearGradient>
+          </defs>
+          <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#dolphinGrad)" />
+          <path d="M14 38c8-2 12-8 15-15 2-4 4-7 7-8 4-1 7 1 9 5 2 4 1 9-3 15-3 5-8 9-14 11-5 2-10 2-14 0z" fill="#fff" opacity="0.94" />
+          <circle cx="37" cy="24" r="2.4" fill="#0b6fb8" />
+          <path d="M12 46c6 3 14 3 21 0 5-2 9-5 12-9" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.8" />
+        </svg>
+        <span>
+          <span data-i18n="brand.name">Dolphin</span>
+          <small data-i18n="brand.tagline">编程语言</small>
+        </span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="index.html" data-nav data-i18n="nav.home">首页</a>
+        <a href="install.html" data-nav data-i18n="nav.install">安装</a>
+        <a href="docs/index.html#/tutorial/install" data-nav data-i18n="nav.tutorial">教程</a>
+        <a href="docs/index.html#/std/overview" data-nav data-i18n="nav.stdlib">标准库</a>
+        <a href="docs/index.html" data-i18n="nav.docs">文档</a>
+      </nav>
+      <div class="topbar-actions">
+        <div class="lang-switch" role="group" data-i18n-aria="nav.language">
+          <button type="button" data-lang-btn="zh-CN">中文</button>
+          <button type="button" data-lang-btn="en-US">EN</button>
+        </div>
+        <button type="button" class="icon-btn" data-theme-toggle data-i18n-title="nav.theme" aria-label="Toggle theme">☾</button>
+        <button type="button" class="icon-btn menu-btn" data-menu-toggle data-i18n-aria="nav.menu" aria-label="Menu">☰</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="container hero-grid">
+        <div>
+          <span class="eyebrow" data-i18n="hero.eyebrow">静态类型 · 编译为本机代码</span>
+          <h1 data-i18n="hero.title">一门可以亲手写编译器的语言</h1>
+          <p class="lead" data-i18n="hero.lead">
+            Dolphin 是一门面向学习与实践的静态类型语言，语法参考 Rust、Kotlin、Java 和 C，由 Rust
+            编写的编译器通过 Cranelift 直接生成可在系统上运行的本机可执行文件。
+          </p>
+          <div class="hero-cta">
+            <a class="btn btn-primary" href="install.html" data-i18n="hero.cta.install">开始安装</a>
+            <a class="btn btn-ghost" href="docs/index.html" data-i18n="hero.cta.docs">阅读文档</a>
+          </div>
+        </div>
+        <div class="hero-code">
+          <div class="terminal">
+            <div class="terminal-bar">
+              <span></span><span></span><span></span>
+              <span class="t-title" data-i18n="hero.termtitle">terminal</span>
+            </div>
+            <pre><code>fn main() {
+    val name = "Dolphin";
+    var values = [1, 2, 3, 4];
+
+    values[1] = 10;
+
+    for value in values {
+        println("Hello, {} — value = {}", name, value);
+    }
+}</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="container">
+        <div class="section-head">
+          <span class="eyebrow" data-i18n="why.eyebrow">为什么选择 Dolphin</span>
+          <h2 data-i18n="why.title">为理解编译器而设计</h2>
+          <p data-i18n="why.lead">
+            从词法分析到本机代码生成的完整链路都保持清晰可读，让你在学习语言本身的同时，也能看懂编译器如何工作。
+          </p>
+        </div>
+        <div class="cards">
+          <article class="card">
+            <div class="card-icon">◈</div>
+            <h3 data-i18n="why.card1.title">静态类型，错误前置</h3>
+            <p data-i18n="why.card1.body">
+              完整的类型检查、控制流检查与返回路径检查，尽量在编译期发现错误，运行时只保留明确的陷阱。
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">◧</div>
+            <h3 data-i18n="why.card2.title">显式且安全的内存</h3>
+            <p data-i18n="why.card2.body">
+              Zig 式手动内存模型：没有 GC、RC 与隐式析构，分配与释放显式可见，defer 是唯一的作用域清理语法。
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">⬡</div>
+            <h3 data-i18n="why.card3.title">自包含工具链</h3>
+            <p data-i18n="why.card3.body">
+              发行包内置运行时与 rust-lld 链接器，解压即用，构建 Dolphin 程序不再需要 C/C++ 工具链。
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">◇</div>
+            <h3 data-i18n="why.card4.title">泛型与 trait</h3>
+            <p data-i18n="why.card4.body">
+              用户泛型经工作队列单态化，trait 提供静态分派，标准库的 Vec、String、Option、Result 全部由
+              Dolphin 源码写成。
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">▤</div>
+            <h3 data-i18n="why.card5.title">模块与包管理</h3>
+            <p data-i18n="why.card5.body">
+              多文件项目、pkg/use/pub 可见性，以及 dolphin.toml 清单、path/坐标依赖、确定性 .dlib 包与锁文件。
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">✦</div>
+            <h3 data-i18n="why.card6.title">面向学习</h3>
+            <p data-i18n="why.card6.body">
+              每项特性都有可运行示例与明确的实现边界文档，方便按里程碑循序渐进地阅读和扩展。
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="block alt">
+      <div class="container split">
+        <div>
+          <span class="eyebrow" data-i18n="preview.eyebrow">语言预览</span>
+          <h2 data-i18n="preview.title">简洁、明确的语法</h2>
+          <p data-i18n="preview.lead">
+            熟悉的函数、变量、控制流与模式匹配语法，让你几分钟内就能写出第一个可运行程序。
+          </p>
+          <ul class="feature-list">
+            <li data-i18n="preview.list.1">val 与 var 区分不可变与可变绑定，支持局部类型推断。</li>
+            <li data-i18n="preview.list.2">定长数组、切片、原始指针与显式内存分配。</li>
+            <li data-i18n="preview.list.3">结构体、携带数据的枚举与穷尽式 match。</li>
+            <li data-i18n="preview.list.4">泛型函数、泛型类型、方法与 trait 静态分派。</li>
+            <li data-i18n="preview.list.5">内置格式化输出与 UTF-8 字符串处理。</li>
+          </ul>
+          <p style="margin-top: 20px">
+            <a class="btn btn-ghost" href="docs/index.html#/tutorial/intro" data-i18n="preview.link">查看完整语言参考</a>
+          </p>
+        </div>
+        <div>
+          <pre><code>enum Shape {
+    Circle(f64),
+    Rectangle(f64, f64),
+    Empty,
+}
+
+fn area(shape: Shape): f64 {
+    return match shape {
+        Shape.Circle(r) =&gt; 3.14159 * r * r,
+        Shape.Rectangle(w, h) =&gt; w * h,
+        Shape.Empty =&gt; 0.0,
+    };
+}
+
+fn main() {
+    println("{}", area(Shape.Circle(2.0)));
+}</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="container">
+        <div class="section-head">
+          <span class="eyebrow" data-i18n="quickstart.eyebrow">快速开始</span>
+          <h2 data-i18n="quickstart.title">三步运行第一个程序</h2>
+          <p data-i18n="quickstart.lead">下载发行包并加入 PATH，然后编译运行任意 Dolphin 项目。</p>
+        </div>
+        <div class="quickstart">
+          <div class="panel">
+            <h3 data-i18n="quickstart.step1.title">1. 获取编译器</h3>
+            <p data-i18n="quickstart.step1.body">从发行页下载对应平台的归档，解压到任意目录。</p>
+            <pre><code>tar xzf dolphin-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+  -C ~/.local/dolphin</code></pre>
+          </div>
+          <div class="panel">
+            <h3 data-i18n="quickstart.step2.title">2. 加入 PATH</h3>
+            <p data-i18n="quickstart.step2.body">把解压目录加入 PATH，确保 dc 与 rust-lld 位于同一目录。</p>
+            <pre><code>export PATH="$HOME/.local/dolphin:$PATH"
+dc --version && dc env</code></pre>
+          </div>
+          <div class="panel">
+            <h3 data-i18n="quickstart.step3.title">3. 构建并运行</h3>
+            <p data-i18n="quickstart.step3.body">在项目目录执行 dc build，产物会写入项目的 target/ 目录。</p>
+            <pre><code>dc check examples/m15
+dc build examples/m15 --release
+./examples/m15/target/m15</code></pre>
+          </div>
+          <div class="panel">
+            <h3 data-i18n="install.package.title">发行包内容</h3>
+            <p data-i18n="install.package.body">
+              dc 与 rust-lld 必须位于同一目录；macOS 与 Linux 包还携带 rust-lld 依赖的 LLVM 动态库，请勿拆分。
+            </p>
+            <p><a href="install.html" data-i18n="quickstart.link">阅读安装指南 →</a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta-band">
+      <div class="container">
+        <h2 data-i18n="cta.title">现在就开始使用 Dolphin</h2>
+        <p data-i18n="cta.lead">
+          无论你是想学习编译器实现，还是想找一门语法清晰的系统级语言，Dolphin 都提供了完整而透明的工具链。
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-ghost" href="install.html" data-i18n="cta.install">安装 Dolphin</a>
+          <a class="btn btn-ghost" href="docs/index.html" data-i18n="cta.docs">进入文档</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div>
+          <a class="brand" href="index.html">
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <rect x="2" y="2" width="60" height="60" rx="16" fill="#0b6fb8" />
+              <path d="M14 38c8-2 12-8 15-15 2-4 4-7 7-8 4-1 7 1 9 5 2 4 1 9-3 15-3 5-8 9-14 11-5 2-10 2-14 0z" fill="#fff" opacity="0.94" />
+            </svg>
+            <span>
+              <span data-i18n="brand.name">Dolphin</span>
+              <small data-i18n="brand.tagline">编程语言</small>
+            </span>
+          </a>
+          <p style="margin-top: 14px" data-i18n="footer.disclaimer">
+            Dolphin 是用于学习与实践的编程语言项目。
+          </p>
+        </div>
+        <div>
+          <h4 data-i18n="footer.product">产品</h4>
+          <ul>
+            <li><a href="install.html" data-i18n="footer.download">下载与安装</a></li>
+            <li><a href="docs/index.html#/tutorial/install" data-i18n="footer.quickstart">快速开始</a></li>
+            <li><a href="docs/index.html#/tutorial/tour" data-i18n="footer.tutorial">入门到精通</a></li>
+            <li><a href="docs/index.html#/std/overview" data-i18n="footer.stdlib">标准库参考</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 data-i18n="footer.docs">文档</h4>
+          <ul>
+            <li><a href="docs/index.html#/tutorial/intro" data-i18n="footer.language">语言设计</a></li>
+            <li><a href="docs/index.html#/std/mem" data-i18n="nav.stdlib">标准库</a></li>
+            <li><a href="docs/index.html#/tutorial/packages" data-i18n="footer.cli">命令行参考</a></li>
+            <li><a href="docs/index.html#/tutorial/memory" data-i18n="footer.examples">可运行示例</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 data-i18n="footer.resources">资源</h4>
+          <ul>
+            <li><a href="install.html#offline" data-i18n="install.offline.title">离线使用</a></li>
+            <li><a href="install.html#upgrade" data-i18n="install.upgrade.title">升级与卸载</a></li>
+            <li><a href="https://github.com/" rel="noopener" data-i18n="footer.issues">问题反馈</a></li>
+            <li><a href="https://www.gnu.org/licenses/gpl-3.0.html" rel="noopener" data-i18n="footer.license">GPL-3.0 许可证</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© <span data-year>2026</span> Dolphin <span data-i18n="footer.rights">保留所有权利。</span></span>
+        <span data-i18n="footer.license">GPL-3.0 许可证</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

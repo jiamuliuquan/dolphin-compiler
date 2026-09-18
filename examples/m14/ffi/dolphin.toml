@@ -1,0 +1,28 @@
+[package]
+group = "me.foxlab"
+name = "ffi"
+version = "0.1.0"
+
+[[bin]]
+name = "ffi"
+path = "src/main.do"
+
+# 消费预编译 C 文件：先用系统 C 工具链把 native/demo.c 编译为对应目标的目标文件，
+# 再按目标三元组声明。同一实现只在 objects 或 static-libs 中选一种。
+[native.x86_64-pc-windows-msvc]
+objects = ["native/demo.obj"]
+static-libs = []
+shared-libs = []
+runtime-files = []
+
+[native.x86_64-unknown-linux-gnu]
+objects = ["native/demo.o"]
+static-libs = []
+shared-libs = []
+runtime-files = []
+
+[native.aarch64-apple-darwin]
+objects = ["native/demo.o"]
+static-libs = []
+shared-libs = []
+runtime-files = []

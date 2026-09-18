@@ -2,6 +2,3 @@
 **/target/
 .DS_Store
 **/.DS_Store
-
-/dist/
-/smoke/

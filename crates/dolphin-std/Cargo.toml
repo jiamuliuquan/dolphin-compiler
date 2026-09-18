@@ -1,0 +1,6 @@
+[package]
+name = "dolphin-std"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

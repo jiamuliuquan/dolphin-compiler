@@ -1,0 +1,11 @@
+[package]
+name = "dolphin-lsp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-source.workspace = true
+dolphin-syntax.workspace = true
+dolphin-hir.workspace = true
+serde.workspace = true
+serde_json.workspace = true

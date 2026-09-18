@@ -2,7 +2,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <windows.h>
+
+#define DOLPHIN_EXIT_TRAP 101
+#define DOLPHIN_EXIT_ALLOC 102
+#define DOLPHIN_EXIT_INVALID_FREE 103
+#define DOLPHIN_EXIT_UTF8 104
 
 static void dolphin_write_all(const char *data, size_t length) {
     const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -16,6 +22,25 @@ static void dolphin_write_all(const char *data, size_t length) {
     }
 }
 
+static void dolphin_write_error(const char *data, size_t length) {
+    const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    while (length > 0) {
+        DWORD written;
+        if (!WriteFile(err, data, (DWORD)length, &written, NULL) || written == 0) {
+            return;
+        }
+        data += written;
+        length -= (size_t)written;
+    }
+}
+
+/// Terminate the process with the given exit code. The runtime does not unwind
+/// the Dolphin stack, so `defer` is not executed.
+static void dolphin_exit_with(int code, const char *message) {
+    dolphin_write_error(message, strlen(message));
+    ExitProcess((UINT)code);
+}
+
 static LONG WINAPI dolphin_runtime_trap(PEXCEPTION_POINTERS info) {
     const PEXCEPTION_RECORD record = info->ExceptionRecord;
     if (record->ExceptionCode != EXCEPTION_INT_DIVIDE_BY_ZERO &&
@@ -25,7 +50,7 @@ static LONG WINAPI dolphin_runtime_trap(PEXCEPTION_POINTERS info) {
     const char message[] = "Dolphin runtime error: overflow, division by zero, or array bounds violation\n";
     DWORD written;
     (void)WriteFile(GetStdHandle(STD_ERROR_HANDLE), message, sizeof(message) - 1, &written, NULL);
-    ExitProcess(101);
+    ExitProcess(DOLPHIN_EXIT_TRAP);
 }
 
 static void dolphin_install_traps(void) {
@@ -38,6 +63,210 @@ struct TrapInstaller {
     TrapInstaller() { dolphin_install_traps(); }
 };
 TrapInstaller trap_installer;
+}
+
+/* ---------------------------------------------------------------------------
+ * Allocator and Debug live-allocation table (M14-C/R04).
+ * See unix_runtime.c for the rationale.
+ * ------------------------------------------------------------------------- */
+
+#ifdef DOLPHIN_DEBUG_RUNTIME
+struct dolphin_alloc_record {
+    void *pointer;
+    size_t bytes;
+    size_t align;
+    struct dolphin_alloc_record *next;
+};
+
+static struct dolphin_alloc_record *dolphin_live_allocs = NULL;
+
+static void dolphin_register_alloc(void *pointer, size_t bytes, size_t align) {
+    struct dolphin_alloc_record *record =
+        (struct dolphin_alloc_record *)malloc(sizeof(*record));
+    if (record == NULL) {
+        dolphin_exit_with(DOLPHIN_EXIT_ALLOC,
+                          "Dolphin runtime error: out of memory (allocation table)\n");
+    }
+    record->pointer = pointer;
+    record->bytes = bytes;
+    record->align = align;
+    record->next = dolphin_live_allocs;
+    dolphin_live_allocs = record;
+}
+
+static int dolphin_unregister_alloc(void *pointer, size_t bytes) {
+    struct dolphin_alloc_record **link = &dolphin_live_allocs;
+    while (*link != NULL) {
+        if ((*link)->pointer == pointer) {
+            if ((*link)->bytes != bytes) {
+                return 0;
+            }
+            struct dolphin_alloc_record *dead = *link;
+            *link = dead->next;
+            free(dead);
+            return 1;
+        }
+        link = &(*link)->next;
+    }
+    return 0;
+}
+
+extern "C" void dolphin_runtime_finish(void) {
+    size_t leaked = 0;
+    for (struct dolphin_alloc_record *record = dolphin_live_allocs; record != NULL;
+         record = record->next) {
+        leaked += 1;
+    }
+    if (leaked == 0) {
+        return;
+    }
+    char buffer[160];
+    int length = snprintf(buffer, sizeof(buffer),
+                          "Dolphin: %llu allocation(s) leaked at exit\n",
+                          (unsigned long long)leaked);
+    if (length > 0) {
+        dolphin_write_error(buffer, (size_t)length);
+    }
+    for (struct dolphin_alloc_record *record = dolphin_live_allocs; record != NULL;
+         record = record->next) {
+        length = snprintf(buffer, sizeof(buffer), "  address=%p bytes=%llu\n", record->pointer,
+                          (unsigned long long)record->bytes);
+        if (length > 0) {
+            dolphin_write_error(buffer, (size_t)length);
+        }
+    }
+}
+#else
+static void dolphin_register_alloc(void *pointer, size_t bytes, size_t align) {
+    (void)pointer;
+    (void)bytes;
+    (void)align;
+}
+
+static int dolphin_unregister_alloc(void *pointer, size_t bytes) {
+    (void)pointer;
+    (void)bytes;
+    return 1;
+}
+
+extern "C" void dolphin_runtime_finish(void) {}
+#endif
+
+static uintptr_t dolphin_allocations = 0;
+
+static long dolphin_test_alloc_limit(void) {
+    static int initialized = 0;
+    static long limit = -1;
+    if (!initialized) {
+        const char *value = getenv("DOLPHIN_TEST_ALLOC_LIMIT");
+        limit = value != NULL ? atol(value) : -1;
+        initialized = 1;
+    }
+    return limit;
+}
+
+extern "C" void *dolphin_alloc(uintptr_t count, uintptr_t elem_size, uintptr_t align) {
+    if (count == 0 || elem_size == 0) {
+        return NULL;
+    }
+    if (count > UINTPTR_MAX / elem_size) {
+        dolphin_exit_with(DOLPHIN_EXIT_ALLOC,
+                          "Dolphin runtime error: allocation size overflow\n");
+    }
+    long limit = dolphin_test_alloc_limit();
+    if (limit >= 0 && dolphin_allocations >= (uintptr_t)limit) {
+        dolphin_exit_with(DOLPHIN_EXIT_ALLOC, "Dolphin runtime error: out of memory\n");
+    }
+    dolphin_allocations += 1;
+    size_t bytes = (size_t)(count * elem_size);
+    void *pointer = malloc(bytes);
+    if (pointer == NULL) {
+        dolphin_exit_with(DOLPHIN_EXIT_ALLOC, "Dolphin runtime error: out of memory\n");
+    }
+    dolphin_register_alloc(pointer, bytes, (size_t)align);
+    return pointer;
+}
+
+extern "C" void dolphin_free(void *pointer, uintptr_t bytes) {
+    if (pointer == NULL) {
+        return;
+    }
+    if (!dolphin_unregister_alloc(pointer, (size_t)bytes)) {
+        dolphin_exit_with(DOLPHIN_EXIT_INVALID_FREE, "Dolphin runtime error: invalid free\n");
+    }
+    free(pointer);
+}
+
+extern "C" void dolphin_copy(void *destination, const void *source, uintptr_t bytes) {
+    if (bytes != 0) {
+        memmove(destination, source, (size_t)bytes);
+    }
+}
+
+extern "C" void dolphin_check_align(void *pointer, uintptr_t align) {
+    if (align != 0 && ((uintptr_t)pointer % align) != 0) {
+        dolphin_exit_with(DOLPHIN_EXIT_TRAP, "Dolphin runtime error: misaligned pointer\n");
+    }
+}
+
+extern "C" void dolphin_check_view(const void *pointer, uintptr_t length) {
+    if (pointer == NULL && length != 0) {
+        dolphin_exit_with(DOLPHIN_EXIT_TRAP,
+                          "Dolphin runtime error: null pointer with non-zero view length\n");
+    }
+}
+
+extern "C" uint8_t dolphin_is_valid_utf8(const uint8_t *bytes, uintptr_t length) {
+    uintptr_t index = 0;
+    while (index < length) {
+        uint8_t lead = bytes[index];
+        if (lead < 0x80) {
+            index += 1;
+            continue;
+        }
+        uintptr_t continuation;
+        uint32_t codepoint;
+        uint32_t minimum;
+        if ((lead & 0xe0) == 0xc0) {
+            continuation = 1;
+            codepoint = lead & 0x1f;
+            minimum = 0x80;
+        } else if ((lead & 0xf0) == 0xe0) {
+            continuation = 2;
+            codepoint = lead & 0x0f;
+            minimum = 0x800;
+        } else if ((lead & 0xf8) == 0xf0) {
+            continuation = 3;
+            codepoint = lead & 0x07;
+            minimum = 0x10000;
+        } else {
+            return 0;
+        }
+        if (index + continuation >= length) {
+            return 0;
+        }
+        for (uintptr_t offset = 1; offset <= continuation; offset += 1) {
+            uint8_t next = bytes[index + offset];
+            if ((next & 0xc0) != 0x80) {
+                return 0;
+            }
+            codepoint = (codepoint << 6) | (next & 0x3f);
+        }
+        if (codepoint < minimum || codepoint > 0x10ffff) {
+            return 0;
+        }
+        if (codepoint >= 0xd800 && codepoint <= 0xdfff) {
+            return 0;
+        }
+        index += continuation + 1;
+    }
+    return 1;
+}
+
+extern "C" void dolphin_check_utf8(const uint8_t *bytes, uintptr_t length) {
+    if (!dolphin_is_valid_utf8(bytes, length)) {
+        dolphin_exit_with(DOLPHIN_EXIT_UTF8, "Dolphin runtime error: invalid UTF-8\n");
+    }
 }
 
 extern "C" void dolphin_print_string(const char *data, uintptr_t length) {
@@ -115,130 +344,4 @@ extern "C" void dolphin_print_char(uint32_t value) {
 
 extern "C" uint8_t dolphin_string_equal(const char *a, uintptr_t a_length, const char *b, uintptr_t b_length) {
     return a_length == b_length && memcmp(a, b, (size_t)a_length) == 0;
-}
-
-/* -------------------------------------------------------------------------
- * M14 内存模型：显式分配 / 释放，配合 header 标记 + 存活登记表 + 退出钩子。
- * 首版实现取舍：运行时目标文件在编译编译器时一次性内嵌，无法按 Debug/Release
- * 分别链接，因此检测分配器始终启用（见提案 §12.6/§12.9）。
- * ---------------------------------------------------------------------- */
-
-namespace {
-
-struct BlockHeader {
-    uint64_t magic;
-    uint64_t size;
-};
-
-struct LiveNode {
-    void *data;
-    uint64_t size;
-    LiveNode *next;
-};
-
-const uint64_t kMagicLive = 0xD01F1F0CA11C0FFEULL;
-const uint64_t kMagicDead = 0xDEADBEEFDEADBEEFULL;
-
-LiveNode *g_live_blocks = nullptr;
-
-void runtime_exit(int code) {
-    ExitProcess((UINT)code);
-}
-
-void report_leaks() {
-    LiveNode *node = g_live_blocks;
-    if (node == nullptr) {
-        return;
-    }
-    const char header[] = "Dolphin runtime error: leaked blocks:\n";
-    DWORD written;
-    (void)WriteFile(GetStdHandle(STD_ERROR_HANDLE), header, sizeof(header) - 1, &written, NULL);
-    char buffer[128];
-    while (node != nullptr) {
-        int length = snprintf(buffer, sizeof(buffer), "  address=%p size=%llu\n",
-                              node->data, (unsigned long long)node->size);
-        if (length > 0) {
-            (void)WriteFile(GetStdHandle(STD_ERROR_HANDLE), buffer, (DWORD)length, &written, NULL);
-        }
-        node = node->next;
-    }
-}
-
-struct LeakReporter {
-    ~LeakReporter() { report_leaks(); }
-};
-
-LeakReporter g_leak_reporter;
-
-} // namespace
-
-extern "C" void *dolphin_allocate(uint64_t n) {
-    BlockHeader *header = (BlockHeader *)malloc(sizeof(BlockHeader) + (size_t)n);
-    if (header == nullptr) {
-        runtime_exit(102);
-    }
-    header->magic = kMagicLive;
-    header->size = n;
-    LiveNode *node = (LiveNode *)malloc(sizeof(LiveNode));
-    if (node == nullptr) {
-        runtime_exit(102);
-    }
-    node->data = (char *)header + sizeof(BlockHeader);
-    node->size = n;
-    node->next = g_live_blocks;
-    g_live_blocks = node;
-    return node->data;
-}
-
-extern "C" void dolphin_free(void *ptr, uint64_t len) {
-    (void)len;
-    if (ptr == nullptr) {
-        return;
-    }
-    BlockHeader *header = (BlockHeader *)((char *)ptr - sizeof(BlockHeader));
-    if (header->magic != kMagicLive) {
-        const char message[] = "Dolphin runtime error: double free detected\n";
-        DWORD written;
-        (void)WriteFile(GetStdHandle(STD_ERROR_HANDLE), message, sizeof(message) - 1, &written, NULL);
-        runtime_exit(103);
-    }
-    header->magic = kMagicDead;
-    LiveNode **link = &g_live_blocks;
-    while (*link != nullptr) {
-        if ((*link)->data == ptr) {
-            LiveNode *removed = *link;
-            *link = removed->next;
-            free(removed);
-            break;
-        }
-        link = &(*link)->next;
-    }
-    free(header);
-}
-
-extern "C" void *dolphin_string_concat(
-    const char *a, uintptr_t a_len,
-    const char *b, uintptr_t b_len) {
-    uint64_t total = (uint64_t)a_len + (uint64_t)b_len;
-    char *buffer = (char *)dolphin_allocate(total);
-    if (a_len > 0) {
-        memcpy(buffer, a, (size_t)a_len);
-    }
-    if (b_len > 0) {
-        memcpy(buffer + a_len, b, (size_t)b_len);
-    }
-    return buffer;
-}
-
-/* M15 进程样板：把命令交给 shell 执行，返回退出码（-1 表示失败）。 */
-extern "C" int64_t dolphin_process_run(const char *cmd, uintptr_t len) {
-    char *buffer = (char *)malloc((size_t)len + 1);
-    if (buffer == NULL) {
-        return -1;
-    }
-    memcpy(buffer, cmd, (size_t)len);
-    buffer[len] = '\0';
-    int status = system(buffer);
-    free(buffer);
-    return (int64_t)status;
 }

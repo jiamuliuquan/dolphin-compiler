@@ -1,166 +1,137 @@
-# M15 设计提案：泛型抽象与标准库
+# M15 实现规格：泛型、优雅标准库与库包发布（M13 基线）
 
-> 状态：草案（Draft，待评审）
-> 对应路线图：[roadmap.md](roadmap.md) 第 6 节「M15：泛型抽象与标准库」
-
-本提案为 M15 里程碑冻结泛型语义、契约（方法契约）模型与标准库形态提供决策依据。在提案通过前，不进行实现；提案通过后，M14 已冻结的内存模型在泛型化后语义平滑迁移，不留半成品。
-
----
-
-## 1. 背景与现状
-
-当前编译器（M0-M14）处于**无泛型、无方法、无契约**状态：
-
-- 类型系统仅有四种类型：具名类型 `Name`、定长数组 `Array`、动态切片 `Slice`、显式指针 `Pointer`（见 [ast.rs `TypeRefKind`](../src/ast.rs)，**不含类型参数**）。
-- 函数与结构体/枚举声明**均无泛型参数列表**（见 [ast.rs `Function`](../src/ast.rs) / `StructDecl` / `EnumDecl`）。
-- 不存在方法语法：所有可调用对象都是自由函数 `f(x)`，结构体字段通过 `p.x` 访问，但无法 `p.method()`。
-- `for` 循环是**编译器硬编码的两条路径**：整数范围 `0..3` 与定长数组（见 [ast.rs `ForIterable`](../src/ast.rs)）。「范围」不是可保存/可传递的普通值（见 [implemented-features.md §8.4](implemented-features.md)）。
-- 所谓 `std`（M7）是用户项目 `src/std/` 下的普通源码目录，**不是编译器自带依赖**；`print`/`println`/`allocate`/`free`/`length` 等是编译器内建符号，经 codegen 直接映射到运行时导出的 C 符号（`dolphin_print_*`、`dolphin_allocate` 等，见 [implemented-features.md §14.1](implemented-features.md)）。
-- M14 已冻结：Zig 式值语义 + 显式指针 + 手动分配；`allocate(n) -> []u8` 为字节切片；`string` 与 `[]u8` 别名等价；可选类型 `?T`、自动扩容容器 `ArrayList`、`Allocator` 类型均明确延后到 M15（见 [proposal-m14 §9](proposal-m14-memory-model.md)）。
-
-因此，M15 的本质是**首次为语言引入类型抽象层（泛型 + 契约 + 方法）**，并据此构建**不依赖编译器对每个具体类型硬编码**的标准库。这是第三阶段（M13-M15）的最后一块、也是抽象风险最高的一块。
-
----
-
-## 2. 设计原则（已确定）
-
-以下原则由项目负责人明确，作为本提案的不可动摇前提：
-
-1. **易用性优先**：语言面向学习与实践，用户心智负担优先于极致性能（沿用 M14 原则 1）。
-2. **零生命周期符号**：继续拒绝 Rust 式显式生命周期标注（`'a`），泛型不引入任何与生命周期绑定的符号（沿用 M14 原则 2）。
-3. **单态化**：泛型通过**单态化（monomorphization）**实现——泛型函数/类型在调用点按具体类型实参展开生成代码，无运行时装箱、无类型字典。已确定。
-4. **标准库不靠类型特判**：`Option<T>`、`Result<T,E>`、迭代器、集合等**泛型抽象必须用泛型 + 契约真实实现**，不得为某个具体类型（如 `[]u8`）偷偷添加专用方法或专用 `for` 路径。
-
-### 2.1 「不靠特判」的精确界定（本提案新增，必须冻结）
-
-验收标准「标准库不依赖编译器对每个具体类型硬编码」存在一个**物理边界**：内存分配、系统调用（文件/进程）、格式化输出（`dolphin_print_*`）**必然穿透到编译器/runtime 配合**，不可能纯用户态实现。因此需重新界定：
-
-> **「不硬编码」指类型层**：泛型容器与抽象（`Option<T>`、`Result<T,E>`、`Vec<T>`、迭代器）必须用泛型 + 契约真写出来，不得给 `[]u8` 偷偷加 `append`、给数组偷偷加 `.map()`、给 `for` 偷偷加第三条特判路径。
+> 状态：目标规格 v2 已按 R09–R21 实现并验收（M15-A…F 全部完成）；源码标准库、lib 包图、确定性 `.dlib`、仓库/缓存/锁与发布均已落地。
 >
-> **内建/运行时原语保留一个最小、正交、不可再缩减的底座**（分配、I/O、OS 穿透），其余全部下沉到用户态标准库。
+> 历史前置：当时先按 [M14 实现规格](proposal-m14-memory-model.md)完成内存、布局、清理与 C ABI。该阶段已完成，不是要求当前执行者重做 M14。
+>
+> 目标：写 lib → 构建 `.dlib` 压缩包 → 发布到网站 → 用坐标声明依赖 → 构建本机程序。
+>
+> 本文保留 M15 v2 的语义与验收合同；旧批次见已归档的[分步实施指南](plan-m14-m15-rework.md)。当前后续任务见 [M18-M21 交接指南](plan-m18-plus.md)，不得直接执行本篇从 M13 起步的历史指令。
 
-标准库由此分为两层，边界见 §6。
+## 1. 实现原则与边界
 
----
+历史执行背景：当次重做从 M13 提交 `9e6f4c6` 开始，旧 M14/M15 当时已清理，按 v2 目标逐步新增。下文的“已有”“待新建”及旧 `src/` 路径仅描述这个历史起点；当前已完成 M17 并采用 `crates/` workspace，不能因旧路径不存在而创建第二套模块。本文示例仍须结合当前功能参考和测试核对；已知语义缺口由 M18 修复，不因历史完成标记而忽略。
 
-## 3. 泛型语义（已确定）
+### 1.1 必须交付的三个闭环
 
-以下语义对应 roadmap M15 的「泛型函数和泛型数据类型」：
+1. **语言闭环**：泛型函数/类型、方法、静态 trait、关联类型可以跨包工作。
+2. **API 闭环**：`Vec<T>`、拥有型 `String`、字符串视图、迭代器与 `Result` 有统一、可预测的手动释放规则。
+3. **分发闭环**：lib 不需要 main；库作者产出单个 `.dlib`；应用声明 Maven 风格坐标，工具自动下载、校验、解析传递依赖并构建。
 
-### 3.1 类型参数语法
+不能仅完成泛型语法就将 M15 标为完成，也不能因为文件 I/O 或网络标准库尚未完成而阻塞包管理。**dc 是 Rust 程序，下载依赖使用 Rust HTTP 客户端，不依赖 Dolphin 自己先实现 HTTP/TLS。**
 
-- 泛型函数：`fn foo<T>(x: T): T { ... }`，类型参数声明在函数名后、参数列表前。
-- 泛型结构体：`struct Vec<T> { ... }`；泛型枚举同理 `enum Result<T, E> { ... }`。
-- 泛型类型实参：`Vec<i32>`、`Result<string, Error>`；类型实参在类型名后用尖括号。
-- 类型参数名沿用标识符规则（ASCII，见 [implemented-features.md §3.2](implemented-features.md)）。
+**小上下文执行方式**：先读第 1、10 节选定阶段，再按需加载：A→第 2、3 节；B→第 3–5 节及 M14 的内存契约；C→第 6 节和第 2 节包身份规则；D→第 7 节；E→第 8 节；F→第 9 节与跨平台验收。第 11 节按验收编号取用，引用到其他规则时补读；不要一次给模型派发整个 M15。
 
-### 3.2 单态化实例化规则（已确定）
+### 1.2 M13 当时的基础与待新增模块（历史）
 
-- 泛型函数在每个**不同具体类型实参组合**的调用点实例化为一个独立的具体函数。
-- 实例化时机：**全程序收集所有调用点的类型实参，去重后统一批量生成**（见 §11.1，已确定）。
-- 跨模块实例化：泛型函数可跨模块调用；全程序统一实例化 + 稳定 mangling 去重（见 §11.1，已确定）。
-- 递归泛型：天然支持，无需额外实例化机制，仅需自引用字段间接性校验（见 §11.2，已确定）。
-- 泛型约束：类型参数约束 `fn f<T: trait>(...)`，语法见 §4.3（已确定）。
+| 入口 | 当前状态与实现任务 |
+| --- | --- |
+| `src/monomorphize.rs`（待新建） | 从零实现模板、作用域推断、工作队列、稳定身份和递归检测；不恢复历史一次扫描实现 |
+| `src/methods.rs`（待新建）；[ast.rs](../src/ast.rs)、[parser.rs](../src/parser.rs)（已有） | 新增 trait/impl/方法/关联类型声明、接收者、签名检查和解析；M13 无这些 AST 节点 |
+| [lower.rs](../src/lower.rs)、[ir.rs](../src/ir.rs)、[codegen.rs](../src/codegen.rs) | 复用具体类型 IR；补齐任意聚合值作为枚举 payload、切片元素与函数结果 |
+| `src/stdlib/*.do`（待新建） | 在 M14 内建 std.mem 身份上新建 Option/Result/Iterator 与 Dolphin 源码容器/字符串库；M13 无内置 std.do |
+| [manifest.rs](../src/manifest.rs) | 当前要求至少一个 bin，依赖只是保留字段；新增 lib、有效依赖与仓库配置 |
+| [modules.rs](../src/modules.rs)、[lib.rs](../src/lib.rs)、[main.rs](../src/main.rs) | 从单包流程扩展为包图、库构建和 CLI |
+| [tests/build.rs](../tests/build.rs)、[tests/cli.rs](../tests/cli.rs)、[tests/manifest.rs](../tests/manifest.rs) | 复用现有测试驱动，增加包管理 fixture |
 
-### 3.3 与 M14 语义的平滑迁移
+以下是必须避免的历史设计误区，不代表当前源码仍有相应实现：
 
-- `allocate(n) -> []u8` 演进为 `allocate<T>(n) -> []T`，`[]u8` 即 `allocate<u8>` 的特例（见 [proposal-m14 §12.4](proposal-m14-memory-model.md)）。
-- 可选类型 `?T` 与 `Option<T>` 语义：M14 已冻结「指针默认非空、不引入 null」，M15 的 `?T` 定义为 `Option<T>` 的语法糖（见 §11.3，已确定）。
-- 自动扩容容器 `ArrayList` 在泛型 + 方法落地后实现为 `Vec<T>`（见 §6.2）。
+- “泛型仅替换 AST，IR/codegen 保证零改动”：可以复用具体类型 IR，但名称解析、布局、聚合值、符号与构建流程都可能需要修改。
+- “TypeId 或 Option 可以打断递归内存布局”：TypeId 是编译器内部索引，Option 是内联枚举，均不等于运行时指针。
+- “只扫描一遍原程序即可收集所有泛型实例”：实例化函数体还会请求新的实例，需要工作队列到不动点。
+- “Vec 必须把 T 擦除成 []u8”：前置 M14 完成后提供 typed alloc/typed slice，`Vec<T>` 可直接持有 `[]T`。
+- “需找回已清理的实现才能开工”：现有 M13 前端/后端和 v2 规格就是起点，新增所需能力，不恢复旧 API 兼容层。
 
-### 3.4 单态化的实现落点与 IR 表示（已确定）
+## 2. 泛型：单态化，但实现必须完整
 
-**核心结论：单态化是 AST 层的预处理 pass，IR 与 codegen 层零改动。** 泛型只存在于 AST 层，进入 IR 前已全部实例化为具体类型。
-
-#### 3.4.1 落地位置：AST → IR 之间插入「单态化 pass」
-
-当前编译流程（见 [implemented-features.md §14](implemented-features.md)）为「AST → 函数签名收集 → 名称/类型检查 → CFG IR → 代码生成」。单态化插入在**类型检查之后、CFG IR lowering 之前**：
-
-```
-AST（含泛型）
-  → 单态化 pass（收集实参 + 实例化展开，输出「无泛型的 AST」）
-  → 名称/类型检查（在实例化后的 AST 上执行，复用现有逻辑）
-  → CFG IR（无泛型，沿用现有 ir.rs 表示）
-  → 代码生成（零改动）
-```
-
-泛型函数体是「参数化的 AST 模板」：实例化 = 把模板里的类型参数 `T` 替换为具体类型实参，产出一个普通（无泛型）的 AST 节点，随后走现有 lowering。
-
-#### 3.4.2 泛型类型实例的标识：mangling 名复用现有 `TypeId`（方案 A，已确定）
-
-`Vec<i32>` 与 `Vec<string>` 是两个不同的具体类型，各分配一个 `TypeId`，复用现有 `types: Vec<TypeDef>` 类型表。`type_ids` 的键从「类型名字符串」升级为「实例化后的 mangling 名」：
-
-- `Vec<i32>` → 键 `"Vec<i32>"`（或规范 mangling 如 `"Vec$i32"`）
-- `Vec<string>` → 键 `"Vec<string>"`
-
-实例化类型在 IR 层就是普通的 `Type::Struct(TypeId)`，`Type`/`TypeDef`/`type_of`/codegen **均无需改动**（见 [ir.rs `Type`](../src/ir.rs:4)）。`type_ids: HashMap<String, TypeId>`（[lower.rs](../src/lower.rs:38)）的结构不变，只是键的内容从「裸类型名」变为「mangling 后的实例名」。
-
-#### 3.4.3 泛型函数的实例化：每个「泛型名 + 实参」生成独立具体函数
-
-- 泛型函数 `foo<T>` 按每个唯一类型实参组合实例化为具体函数 `foo$i32`、`foo$string`（mangling 见 §11.1）。
-- 实例化结果就是普通 `Function`，`Function`/`FunctionId` 结构无需泛型字段（见 [ir.rs `Function`](../src/ir.rs:173)）。
-- 全程序收集实参、去重、统一批量生成（§11.1，已确定），天然处理递归泛型（§11.2，已确定）。
-
-#### 3.4.4 AST 侧改动（唯一需要动的地方）
-
-- [ast.rs `TypeRefKind`](../src/ast.rs:76) 需新增泛型相关 variant（如 `TypeParam(String)`、`Generic { name, args }`），以及 `Function`/`StructDecl`/`EnumDecl` 需新增类型参数列表字段。
-- `resolve_type`（[lower.rs](../src/lower.rs:2214)）在单态化后接收到的类型已是具体类型，`TypeRefKind::Name` 分支按 mangling 名查 `type_ids` 即可，逻辑不变。
-
-#### 3.4.5 待补的连带项（实现时一并处理）
-
-- **`allocate`/`try` 泛型化**：`allocate<T>(n) -> []T` 与 `try` 资源检查（当前硬编码 `[]u8`，见 [lower.rs `lower_try`](../src/lower.rs:815)）需随泛型同步放开到 `[]T`。这是 §3.3「平滑迁移」里表面轻、实则连带面较大的一处，实现时不可忽略。
-
----
-
-## 4. 契约模型：静态方法契约（已确定）
-
-### 4.1 术语澄清
-
-路线图原文「trait/interface、方法和关联函数」使用了含糊的「trait/interface」写法。本提案澄清：
-
-- **「契约」是本语言的概念名**：一组方法签名组成的**编译期行为契约**，类型去实现它。它对应 Rust 的 `trait`、Java/Kotlin 的 `interface` 在「方法契约」这一层的内涵，**三者是同一个概念在不同语言里的名字**，本语言只引入一个，不区分「trait」与「interface」两个词。
-- **关键字定为 `trait`**（已确定）。
-- 本提案正文统一用「契约」指代该机制，语法示例中写作 `trait`。
-
-### 4.2 契约 = 编译期约束，不是运行时多态
-
-本里程碑的「契约」是**静态的**：它作为泛型约束的载体，在编译期完成检查与单态化，**不引入运行时多态**、不引入虚表、不引入「一个契约变量指向不同实现类型」的异构集合。
-
-### 4.3 契约语法（已确定）
-
-三项语法决策均已确定：
-
-1. **声明**：`trait 名称 { 方法签名列表 }`，方法只声明签名、不写函数体。`self` 是约定的第一参数名，代表「当前类型的值」；`self: *Self` 代表「指向当前类型的指针」。
+### 2.1 冻结语法
 
 ```dc
-trait Shape {
-    fn area(self): f64;
-    fn scale(self: *Shape, factor: f64);
+fn identity<T>(value: T): T { return value; }
+struct Pair<T> { first: T, second: T }
+enum Option<T> { Some(T), None }
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn main() {
+    val a = identity<i32>(3);
+    val b = identity(a);              // 从变量类型推断，不限于字面量
+    val p = Pair<i32>(a, b);
+    val empty: Option<i32> = Option.None;
 }
 ```
 
-2. **实现**：`impl 契约 for 类型 { 方法体 }`，一个类型可实现多个契约（多个 `impl` 块），实现块内写函数体，签名须与契约声明一致。
+- 声明 `<T, E>`；类型实参 `Vec<i32>`；函数显式调用 `identity<i32>(x)`。
+- 推断先统一参数类型与实参类型，再用期望返回类型补齐；冲突或仍未确定则报错并建议显式实参。不用猜测 `None` / `Err` 中缺失的类型参数。
+- 支持变量、字段、调用结果、嵌套泛型参数和跨模块/跨包推断；词法作用域中的同名变量不可污染外层推断。
+- 表达式中的 `<` 仍可表示比较：完整类型实参列表后接 `(`、关联函数 `::` 或枚举成员 `.` 时识别为泛型路径；不满足完整形态时回退比较解析。必须支持 `a < b`、`f<Vec<i32>>(x)`、`Vec<i32>::init()`、`Option<i32>.None`，嵌套类型的 `>>` 按类型上下文解析。
+- 泛型是编译期机制，无装箱、类型字典、虚表或隐藏堆分配。
+- 任意已支持的可布局类型都可作类型参数，包括 string、切片、结构体、枚举；必须扩展 M13 的 enum payload 表示以承载 string 等复合值，不能以基线限制回避 Result/String API。
+- 首版不引入 `?T` 和 `?` 错误传播。写 `Option<T>` 与显式 `match`；C 空指针继续用 M14 的 nullable raw pointer。
+
+### 2.2 实例化算法
+
+顺序如下，不要求机械重写为另一套编译器架构：
+
+```text
+加载根包、依赖包、标准库源码
+  → 包/模块名称解析与定义身份分配
+  → 收集普通签名、泛型模板、trait/impl 表
+  → 对具体入口和调用推断类型，生成实例请求
+  → 工作队列：实例化、检查、发现新请求，直到队列为空
+  → 具体类型布局、方法/迭代语法降低、具体类型 CFG IR
+  → Cranelift 目标文件 + C 原生依赖链接
+```
+
+实例 key 必须包含：`(PackageId, ModuleId, DefinitionId, concrete_type_args)`。`PackageId` 包含规范化包坐标；同名函数、不同包、不同类型不能碰撞。实参类型用结构化类型身份，不能直接用源码展示字符串拼接去重。
+
+实现状态至少有 `Queued / InProgress / Done`：先登记再展开函数体，递归调用已有实例时引用预声明符号；新实例入队。按稳定顺序处理队列和输出，不能依赖 HashMap 的随机迭代顺序生成符号。
+
+- 同一个 key 全程序生成一次，多个模块或包使用同一个库泛型不会重复定义。
+- 符号编码使用可逆的长度前缀编码，或规范序列化后使用稳定摘要并检测碰撞；不使用 Rust 默认 HashHasher 的结果作为发行符号。
+- 支持普通递归和互递归。对 `f<T>` 无止境请求 `f<Pair<T>>` 这类扩张递归，限制实例链深度为 128、单次构建实例总数为 10000；超限给出实例链诊断，不允许栈溢出/panic。
+- 模板内引用按**定义包**解析，不能被调用包的同名私有函数劫持。
+- 模板声明时检查语法、类型参数、可独立解析的名字和 trait 声明；依赖具体 T 的操作在实例化时检查，错误同时显示定义位置和调用链。
+- 不承诺所有未实例化泛型函数都已经完整类型验证；lib 打包也遵循这一边界，不能宣称源码通过打包就证明所有 T 均可用。
+
+类型相关操作的边界：`twice<T>` 中的 `value + value` 可在实例化后按普通标量运算规则验证，`twice<i32>` 合法，`twice<string>` 因语言不支持字符串加法而失败；这不引入运算符重载。泛型体通过 T 调用契约方法则必须声明对应 trait 约束，不能仅凭实例恰巧有同名方法放行。未使用泛型体中的未知自由函数名称应在模板检查时即报错。
+
+### 2.3 递归布局验收
 
 ```dc
-struct Circle { radius: f64 }
+struct Node<T> { value: T, next: *Node<T> }        // 合法，指针固定大小
+struct Bad<T> { next: Bad<T> }                    // 非法，无限大小
+struct AlsoBad<T> { next: Option<AlsoBad<T>> }     // 同样非法，Option 内联 payload
+```
 
-impl Shape for Circle {
-    fn area(self): f64 { return 3.14 * self.radius * self.radius; }
-    fn scale(self: *Circle, factor: f64) { self->radius *= factor; }
+类型布局检测按“按值包含”建图，结构体字段、数组元素和枚举 payload 都是边；原始指针不是展开边。检测直接和间接环，打印字段路径。
+
+## 3. 方法与静态 trait
+
+### 3.1 接收者规则
+
+```dc
+struct Point { x: i32, y: i32 }
+
+impl Point {
+    pub fn origin(): Point { return Point(0, 0); }
+    pub fn sum(self): i32 { return self.x + self.y; }
+    pub fn set_x(self: *Self, value: i32) { self->x = value; }
+    pub fn read_x(self: *const Self): i32 { return self->x; }
 }
 ```
 
-3. **约束**：`fn f<T: 契约>(...)` 表达「`T` 必须实现该契约」，约束在编译期检查，`T` 未实现契约时在调用点报错。
+| 声明 | 调用行为 |
+| --- | --- |
+| 无 self | 关联函数 `Point::origin()` |
+| `self`（省略类型） | `Self` 按值复制，不隐式分配 |
+| `self: *Self` | `p.set_x(3)` 对可写且可寻址的 p 自动取地址；临时值和 val 对象拒绝 |
+| `self: *const Self` | 对可寻址对象自动取只读地址；不复制大对象 |
 
-```dc
-fn total_area<T: Shape>(xs: []T): f64 {
-    var s = 0.0;
-    for x in xs { s += x.area(); }
-    return s;
-}
-```
+自动取址仅是**方法接收者糖**，等价于显式传 `&p`，不引入借用检查或自动生命周期延长。接收者本来就是指针时使用该地址，最多一层解引用；表达式只求值一次。
 
-4. **关联类型（M15 纳入，用于表达「契约的产出类型」）**：契约可声明关联类型 `type 名称;`，方法签名通过 `Self::名称` 引用；`impl` 块内用 `type 名称 = 具体类型;` 提供绑定。这是 `Iterator` 表达「迭代产出类型」的唯一自然载体。
+指针字段保持 `p->x`，方法统一 `p.method()`。`impl<T> Vec<T>` 必须是真正的参数化 impl，而不是把 `Vec<T>` 当成一个字符串名字。
+
+### 3.2 trait 与关联类型
 
 ```dc
 trait Iterator {
@@ -168,289 +139,552 @@ trait Iterator {
     fn next(self: *Self): Option<Self::Item>;
 }
 
-struct Counter { value: i32 }
+struct Counter { current: i32, end: i32 }
 
 impl Iterator for Counter {
     type Item = i32;
-    fn next(self: *Counter): Option<i32> { ... }
+    fn next(self: *Self): Option<i32> {
+        if self->current >= self->end { return Option.None; }
+        val value = self->current;
+        self->current += 1;
+        return Option.Some(value);
+    }
 }
 ```
 
-> 说明：本提案原 §9 将「关联类型」列为「不在 M15」，现**改为纳入 M15**。理由见 §7——`Iterator` 契约的产出类型若不用关联类型、trait 又不支持类型参数，则无处表达（两者皆缺）。关联类型是 Rust 式标准做法，表达力最强。
+- trait 只有签名和关联类型，无默认方法、动态分派或运行时 trait 对象。
+- 泛型约束首版每参数一个，例如 `fn count<I: Iterator>(iter: I): usize`；多个约束、trait 继承和泛型 trait 延后。
+- `Self` 是实现类型，不是 trait 名。`Self::Item` 和受约束参数的 `I::Item` 必须能解析。
+- impl 必须提供全部方法和关联类型，参数数量、类型、接收者可变性、返回值须一致；缺失/重复/多余绑定都有诊断。
+- 同一具体“trait + 类型”只能有一个 impl；首版禁止 blanket impl 和重叠泛型 impl。固有方法只能在类型所属包定义；trait impl 要求 trait 或类型至少一个属于当前包。
+- 固有方法优先；trait 方法只有 trait 被 `use` 引入或来自类型参数约束时参与解析。同名 trait 方法存在歧义则报错，不随机选择。
+- 固有方法默认私有，`pub` 对外；trait 方法按 trait 的可见性提供实现，不能把公开契约方法降为私有。
 
-### 4.4 `self` 传递语义（已确定）
+“禁止 blanket impl”指拒绝 `impl<T> Trait for T` 这种任意接收者实现；允许标准库需要的 `impl<T> Iterator for SliceIter<T>`，只要不存在重叠。普通泛型 impl 及其方法的类型参数不能在方法提升时清空。首版方法可使用所属 impl 的 T；方法另声明独立泛型参数的语法明确延后，避免模型自行实现半套泛型方法。
 
-- **读方法拿 `self`（值）**：调用时复制一份，方法内修改不影响原值，与 M14 §5.2「无移动语义、一律复制」一致。
-- **改方法拿 `*Self`（显式指针）**：原地修改，与 M14 §5.3「显式指针、不做借用检查」一致。
-- **不引入 `&self`/`&mut self` 借用语法**：违背 M14 原则 2「零借用符号」。
+## 4. 标准库：少量原语，真实 Dolphin 容器
 
-### 4.5 契约的职责
+### 4.1 模块与 API 风格
 
-1. **泛型约束载体**：`fn f<T: trait>(...)` 表达「`T` 具备某能力」。
-2. **方法组织**：契约声明方法签名，`impl` 提供实现；`x.method()` 方法调用依赖契约 + `impl` 的名称解析。
-3. **标准库抽象**：`Iterator`、`Eq`、`Hash` 等用契约表达（见 §6、§7）。
+M15 新建随编译器分发的 Dolphin 源码标准库，沿用 M14 为内建 std.mem 建立的保留身份 `dolphin:std:<compiler-version>`，一次构建只注入一次。源码按以下模块组织：
 
-### 4.6 与长远 OOP 愿景的关系（必须冻结，避免 M15 过度设计）
+| 模块 | 首版内容 |
+| --- | --- |
+| `std` | 新增公开 Option、Result、Iterator，支持 `use std;` |
+| `std.mem` | M14 分配、释放、布局、内存视图与复制原语 |
+| `std.collections` | `Vec<T>` 与迭代器 |
+| `std.text` | 拥有型 String、UTF-8 查询、concat |
+| `std.ffi` | CString 与 C 字符串转换 |
 
-项目对语言有一个**更长远的面向对象愿景**（`struct`≈值类型、接口声明方法、未来引入 `class` 实现多接口、支持运行时多态）。本提案明确：
+最小 prelude 仅提供 `Option`、`Result`、`Iterator` 三个名字，它们分别指向 std 中的同一定义；不另造内建枚举。允许用户模块中的显式定义或导入遮蔽 prelude，编译器展开 for 时仍通过 std 的定义身份引用协议。其他标准库类型/函数必须显式 use。
 
-- **M15 只做契约的「静态约束」这一层地基**，它是泛型的必需品，与单态化天然契合。
-- **`class`、继承、运行时多态（接口引用指向不同实现类）明确不在 M15**，留待未来单独里程碑。届时再决定是否在静态契约之上叠加运行时多态（`dyn` / 装箱）。
-- 理由：运行时多态需引入装箱或引用语义，与 M14 冻结的「值语义 + 显式指针、无 GC/RC」存在张力；且 `class`/继承是多里程碑体量，不应与泛型同批引入。
+M13 的 `src/std/` 是用户模块；M14 首次引入内建 std.mem 时负责迁移仓库示例。M15 扩展同一个内建 std 身份，不重新创建第二个 std 或再次迁移已完成的示例。其他项目与保留名字冲突时给出诊断，不能静默覆盖用户源码。
 
----
+API 命名统一：
 
-## 5. 方法语法与 `self` 传递（已确定）
+- `init` / `deinit`：建立 / 释放拥有型资源；deinit 不自动调用。
+- `view` / `as_slice` / `iter`：零分配借用视图，不得释放，失效条件写在文档中。
+- `clone`：显式分配并复制；不使用含糊的 `copy` 表示深拷贝资源图。
+- `len` / `is_empty` / `get`：查询不分配。
+- `push` / `reserve`：允许扩容，必须明示可能使已有视图失效。
+- 不强求所有方法链式调用；修改方法返回 Unit，避免“返回容器副本”造成两份释放责任。
+- 错误用 `Result<T,E>` 与 `match`；内存不足仍沿用 M14 的确定性 102，不再另造可恢复 OOM 体系。
 
-### 5.1 方法定义
+编译器只保留内存、布局、视图、UTF-8 校验、现有输出、C ABI 等必要底座。Option、Result、Vec、String、Iterator 的业务逻辑写 Dolphin 源码，禁止按类型名在 codegen 内实现容器。
 
-- 方法在 `impl Type` 块内定义：`impl Point { fn x(self): i32 { ... } }`。
-- 关联函数（无 `self`）与实例方法（带 `self`）**都写在同一个 `impl Type { }` 块内**，靠「第一参数是否名为 `self`」区分，不引入额外的 `static` 关键字。
+### 4.2 `Vec<T>`：必须纳入本次 M15
+
+内部表示：`storage: []T`（长度是容量）、`used: usize`（已初始化元素数量）。切片仍只有 ptr/len 两个字段，不给所有切片增加 cap。
+
+| API | 语义 |
+| --- | --- |
+| `Vec<T>::init(): Vec<T>` | 空容器，零分配 |
+| `Vec<T>::with_capacity(n: usize): Vec<T>` | 显式预分配 n 个 T 的未初始化存储 |
+| `v.len(): usize` / `v.capacity(): usize` / `v.is_empty(): bool` | 不分配 |
+| `v.push(value: T)` | 按值复制到末尾；必要时扩容 |
+| `v.reserve(additional: usize)` | 确保容量至少为 `used + additional`，检查溢出 |
+| `v.get(index: usize): Option<T>` | 返回元素副本，越界返回 None |
+| `v.set(index: usize, value: T)` | 替换元素，越界 101；不自动销毁旧元素 |
+| `v.pop(): Option<T>` | 移除并返回副本，空容器返回 None |
+| `v.as_slice(): []const T` | 只读的已初始化区域，不含容量尾部 |
+| `v.as_mut_slice(): []T` | 可写的已初始化区域，需要可写 receiver |
+| `v.iter(): SliceIter<T>` | 零分配只读迭代器，按值产出 T |
+| `v.clone(): Vec<T>` | 分配独立 backing buffer，逐元素复制 T；不递归 clone 元素资源 |
+| `v.clear()` | used 置零，不释放容量，不自动销毁元素 |
+| `v.deinit()` | 释放 backing buffer，将本对象重置为空 |
+
+接收者统一规定：`push/reserve/set/pop/as_mut_slice/clear/deinit` 用 `self: *Self`；其他实例方法用 `self: *const Self`。关联函数没有 self。String/CString 的 deinit 同样用可写接收者，view/ptr/clone 用只读接收者。
+
+扩容算法固定为：初次容量至少 4；后续 `max(required, old_capacity * 2)`，乘法/加法溢出时报 102。分配新 `[]T`，只复制 `used` 个已初始化元素，释放旧完整 storage，然后替换描述符。没有 realloc 或 reinterpret cast 的前置要求。
+
+先计算 checked `required = used + additional`，若 required 不超过现有容量立即返回，不能为 `reserve(0)` 无故分配。查询、get、as_slice、iter、clone 采用 `self: *const Self`；push/reserve/set/pop/as_mut_slice/clear/deinit 采用 `self: *Self`。push/reserve/set/clear/deinit 返回 Unit；pop 返回 Option，as_mut_slice 返回可写切片。
 
 ```dc
-impl Vector {
-    // 关联函数（无 self）
-    fn make(capacity: i32): Vector { ... }
+use std.collections.Vec;
 
-    // 实例方法（值 self，只读）
-    fn total(self): i32 { ... }
-
-    // 实例方法（*Self 指针，原地修改）
-    fn push(self: *Vector, value: u8): i32 { ... }
+fn main() {
+    var numbers = Vec<i32>::init();
+    defer numbers.deinit();
+    numbers.push(10);
+    numbers.push(20);
+    for value in numbers.iter() { println("{}", value); }
 }
 ```
 
-### 5.2 `self` 传递语义（与 M14 咬合，已确定）
+生命周期契约：
 
-M14 已冻结「值语义 + 显式指针」，方法要原地修改容器**必须拿 `*Self`**，这是 M14 指针语义的第一次真实落地场景：
+- reserve/push 导致重分配、deinit 都会使旧切片、元素指针和迭代器失效；迭代中禁止修改容器。
+- `var other = numbers` 只复制描述符，**不是独立容器**；不能对两个副本各自 deinit，也不能一方扩容后继续使用另一方。需要独立容器用 clone。
+- deinit 对**同一个已重置对象**重复调用是无操作；不能据此声称容器的浅拷贝也可重复释放。
+- `Vec<String>` 的 deinit 只释放 Vec 存储。调用者先遍历元素显式 deinit，再释放 Vec。pop 后资源责任由调用者按约定接管；clear/set 前须处理将被丢弃的元素资源。
+- 容器 backing 字段必须私有。M15 增加结构体字段 `pub` 可见性：默认模块私有，私有字段禁止外部位置构造/访问；普通所有字段公开的数据类型仍可位置构造。impl 使用类型定义模块权限。
 
-- `self`（值）→ 复制调用者，方法内修改不影响原值，与 M14 §5.2「无移动语义、一律复制」一致。
-- `self: *Self`（指针）→ 原地修改，与 M14 §5.3「显式指针、不做借用检查」一致。
-- **不引入 `&self` 借用语法**（见 §4.4，已确定）。
+已有 M13 跨模块位置构造的数据类型需为原本公开的字段补 `pub`；这是明确的语法迁移，应更新对应正例，不能静默让旧调用失去能力。销毁 `Vec<String>` 时通过 `var item = ...` 得到可写局部副本后 deinit，或对可写元素 place 调用 deinit；普通 `for` 的迭代变量不可重赋，不要直接在不可写迭代变量上调用指针 receiver。
 
-### 5.3 调用语法
+### 4.3 String 与 CString
 
-- 实例方法：`v.push(1)`、`s.area()` —— 由值的类型查找到对应 `impl` 中的方法。
-- 关联函数：`Vector::make(4)` —— 用 `::` 调用，与实例方法的 `.` 天然区分（已确定）。
+`string` 是 M14 的 UTF-8 只读视图；`std.text.String` 是可释放的拥有型 UTF-8 缓冲。两者不能混为一个可 free 的 fat pointer。
 
-### 5.4 方法解析
+| API | 分配 / 返回责任 |
+| --- | --- |
+| `String::from(s: string): String` | 复制并拥有新字节，调用者 deinit |
+| `text.concat(a: string, b: string): String` | 一次分配拼接，调用者 deinit |
+| `owned.view(): string` | 零分配视图，owned 释放后失效 |
+| `owned.clone(): String` / `owned.deinit()` | 显式独立复制 / 释放并重置 |
+| `text.trim(s: string): string` | 去除首尾 ASCII 空白（09–0D、20），返回原缓冲视图 |
+| `text.substring(s, start: usize, end: usize): Result<string, TextError>` | 半开字节区间；检查范围与 UTF-8 边界，无分配 |
+| `text.starts_with/ends_with/contains(s, part): bool` | 内容查询，无分配 |
+| `text.from_utf8(bytes: []const u8): Result<string, TextError>` | 校验后返回视图，不复制；失败返回错误，不调用 trap 型转换 |
+| `CString::from(s: string): Result<CString, CStringError>` | 复制并追加 NUL，内部含 NUL 返回错误 |
+| `cstring.ptr(): *const c_char` / `cstring.deinit()` | C 只读字符串指针 / 释放并重置；C 不得保存到 deinit 之后 |
 
-- `x.foo()` 解析规则：由 `x` 的类型查找到对应 `impl` 中的 `foo`，与自由函数命名空间分离。
-- 泛型方法：`impl<T> Vec<T> { fn push(self: *Vec<T>, v: T) { ... } }`。
-- 契约方法：`impl Iterator for Range { fn next(self: *Self): Option<i32> { ... } }` 后，`range.next()` 可用。
-
----
-
-## 6. 标准库分层与模块清单
-
-### 6.1 分层边界（已确定）
-
-标准库分为两层，边界是「**是否穿透编译器/runtime**」：
-
-| 层 | 内容 | 实现方式 |
-|----|------|---------|
-| **内建原语（primitives）** | 内存分配 `allocate`/`free`、格式化输出 `print`/`println`、OS 穿透（文件/进程系统调用）、运行时 trap | 保留为编译器内建 + runtime 导出符号（沿用 M14 机制，见 [proposal-m14 §12.5](proposal-m14-memory-model.md)），**不下沉** |
-| **用户态标准库（stdlib）** | `Option<T>`、`Result<T,E>`、迭代器、`Range`、`Vec<T>`、`string` 工具、`File`/进程高层封装 | **用 Dolphin 语言自身 + 泛型 + 契约真写**，作为源码随编译器分发或内置 |
-
-**原则**：内建原语只保留「不可再缩减的底座」，凡是能用泛型 + 契约在用户态表达的，一律下沉。判定标准：`for x in my_custom_iter` 能跑通，即证明迭代器抽象立住了。
-
-### 6.2 模块清单（按实现难度分三档）
-
-标准库按「是否穿透 OS」分三档，M15 纳入前两档，第三档整体延后：
-
-#### 6.2.1 第一档：纯用户态（不碰 OS，M15 首批核心）
-
-| 模块 | 内容 | 依赖 | 状态 |
-|------|------|------|------|
-| `Option<T>` | 可选值（`?T` 语法糖，§11.3） | 纯泛型枚举，无 OS 依赖 | ✅ 已实现 |
-| `Result<T,E>` | 错误值（§8） | 纯泛型枚举 | ✅ 已实现 |
-| `Iterator` 契约 | `next()` 抽象（关联类型产出，§4.3） | trait 关联类型 + `Option<T>` | ⏳ 待实现（依赖关联类型） |
-| `Range` | 标准库值类型（`0..3` 保持 for 专属语法糖） | `Iterator` | ⏳ 待实现 |
-| 数组/`Vec` 迭代器 | 各实现 `Iterator` | `Iterator` | ⏳ 待实现（依赖 Iterator） |
-| `Vec<T>` | 自动扩容动态容器 | `allocate` + 类型擦除 | ❌ 明确延后（见 §6.2.1a） |
-| `string` 工具 | is_empty/starts_with/ends_with 等 | `s.bytes()` | ✅ 已实现基础子集 |
-
-**明确不在首批**（延后，见 §9）：`HashMap`/`HashSet`（需先定 `Hash`/`Eq` 契约）、网络（socket/DNS/HTTP/TLS）、异步文件 I/O。
-
-#### 6.2.1a `Vec<T>` 的类型擦除（延后决策）
-
-`Vec<T>` 要存「任意 `T` 的元素」，必须能把 `T` 值 reinterpret 成字节再存回 `[]u8` 缓冲，这需要**类型擦除 / 指针 reinterpret cast**（类似 Zig 的 `@ptrCast`/`@bitCast`）。本语言尚无此能力，且它属于「指针/切片语义」的底层设计，不应塞进标准库。
-
-**决策**：`Vec<T>` **明确延后**，与「切片容量字段、指针 reinterpret」一起作为一个独立的语言能力决策，不在 M15 标准库落地。首版动态数据仍以 M14 的「`[]u8` + 手动管理」为最小可用形态。
-
-#### 6.2.2 第二档：OS 穿透（文件 + 进程，M15 一并打通）
-
-文件与进程同属「OS 穿透」，需 runtime 侧导出符号 + 用户态高层封装，一起做：
-
-| 模块 | 内容 | 模型 |
-|------|------|------|
-| **文件 I/O** | `File` 类型 + `open`/`read`/`write`/`close`（最小可用） | **同步阻塞**（已确定） |
-| **进程** | `spawn`/`wait`/`exit_code` | 同步阻塞 |
-
-**实现要点**：
-
-- runtime 侧在 [unix_runtime.c](../runtime/unix_runtime.c) / [windows_runtime.cpp](../runtime/windows_runtime.cpp) 各加一套 OS 系统调用导出（文件用 `open`/`read`/`write`/`close`，进程用 `spawn`/`wait`），Windows 侧走 `CreateFile`/`ReadFile`/`WriteFile`/`CloseHandle` 与 `CreateProcess`/`WaitForSingleObject`。
-- 用户态在导出符号之上封装 `File` 类型与进程类型，用 `Result` 表达错误（打开失败、读取失败等）。
-- **文件 I/O 作为「OS 穿透」的样板**，验证 §6.1「内建原语底座」路径跑得通；进程复用同一套模式。
-- 首版**不做**：异步/非阻塞、文件缓冲层、目录遍历、文件系统元数据。
-
-#### 6.2.3 第三档：网络（整体延后，见 §9）
-
-网络**不在 M15**，理由：
-
-1. **阻塞模型矛盾**：同步 socket 会卡死（`recv` 可能永久阻塞、`connect` 可能超时），而异步需要事件循环 + 协程，牵涉 roadmap 明确「暂不排期」的异步/协程（[roadmap.md:346](roadmap.md:346)）。
-2. **跨平台成本最高**：Unix 的 BSD socket 与 Windows 的 Winsock2 差异是数量级的（`WSAStartup` 初始化、`SOCKET` 句柄、错误码体系均不同），每个功能都要双份 runtime 实现。
-3. **协议无底洞**：DNS、TCP 重连、HTTP、TLS 会越做越深，需先画线。
-
-### 6.3 首批核心抽象（M15 里程碑范围）
-
-按「核心抽象优先」，落地顺序：
-
-1. **`Option<T>`**：可选值（`?T` 语法糖，§11.3）。
-2. **`Result<T, E>`**：错误值，衔接 M13 非泛型错误处理样例（§8）。
-3. **`Iterator` 契约**：`next()` 抽象，统一 `Range`、数组、`Vec` 的迭代。
-4. **`Range`**：把 `0..3` 下沉为可保存/传递的值类型。
-5. **数组 / `Vec` 迭代**：定长数组与 `Vec<T>` 各提供迭代器。
-6. **`Vec<T>`**：自动扩容容器（M14 的 `ArrayList` 演进）。
-7. **`string` 工具**：常用字符串操作。
-8. **文件 I/O（同步）+ 进程（同步）**：OS 穿透样板，`Result` 表达错误。
-
-**明确不在首批**（延后，见 §9）：`HashMap`/`HashSet`（需先定 `Hash`/`Eq` 契约）、网络（socket/DNS/HTTP/TLS）、异步文件 I/O。
-
-### 6.4 验收试金石
-
-`for` 循环从「硬编码两条路径」重构为「对实现 `Iterator` 的类型做语法糖展开」后，以下代码必须可用：
+`TextError` 至少区分 `InvalidUtf8 / InvalidBoundary / OutOfBounds`，`CStringError` 至少有 `InteriorNul`。前置 M14 实现的 `string.from_bytes` 是 trap 型低层入口；高层 Result 转换先调用 `mem.is_valid_utf8`，仅验证成功后建立视图。
 
 ```dc
-for x in 0..3 { ... }          // Range 实现 Iterator
-for v in [1, 2, 3] { ... }     // 数组迭代器
-for x in my_custom_iter { ... } // 用户自定义迭代器（验收标准核心）
+use std.text;
+
+fn main() {
+    var greeting = text.concat("hello, ", "Dolphin");
+    defer greeting.deinit();
+    println("{}", greeting.view());
+}
 ```
 
----
+首版 String 不提供会改变字节的原地 append；需要构建复杂字符串可先使用 Vec<u8>，验证 UTF-8 后显式复制成 String。避免在首批 API 中同时引入多种视图失效规则。
 
-## 7. 迭代器与 `for` 泛型化（已确定）
+String/CString 的 view/ptr/clone 使用只读指针 receiver，deinit 使用可写指针 receiver；deinit 将同一对象重置为空，其他浅拷贝仍不能再读/销毁。CString 至少保留原始 `[]u8` 用于 free；导出指针通过 `*const Unit` 中转为 `*const c_char`，不把 C 指针反过来当成释放依据。CString 的长度加一、concat 的长度和均需 checked，溢出按 M14 的 102 处理。
 
-- `for x in iterable` 展开为：`var it = iterable.into_iter(); loop { match it.next() { Option.Some(x) => { body }, Option.None => break } }`（§11.6 已确定）。
-- `Iterator` 契约用**关联类型**表达产出类型（§4.3）：`trait Iterator { type Item; fn next(self: *Self): Option<Self::Item>; }`。
-- 采用 `into_iter()` 分层：可迭代对象（`Range`、数组、`Vec`）各自实现 `into_iter()` 返回迭代器，容器与迭代器分离。
-- 循环变量 `x` 类型由 `Iterator` 的产出类型（关联类型 `Item`）推导。
-- 与 M14 指针语义咬合：`next` 拿 `*Self` 以推进内部游标，是 M14 显式指针的又一落地场景。
+直接调用常见 C 接口的完整目标例子：
 
-> **实现现状**：`for` 泛型化的**控制流机制**已实现（`into_iter`/`next` 方法调用 + Option tag 判别 + 字段解包，见 [ir.rs `EnumTag`/`EnumField`](../src/ir.rs)）。当前采用「鸭子类型」约定（不强制 `Iterator` trait），`Iterator` 作为**可约束的契约**需待关联类型（§4.3）落地后补齐。
+```dc
+use std.ffi.CString;
 
----
+extern "C" { fn puts(text: *const c_char): c_int; }
 
-## 8. 错误处理：`Result`（已确定）
+fn main() {
+    var text = match CString::from("hello from Dolphin") {
+        Result.Ok(value) => value,
+        Result.Err(error) => { return 1; },
+    };
+    defer text.deinit();
+    puts(text.ptr());
+    return 0;
+}
+```
 
-- `Result<T, E>` 用泛型枚举实现，对齐 M13 已有的「基于枚举的非泛型错误处理样例」，避免两套风格打架。
-- **`?` 传播语法：不引入（已确定，后续再说）**。错误传播首版用 `match` 显式展开——`Err(e)` 分支提前 `return`、`Ok` 解包，与 M13 的枚举错误处理风格一致。
-- 理由：`?` 是纯语法糖（等价于「`Err` 提前 return + `Ok` 解包」），不引入不损失任何能力；且它自身有设计包袱（作用域、错误类型转换、与 `defer` 交互），待 `Result` 经过实战、确认手写 `match` 确实啰嗦后再评估。原 §11.7 关于 `?` 的「仅 Result、不作用 Option」等细则随之作废。
+## 5. 迭代器：统一协议，限定语法糖范围
 
----
+首版选择最小可实现规则：**`for x in iterator_value` 要求表达式类型实现 `Iterator`。** M13 只有数组/范围 for；M15 新增协议路径，不引入隐式 into_iter 查找或仅凭同名 next 方法的鸭子类型协议。
 
-## 9. 演进路径（不在 M15 实现）
+```text
+for value in expression { body }
+=> 在循环外建立隐藏可写变量 it = expression（只求值一次）
+   loop {
+       match it.next() {
+           Option.Some(value) => { body },
+           Option.None => break
+       }
+   }
+```
 
-以下能力明确延后，避免本里程碑过度设计：
+- Vec 用 `v.iter()`，切片用 `s.iter()`；`SliceIter<T>` 是标准库类型，持有 `[]const T` 和当前索引，next 按值复制 T。
+- `s.iter()` 可作为切片的固定适配 intrinsic 降低为标准库构造调用；它不实现循环或容器算法。
+- 保留旧 `for x in array_expr`：数组表达式求值一次，隐藏数组局部存储覆盖整个循环，通过只读切片适配到 SliceIter；不能对临时数组创建立即悬垂的视图。
+- 保留 `for i in start..end` / `..=`：降低为标准库 `Range`（i32 端点）/ 对应闭区间状态，端点求值一次。闭区间到 i32 最大值时不能多加一次导致溢出。
+- 范围首版仍是 for 专属语法；普通范围值显式用 `Range::exclusive(start, end)` / `Range::inclusive(start, end)`，Range 为 i32 迭代器，避免要求常量泛型或多 trait 约束。
+- 循环体 defer 每轮清理，break/continue 不跳过 M14 约定的清理；隐藏 iterator 本身不自动 deinit。拥有资源的用户迭代器由用户在外层显式管理。
 
-- 动态分派 / 运行时多态 / `class` 继承（含契约关键字最终命名，见 §4.6）。
-- `HashMap`/`HashSet` 等哈希容器（需先定 `Hash`/`Eq` 与哈希算法）。
-- **网络（socket / DNS / HTTP / TLS）**：整体延后。理由见 §6.2.3——同步 socket 会卡死、异步需事件循环+协程、跨平台成本最高、协议无底洞。留待异步/协程里程碑一并解决。
-- 异步文件 I/O / 非阻塞 I/O（与网络共享同一事件循环/协程机制）。
-- 文件缓冲层、目录遍历、文件系统元数据。
-- 闭包与高阶函数（`for_each` 等）。
-- 泛型特化（specialization）。
-- 常量泛型（`const` 泛型参数）。
-- 指针 reinterpret cast / 类型擦除（`Vec<T>` 依赖，见 §6.2.1a）。
-- 宏 / 编译期元编程。
-- 异步 / 协程。
+编译器允许上述数组/切片/范围**语法适配**，但 next 的业务实现必须来自同一 Iterator 协议；不能再为 Vec 或特定元素类型写专用循环后端。
 
----
+## 6. lib 项目与清单
 
-## 10. 验收标准
+### 6.1 库项目
 
-1. 类型参数参与名称解析、类型检查和代码生成（单态化后每个具体实例正确生成）。
-2. 泛型函数/类型可跨模块使用，实例化规则一致、无重复定义冲突。
-3. `Option<T>`、`Result<T,E>` 用泛型真实实现，非编译器硬编码。
-4. `for` 循环重构为对迭代器协议的展开，`for x in my_custom_iter` 可用（迭代器抽象立住）。
-5. 方法语法 `x.foo()` 可用，标准库 API 为链式风格；`*Self` 方法可原地修改容器。
-6. 契约作为编译期约束生效，`fn f<T: 契约>` 约束错误在编译期、调用点报告；关联类型 `type Item` / `Self::Item` 可用（§4.3）。
-7. 标准库不依赖编译器对每个具体类型硬编码（内建原语边界如 §6.1 冻结）。
-8. `string` 常用工具可用（is_empty/starts_with/ends_with 等，基于 `s.bytes()`）。
-9. 文件 I/O（同步）与进程（同步）可用，错误经 `Result` 表达；OS 穿透原语路径（§6.2.2）跑通。
-10. 全部现有 M0-M14 测试仍通过；新增 M15 示例（含跨模块泛型、自定义迭代器、文件 I/O）通过。
+```toml
+# mathlib/dolphin.toml
+[package]
+group = "org.example"
+name = "mathlib"
+version = "1.0.0"
+source = "src"
 
-> 注：`Vec<T>` 从验收标准移除（类型擦除延后，见 §6.2.1a）；`Iterator` 契约的可约束形态依赖关联类型（§4.3），其控制流机制已就绪。
+[lib]
+path = "src/lib.do"
+```
 
----
+```dc
+// mathlib/src/lib.do：根模块，无 pkg
+pub fn twice<T>(value: T): T { return value + value; }
+pub fn add(a: i32, b: i32): i32 { return a + b; }
+```
 
-## 11. 决策清单（全部已确定）
+规则：
 
-以下为 M15 实现前逐一冻结的设计决策，供实现时直接查阅：
+1. 一个包最多一个 `[lib]`，可以同时有多个 `[[bin]]`；至少声明一种目标。
+2. lib 不需要 main，根模块中叫 main 的普通函数也不会变成入口。构建 lib 不生成启动入口，也不链接可执行文件。
+3. `[lib].path` 必须位于 `[package].source` 内且是其直接子文件；它标记根模块入口，其他根目录 `.do` 按既有规则组成根模块。
+4. 同包 bin 入口单独选入编译单元；lib 扫描排除所有 `[[bin]].path`，bin 扫描排除其他 bin 入口，防止多个 main 混入。共享函数放到其他源码文件；禁止库引用被排除的 bin 专属定义。
+5. 库的 API 是根模块及子模块的 pub 定义，跨包只允许公开访问。lib 和同包 bin 使用同一 PackageId，定义只能装入一次。
+6. 对外签名不能泄露该包私有类型。泛型实现可以调用私有 helper，消费端实例化必须保留定义包解析和隐私规则。
 
-### 11.1 泛型跨模块实例化的归属（定义方 vs 调用方）— ✅ 已确定
+### 6.2 应用与依赖
 
-- **决策**：**全程序统一实例化 + 稳定 mangling 去重**。已确定。
+```toml
+[package]
+group = "org.example"
+name = "app"
+version = "0.1.0"
 
-  1. **全程序处理**：编译器本就把整个项目所有源文件合并为单个 `ast::Program` 再 lowering（见 [lower.rs `lower_sources`](../src/lower.rs:18)），不存在模块间信息隔离。因此在 lowering 阶段收集「全程序所有调用点的类型实参」是免费且天然的，无需「定义方预见」。
-  2. **按「泛型名 + 类型实参列表」去重**：每个唯一组合只生成一份具体函数实例。若多个模块以相同实参调用（如 `a`、`c` 都用 `identity(1)` 即 `T=i32`），因 key 相同只生成一份，天然避免重复符号——同时解决了「定义方预见」与「调用方重复」两个问题。
-  3. **稳定 mangling**：实例符号名按确定规则生成（如 `identity<T=i32>` → `identity$i32`），与编译顺序无关，跨模块、跨编译单元一致。
-  4. **实例化时机**：先收集完所有实例请求（`HashMap<(泛型名, 实参列表), ...>` 去重），lowering 结束后**统一批量生成**，而非「遇到调用即生成」——天然去重，且避免递归泛型下的展开顺序泥潭。
+[[bin]]
+name = "app"
+path = "src/main.do"
 
-### 11.2 递归泛型（如 `Node<T> { next: Option<Node<T>> }`）— ✅ 已确定
+[repositories]
+default = "https://packages.example.org/dolphin"
 
-- **决策**：**递归泛型天然支持，无需额外实例化机制**。已确定。
+[dependencies]
+math = "org.example:mathlib:1.0.0"
+codec = { coordinate = "org.example:codec:2.0.0", repository = "default" }
+# 开发期可以替换 math 为：math = { path = "../mathlib" }
+```
 
-  1. **布局无风险**：结构体通过 `TypeId` 间接层引用类型（见 [ir.rs `Type`](../src/ir.rs:23)），自引用字段经 `Option`/指针间接持有，不会内联展开成无限嵌套布局。
-  2. **实例化无风险**：实例化只在「类型实参为具体类型」时发生（§11.1），类型参数 `T` 本身不触发实例化；配合全程序去重，每个具体组合只生成一次，不存在 `Node<Node<Node<...>>>` 无限套娃。
-  3. **唯一需补的校验**：自引用字段必须经 `Option`/指针间接——纯内联自引用 `struct Node<T> { next: Node<T> }` 会构成无限大小布局，报编译错。这属结构体布局的既有规则，非 M15 泛型新增。
+```dc
+use math.add;
+use math.twice;
 
-### 11.3 `?T` 与 `Option<T>` 的关系 — ✅ 已确定
+fn main() {
+    return add(twice<i32>(20), 2); // 42
+}
+```
 
-- **决策**：`?T` 定义为 `Option<T>` 的**语法糖**，二者完全等价。已确定。
-  - `?T` 是 `Option<T>` 的简写（尤其 `?*Point` 表示「可空指针」这类高频场景，比 `Option<*Point>` 直观）。
-  - 底层统一为泛型枚举 `Option<T>`，实现只做一份，不引入第二套可选语义。
+- 左边是本包使用的别名，右边是发布坐标；保留 M9 已预留的字符串简写。
+- 依赖别名是合法语言标识符，不允许 `std`，不能与本包顶层模块重名。`use math.add` 指向该依赖根模块；`use math.algorithms.sort` 指向其内部公开模块。
+- 包坐标与源码 `pkg` 分离。库内部仍写相对目录 `pkg algorithms;`，无需把 group 或消费端别名写入源码。
+- 别名是每包私有的解析环境；依赖包自己的别名不受根应用覆盖。应用不能直接 use 未声明的传递依赖。
+- 同一包的多个别名可以指向同一个 PackageId，仅加载一次；同名类型来自不同包必须保持不同身份。
+- 无清单的旧单文件/目录模式保留，但不支持远程依赖、lib 和发布。
 
-### 11.4 `impl` 块与关联函数的语法 — ✅ 已确定
+## 7. `.dlib` 包：类似 JAR 的使用体验
 
-- **决策**：`impl Type { ... }` 定义方法，`impl<T> Type<T> { ... }` 定义泛型方法块；无 `self` 的函数即关联函数，通过 `Type::func()`（`::`）调用；实例方法通过 `x.func()`（`.`）调用。契约实现语法（`impl 契约 for 类型`）见 §4.3，关键字为 `trait`。已确定。
+### 7.1 冻结首版分发策略
 
-### 11.5 `self` 传递语法：`*Self` vs 引入 `&self` — ✅ 已确定
+**扩展名使用 `.dlib`，格式是 ZIP。** 借鉴 JAR 的“单文件库产物 + 坐标分发”，不产生 JVM `.class`，不引入虚拟机。Dolphin 最终仍生成本机代码。
 
-- **决策**：**沿用 `*Self`**（`fn push(self: *Vector, ...)`），**不引入** `&self` 借用语法。理由：M14 已冻结「显式指针 `*T`、不做借用检查」，引入 `&self` 会连带暗示借用语义，违背原则 2；`*Self` 与自由函数 `fn push(v: *Vector, ...)`（见 [examples/m14 vector.do](../examples/m14/src/dyn/vector.do)）完全同构，迁移零成本。已确定。
+为控制首版实现成本，v1 采用**源码模板分发 + 消费端统一编译**：
 
-### 11.6 `for` 循环展开为 `Iterator` 的具体形态 — ✅ 已确定
+- `dc build --lib` 做库模式编译验证：普通函数完成类型检查和当前目标的对象代码生成；未实例化泛型按 §2.2 检查模板，已用实例正常编译。
+- 本地生成的验证 object 放在 `target/lib/<name>.o`（Windows 为 `.obj`）；可包含外部引用，不做可执行链接。
+- `.dlib` 打包规范化清单、完整库源码和明确声明的 C 原生文件；**v1 不把 Dolphin object 当作消费端链接输入**。消费端读取源码，在目标平台与应用一起单态化并生成本机代码。
+- 这使未知 T 的泛型可跨包使用，也避免首版同时设计稳定二进制 ABI、序列化 AST/IR、跨目标机器码和重复实例去重。
+- 这是“经编译验证的源码型库包”，不是隐藏源码的二进制库。闭源 Dolphin 二进制包、预编译缓存与稳定 ABI 明确延后；不得把源码压缩包宣传成一次编译跨平台运行的机器码。
 
-- **决策**：`for x in iterable` 展开为「`var it = iterable.into_iter(); loop { match it.next() { Option.Some(x) => { body }, Option.None => break } }`」。已确定。
-  - `Iterator` 契约最小含 `next(self: *Self): Option<T>`；`T` 为产出类型。
-  - 采用 **`into_iter()` 分层**：可迭代对象（`Range`、数组、`Vec`）各自实现 `into_iter()` 返回迭代器，容器与迭代器分离。
-  - `break`/`continue` 语义沿用现有循环规则（[implemented-features.md §8.5](implemented-features.md)）；循环变量 `x` 类型由 `Iterator` 产出类型推导。
+**v1 没有第二条 Dolphin 二进制消费路径。** 以后再加目标专属预编译组件时须升级包格式，不能让实现模型自行任选源码/IR/object 混搭方案。
 
-### 11.7 `?` 传播语法与 `Result`/`Option` 的交互 — ✅ 已确定
+### 7.2 包内结构
 
-- **决策**：**不引入 `?`**。错误传播首版用 `match` 显式展开（`Err` 提前 `return`、`Ok` 解包），与 M13 枚举错误处理风格一致。已确定。
-- 理由：`?` 是纯语法糖，不引入不损失能力；其设计包袱（作用域、错误类型转换、与 `defer` 交互）待 `Result` 实战后再评估。后续若要引入，再回到本条目补细节。
+```text
+mathlib-1.0.0.dlib                # ZIP，根目录不额外嵌套 mathlib-1.0.0/
+├── META-INF/
+│   └── dolphin-package.toml     # 格式、坐标、编译器兼容、目标与原生文件摘要
+├── dolphin.toml                # 规范化发布清单
+├── src/
+│   ├── lib.do
+│   └── algorithms/sort.do
+├── native/                     # 仅声明了 C 原生输入时存在
+│   └── <target>/...
+└── LICENSE                     # 若项目存在则附带
+```
 
-### 11.8 契约与 `struct` 的定位关系（评审新增）— ✅ 已确定
+元数据示例：
 
-- **决策**：`struct` 是**数据的容器**（纯值类型，≈ data class），契约是**行为的抽象**，二者正交、不冲突。契约服务于「对泛型参数/类型声明方法能力」，是 M15 泛型 + 迭代器抽象的前提，不因 struct 已存在而多余。已确定。
-  - 未来 `class` 实现契约的愿景不在本里程碑，但契约设计不写死为「仅值类型可实现」，为未来叠加 `class`/多态预留空间。
+```toml
+format-version = 1
+coordinate = "org.example:mathlib:1.0.0"
+compiler-version = "0.1.0"      # 由实际 dc 版本生成，不要求项目版本相同
+kind = "source"
+targets = []                    # 空表示纯 Dolphin；native 包填有完整输入的目标列表
 
----
+# 有 native 文件时，每个文件一个记录：
+# [[native-files]]
+# path = "native/x86_64-pc-windows-msvc/demo.lib"
+# sha256 = "<64位小写十六进制摘要>"
+```
 
-## 12. 决策记录（全部已确定）
+兼容策略：首版要求消费端 dc 版本与 `compiler-version` **完全相同**；不匹配给出发布方版本和当前版本。以后放宽到语言版本范围另行设计，不承诺当前不稳定语言的跨版本兼容。原生目标不匹配同样在链接前诊断。
 
-| 编号 | 议题 | 决策结论 |
-|------|------|---------|
-| 4.x | 契约关键字 | **`trait`** |
-| 4.x | 契约声明/实现/约束语法 | `trait 名 { 方法签名 }` / `impl trait for 类型 { 方法体 }` / `<T: trait>` |
-| 4.4/11.5 | `self` 传递语义 | **`self`（值）+ `*Self`（指针）**，不引入 `&self` |
-| 11.4 | `impl` 块与关联函数 | `impl Type { ... }`；关联函数 `Type::func()`、实例方法 `x.func()` |
-| 11.1 | 跨模块实例化归属 | **全程序统一实例化 + 稳定 mangling 去重** |
-| 11.2 | 递归泛型 | **天然支持**（`TypeId` 间接 + 全程序去重），仅需补自引用字段间接性校验 |
-| 11.3 | `?T` 与 `Option<T>` | **`?T` = `Option<T>` 语法糖** |
-| 11.6 | `for` 展开形态 | `into_iter()` 分层 + `Iterator::next`，`Iterator` 最小含 `next(self: *Self): Option<T>` |
-| 11.7 | `?` 与 `Result`/`Option` | **不引入 `?`**，错误传播用 `match` 显式展开，后续再说 |
-| 11.8 | 契约与 struct 定位关系 | struct（数据容器）与契约（行为抽象）正交，不冲突 |
-| 3.4 | 单态化实现落点与 IR 表示 | **AST 层预处理 pass，IR/codegen 零改动**；实例化类型用 mangling 名复用 `TypeId`（方案 A） |
-| 6.2 | 标准库模块清单 | 纯用户态（Option/Result/Iterator/Range/Vec/string）+ OS 穿透（文件 I/O 同步 + 进程同步）；网络整体延后 |
+规范化规则：
+
+1. 打包全部库源码，含泛型依赖的私有 helper；排除 bin 入口、target、.git 和未声明的文件，不使用“整个项目目录直接 zip”。
+2. 发布清单只保留 package、lib、精确 dependencies、native。源码根统一为 `src`，lib/native 路径重写为包内相对路径；不保留 build.output、bin、绝对路径或发布凭据。
+3. 路径依赖不能原样发布；必须先将该依赖发布并把清单改为精确坐标。dc package 对残留 path 依赖给出具体条目诊断。
+4. ZIP 条目按 UTF-8 路径排序，统一 `/`、DOS 时间戳 `1980-01-01 00:00:00`、普通文件权限 `0644`、DEFLATE 压缩级别 6，不嵌入绝对路径或当前时间。相同输入和 dc 版本生成相同 SHA-256。
+5. 解包拒绝绝对路径、盘符/UNC、反斜杠、`..`、符号链接、重复条目、Windows 大小写冲突以及未在格式内允许的顶层路径。先检查条目与总解压大小上限再提取：单包下载/解压上限均为 256 MiB，单文件 128 MiB，单个清单/元数据 1 MiB，文件数 10000。提取过程继续计数，不能只相信 ZIP 头部声明。
+6. 元数据与清单坐标必须一致；压缩包内容不能覆盖缓存外文件。校验完成后原子地写入缓存，失败不留下可被误用的半包。
+
+### 7.3 C 库随包分发
+
+原生声明沿用 M14 的 `[native.<target>]`。预编译 C 的 `.o/.obj`、`.a/.lib`、`.so/.dylib` 与 DLL 按目标带入包；只复制清单明确列出的文件并记录摘要。未分发的系统依赖必须由原生库说明，不能偷偷引用发布者本机目录。
+
+- 依赖图中每个包的原生输入只加入一次。
+- C 符号保持原始名字；两个库提供相同符号时报告链接冲突，不靠 Dolphin 包别名改写 C 符号。
+- 按确定性拓扑顺序提供静态库（使用者先于提供者，多个就绪节点按坐标排序），同包沿用声明顺序；菱形图的共享依赖必须排在全部使用者后面，不能简单按首次 DFS 到达顺序追加。检测不到的原生循环依赖由链接诊断暴露，首版不提供任意 linker flags 绕过模型。
+- runtime-files 复制到 bin 目录；不同包同名不同内容文件冲突时报错，同名同摘要可去重。
+- 纯 Dolphin 包可跨目标消费；带原生文件的包只能在列出的目标上消费。发布多目标原生包由作者分别产出文件，不意味着 dc 已支持交叉编译。
+
+## 8. Maven 风格仓库、解析与锁文件
+
+### 8.1 远程仓库协议
+
+仓库就是能通过 HTTPS GET 下载文件的网站，无需首版搭建账号系统或数据库服务。仓库 ID 在根项目 `[repositories]` 配置，URL 规范化为不含尾部 `/` 的基地址。
+
+坐标 `org.example:mathlib:1.0.0` 的路径固定为：
+
+```text
+<base>/org/example/mathlib/1.0.0/mathlib-1.0.0.dlib
+<base>/org/example/mathlib/1.0.0/mathlib-1.0.0.dlib.sha256
+```
+
+- group 点分段变目录，name/version 保持合法校验后的路径段。name 沿用现有标识符约束；version 使用无 build metadata 的精确 SemVer，可有 prerelease。不允许路径分隔符、冒号或目录穿越。
+- `.sha256` 格式固定为 64 位小写十六进制摘要加换行，只包含包字节的摘要。
+- v1 不需要版本索引，不支持 `latest`、`^1.2`、版本范围、SNAPSHOT 或“选最高版本”。
+- 字符串依赖默认使用 repository `default`；该 ID 缺失就报错，不内置一个尚不存在的中央仓库。
+- 根项目仓库映射用于整个构建。包的依赖条目可以记录 repository ID，但不得携带自己的任意 URL；未知 ID 必须由根项目配置。repository ID 仅允许 ASCII 字母、数字、下划线且首位为字母，大小写不敏感，解析后统一小写并拒绝重复。
+- 下载使用 TLS 校验、固定 30 秒请求超时、最多 3 次仅针对连接故障/5xx 的重试。404、摘要错误、解析错误不重试；失败显示坐标与 URL，日志不能泄漏凭据。
+- GET 最多跟随 5 次同源重定向，不允许 HTTPS 降级；publish PUT 不跟随重定向。认证头不能发往另一 origin。仓库 URL 不允许嵌入用户名、密码、query 或 fragment。
+- 生产远程源用 HTTPS；`http://127.0.0.1` / `http://localhost` 仅供本机开发和自动化测试。`file://` 路径仓库用于离线 fixture 和本地发布，必须用 URI 解析处理 Windows 路径。
+
+### 8.2 依赖解析算法
+
+以包完整坐标为节点、依赖为边，精确版本只做图遍历，不需要 SAT 求解器。
+
+1. 从根清单读取直接依赖，校验别名、坐标、仓库 ID；按别名排序遍历，确保稳定行为。
+2. 路径依赖读取其真实清单，取得坐标，以规范化绝对目录去重；远程依赖下载 / 使用校验过的缓存包。
+3. 读取每个依赖包内规范化清单，递归解析传递依赖。
+4. 一个 `(group, name)` 在一个构建中只允许**一个精确版本与一个来源**；不同版本或不同来源均报冲突并显示两条依赖链，不使用 Maven 的 nearest-wins，也不静默替换。
+5. 检测包依赖环并显示环路径。包内纯函数模块的循环导入仍按已有规则处理，不能与包图环混淆。
+6. 依赖必须声明 lib；引用只有 bin 的包报错。路径依赖也要执行同样规则。
+7. 返回排序稳定的 PackageGraph、各包别名表、源码与 native 输入；构建层消费该结果，不在 lower/codegen 里下载网络资源。
+
+### 8.3 锁文件
+
+根目录生成并提交 `dolphin.lock`。它记录整个传递闭包，而不是只记录根项目直接依赖。
+
+```toml
+version = 1
+compiler-version = "0.1.0"
+
+[[package]]
+coordinate = "org.example:mathlib:1.0.0"
+source = "https://packages.example.org/dolphin"
+sha256 = "<64位小写十六进制摘要>"
+dependencies = []
+
+[[root-dependency]]
+alias = "math"
+coordinate = "org.example:mathlib:1.0.0"
+```
+
+每个 package 的 dependencies 是排序后的 `{ alias, coordinate }` 数组；package 按坐标排序，根依赖单独保存别名。source 记录规范化仓库基地址；同坐标多来源既已禁止，无需再引入含糊的来源优先级。
+
+路径依赖记录 `source = "path"` 和相对根清单的 `path`，不记录包摘要；路径源码修改会影响构建，锁文件只锁定身份与依赖图，不宣称锁住本地源码内容。
+
+| 命令模式 | 行为 |
+| --- | --- |
+| 普通 check/build/run/fetch | 无锁则解析并写锁；清单图变化则更新；锁内未变的远程节点始终按已有摘要校验 |
+| `--locked` | 必须有与清单、仓库映射、编译器版本一致的锁，禁止改写；仍可下载缺失缓存 |
+| `--offline` | 不访问 HTTP(S)，使用本地缓存/路径/file 仓库；缺包报错，可在信息完整时生成锁 |
+| `--locked --offline` | 不更新锁且不联网，用于可复现离线构建 |
+
+同坐标远程文件变化时，即使不是 `--locked`，也不能自动接受新摘要覆盖旧锁；报“同一版本内容改变”，要求发布新版本。库包里不包含依赖源码或库作者 lock；消费端根 lock 才是最终解析结果。
+
+### 8.4 缓存
+
+缓存根：优先 `DOLPHIN_HOME`，默认用户主目录 `.dolphin`。
+
+```text
+<home>/cache/packages/sha256/<digest>/package.dlib
+<home>/cache/packages/sha256/<digest>/unpacked/...
+```
+
+缓存按内容寻址；坐标映射必须同时带规范化来源。下载先到临时文件，校验摘要/结构后再原子改名；并发构建用每摘要锁或等价原子操作，不共享可被写坏的半成品。使用缓存构建前校验包文件摘要；解包目录依据可信包恢复，不将可变解包内容当作可信源。
+
+坐标到摘要的索引固定写 `<home>/cache/index/<仓库规范URL的SHA-256>/<group目录>/<name>/<version>.toml`，记录 coordinate/source/sha256。首次无锁的 offline 解析只能使用已经校验过的索引与归档；锁存在时其摘要优先。索引/归档均以临时文件原子落盘，源码解包缓存不存放编译产物；产物写根项目 target。
+
+远程源码诊断显示包坐标和包内路径，不只显示长缓存绝对路径。网络失败不能静默改用同名、不同来源的缓存。
+
+## 9. CLI 与发布的完整使用流程
+
+### 9.1 命令表
+
+沿用现有 `<项目目录或文件>` 输入习惯；新命令的项目路径默认当前目录。
+
+| 命令 | 精确定义 |
+| --- | --- |
+| `dc check <project>` | 解析依赖，检查该包 lib 和所有 bin；不产出发布包 |
+| `dc build <project> --lib` | 仅编译验证 lib 并生成 `.dlib`；没有 lib 报错 |
+| `dc build <project>` | 构建 lib（若有）与所有 bin；`--bin name` 只选该 bin，依赖 lib 作为输入 |
+| `dc run <project> --bin name` | 运行 bin；只有 lib 时给出“库不可直接运行”诊断 |
+| `dc package <project>` | 等价于 `build --lib` 的打包入口，先验证，不接受跳过检查选项 |
+| `dc fetch <project>` | 解析/下载整个依赖闭包并写锁，不生成本机代码 |
+| `dc publish <project> --repository <id>` | package 后上传包与摘要到配置的仓库，不覆盖已发布内容 |
+| `dc info <project>` | 显示坐标、lib/bin 目标、直接依赖和缓存/锁状态；不隐式下载 |
+
+`--lib` 与 `--bin` 互斥；`run --lib` 拒绝。`--locked`、`--offline` 对 check/build/run/package/fetch/publish 的依赖解析均有效；publish 若目标是 HTTP(S)，`--offline` 应拒绝上传，file 仓库可用。
+
+默认产物 `<build.output>/package/<name>-<version>.dlib` 及 `.dlib.sha256`；本地验证 object 在 `<build.output>/lib/`。无清单单文件模式的 `-o` 保持现有意义，不用它指定远程包名。
+
+### 9.2 发布协议
+
+- **静态网站发布**：作者先 `dc package`，将两个产物放到 §8.1 的固定目录即可；可用静态托管网站或对象存储，消费者只需要 GET。
+- **CLI 发布**：仓库提供相同路径的 HTTP PUT；dc 以 `If-None-Match: *` 上传包，再上传摘要作为完成标记。服务端必须支持条件创建；不支持时给出协议不支持诊断，不能退化为覆盖 PUT。
+- 已存在且字节摘要相同视为幂等成功；内容不同拒绝。若首次上传包成功而摘要失败，重试读取并校验已有包后补传摘要。下载方只有包与摘要都存在才接受该版本。
+- file 仓库使用临时文件 + 不覆盖的原子发布实现相同语义。
+- 可选 Bearer token 从 `DOLPHIN_REPOSITORY_<ID>_TOKEN` 读取，ID 转大写；repository ID 仅允许 ASCII 字母、数字、下划线且首位为字母。token 不写入清单、lock 或包。
+- `publish` 只发布当前库，不递归上传依赖；发布前用干净的解析缓存验证精确坐标依赖可从目标清单所引用仓库获取，避免靠本地 path/旧缓存掩盖缺失依赖。
+
+首版不实现仓库网站后端、账号注册、搜索、评分和私服管理。协议与客户端必须落地；静态 GET 托管已足够实现“发布到某个网站再像 Maven 一样使用”。
+
+### 9.3 最小端到端操作
+
+```text
+# 库作者：项目已按 §6.1 建立，repositories.default 已配置
+dc check mathlib
+dc build mathlib --lib
+dc publish mathlib --repository default
+
+# 应用作者：按 §6.2 声明 math = "org.example:mathlib:1.0.0"
+dc fetch app
+dc run app --bin app
+
+# CI：先允许下载补齐缓存，之后断网重建
+dc build app --locked
+dc build app --locked --offline
+```
+
+验收时 `app` 应返回 42。仓库使用本机 fixture 服务，所有示例域名都是占位符，不要求访问一个真实中央服务。
+
+## 10. 从 M13 经 M14 开始的实施计划
+
+每阶段开工先看依赖和目标，只完成这一阶段。一个模型调用不要求包揽整份文档。
+
+| 阶段 | 前置 | 具体交付 | 验收门槛 |
+| --- | --- | --- | --- |
+| M15-A 泛型与方法 | M14-F | 新增用户泛型 AST/检查、单态化模块、trait/impl/方法模块、字段可见性、聚合 payload | GEN-01/03/04/06 与同包嵌套模板测试通过；跨包验收在 C |
+| M15-B 标准库 | A | 新建 std 源码模块、Option/Result、Vec、String/CString、Iterator/Range 和 prelude | API 测试组通过，容器逻辑在 Dolphin 源码 |
+| M15-C 本地 lib 与包图 | A；集成示例依赖 B | manifest/lib 模式、path dependency、包别名、跨包 pub/泛型；重构构建目标选择 | GEN-02/05、PKG-01/02 通过；两个本地 lib + 一个 app 可构建 |
+| M15-D 确定性打包 | C | ZIP 格式、元数据、规范化清单、native 文件、dc package/build --lib | 包内容与摘要测试，解包后可被另一项目编译 |
+| M15-E 远程消费 | D | 精确版本解析、仓库 GET、缓存、lock、fetch、locked/offline | 冷缓存下载到运行、断网重建、冲突/损坏反例全部通过 |
+| M15-F 发布与收尾 | B、E、M14-E | 条件 PUT/file 发布、静态网站样例、C 包消费、三平台 CI、文档迁移 | 发布者→仓库→新应用完整流程通过，才能标 M15 完成 |
+
+建议新增文件职责（可按代码风格微调，不得把网络逻辑放进 lower）：
+
+| 文件 / 模块 | 单一职责 |
+| --- | --- |
+| `src/monomorphize.rs` | 泛型模板、实例请求队列、去重和实例展开 |
+| `src/methods.rs` | 方法/trait 声明解析、签名/关联类型检查、接收者降低 |
+| `src/package.rs` | PackageId、PackageGraph、依赖描述与包来源 |
+| `src/resolver.rs` | 精确版本图遍历、冲突/循环、别名环境 |
+| `src/registry.rs` | GET/PUT/file 仓库协议，不处理语言 AST |
+| `src/package_archive.rs` | 确定性 ZIP、格式/路径/摘要校验 |
+| `src/lockfile.rs` | lock 读写、规范序列化与一致性判断 |
+| `src/stdlib/*.do` | 真正的容器、字符串、迭代器实现 |
+
+阶段 C 先交付 lib 模式、验证 object 和本地包图；阶段 D 再接入 `.dlib` 归档并完成 `build --lib` / `package` 的最终 CLI 合同。不能因阶段 C 尚无 ZIP 就回头要求提前完成 D，也不能把阶段 C 的 object 宣称为完整库包。
+
+Rust 依赖优先选成熟的 HTTP/TLS、ZIP、SHA-256、SemVer 库；不要手写密码算法或 ZIP 解析器。实际选型写入 Cargo.toml/Cargo.lock，并更新发行许可证清单。
+
+## 11. 验收矩阵
+
+### 11.1 语言与标准库
+
+| 编号 | 用例 | 预期 |
+| --- | --- | --- |
+| GEN-01 | identity 接收字面量、变量、字段、调用结果、嵌套泛型 | 推断一致，错误实参有位置诊断 |
+| GEN-02 | 两个包调用同一个库泛型同一实参；模板调用另一模板 | 所需实例全部生成且去重，无重复符号 |
+| GEN-03 | 普通递归、互递归、扩张递归、间接按值布局环 | 合法程序运行；非法程序显示调用/字段链，不 panic |
+| GEN-04 | 泛型 impl、关联类型、缺方法、错 receiver、重复 impl | 静态分派正确，错误调用点报告 |
+| GEN-05 | 两包同名类型/函数；泛型访问定义包私有 helper | 不碰撞、不被调用包名字劫持，不泄露私有访问 |
+| GEN-06 | Option.None 的已知/未知期望类型；Result<string, Error> | 已知可编译，未知诊断；聚合 payload 完整可用 |
+| API-01 | Vec<i32>、Vec<Point> push 扩容/get/set/pop/clone | 元素与容量正确，不依赖类型擦除 |
+| API-02 | Vec 分配失败、零容量、reserve 溢出、deinit 两次同对象 | 102 或正常重置；Debug 无意外泄漏 |
+| API-03 | Vec<String> 显式逐元素 deinit，再 deinit 容器 | 无泄漏，不存在隐式递归析构 |
+| API-04 | const receiver、val 对象调用修改方法、私有 backing 字段 | 可读可写边界符合 §3/§4 |
+| API-05 | UTF-8 concat/clone/substring/trim、非法边界、CString 内部 NUL | 正确内容、零分配查询、明确 Result 错误 |
+| API-06 | 用户自定义 Iterator；只同名 next 未实现 trait | 前者运行，后者编译拒绝 |
+| API-07 | 数组临时值、空迭代、范围边界、循环提前退出与 defer | 无悬垂适配；每轮和外层清理顺序正确 |
+
+### 11.2 lib、仓库与发布
+
+| 编号 | 用例 | 预期 |
+| --- | --- | --- |
+| PKG-01 | lib-only、bin-only、lib+多bin；run lib | 合法目标正确构建，纯库 run 明确拒绝 |
+| PKG-02 | path 依赖、同名模块、私有成员访问、重复别名 | 正确解析或明确冲突诊断 |
+| PKG-03 | 相同输入连续 package；改变私有 helper | 前者包字节与摘要一致，后者摘要变化 |
+| PKG-04 | 打包 bin/target/未声明文件、残留 path 依赖 | 无关文件排除；path 依赖报错 |
+| PKG-05 | 发布到本机仓库，清空消费端缓存后只写坐标构建 | 自动下载到运行结果 42；没有本地源码路径依赖 |
+| PKG-06 | A→B→C、菱形相同版本、不同版本冲突、依赖环 | 完整 lock、共享节点去重；冲突显示两条链/环 |
+| PKG-07 | 正确 lock 离线重建、缺缓存、改依赖后 locked | 可重建或明确缺包/锁过期诊断，无暗中联网 |
+| PKG-08 | 下载中断、404、坏摘要、半上传版本、并发下载 | 不接受半包、不污染有效缓存 |
+| PKG-09 | ZIP 路径穿越、重复条目、解压超限、大小写冲突 | 提取前拒绝，不写缓存外文件 |
+| PKG-10 | 包格式/编译器版本/原生目标不兼容 | 在 codegen/link 前报告版本或目标 |
+| PKG-11 | C 库包被两个依赖引用；native 同名 DLL 冲突 | C 输入去重；不同内容冲突明确报错 |
+| PKG-12 | 相同版本重复 publish；不同字节；上传中断后重试 | 幂等成功、拒绝覆盖、可补全摘要 |
+| PKG-13 | 同坐标远程文件被替换，已有 lock；不同仓库同坐标 | 不接受新摘要，来源冲突不自动选一个 |
+| PKG-14 | 空格/中文目录、Windows file URI、本机 HTTP fixture | 三平台路径与网络处理正确 |
+| PKG-15 | 解压 dc 发行包，在新目录消费已发布纯 Dolphin lib | 不需要 Rust/C 编译工具链现场编译运行时或第三方源码 |
+
+HTTP 测试使用本机隔离端口和临时 `DOLPHIN_HOME`；通过请求计数证明 offline 零请求，不能依靠开发者全局缓存通过测试。网络标准库、公共网站可用性不属于测试前提。
+
+阶段验收通过后，完整执行：
+
+```text
+cargo fmt -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo build --release --bins
+```
+
+新增 `examples/m15`（容器、跨包泛型）、库发布 fixture 和发行包冒烟用例。完成后同步 README、已实现功能参考、语言设计、安装发行说明与路线图；只根据真实测试证据勾选完成。
+
+## 12. 明确延后与 M13 基线衔接
+
+**延后**：动态 trait/class/继承、闭包、常量泛型、多 trait 约束、泛型特化、`?T`/`?`、HashMap/HashSet、自定义 allocator、完整文件/进程 API、网络/异步标准库、版本范围求解、闭源二进制 Dolphin 包、增量编译、中央仓库网站后端。M13 无 shell `run(cmd)` 内建，本阶段也不为包管理新增它。
+
+**需要扩展的 M13 基础**：普通函数/类型 AST 增加用户泛型；数组/范围 for 接入 Iterator；module 解析增加包身份；要求 main 的 bin 流程增加独立 lib 模式；原跨模块公开数据字段显式补 pub。前置 M14 的内存 API、defer 和 std 身份直接复用。
+
+**不做历史兼容**：不找回已清理的 M14/M15 模块/测试，不新增全局 allocate/free 或资源 try，不恢复隐式字符串分配和 duck-typed for。已存在的 M0-M13 正例/负例按明确新增语义逐项调整并记录原因，不能靠删除测试宣称通过。
+
+### 历史任务模板（不可用于当前任务）
+
+以下只保留当次 M13 起步的执行记录，不可复制到当前项目。请使用 [M18-M21 交接指南](plan-m18-plus.md)第 9 节的新提示词。
+
+```text
+[历史归档，禁止作为当前执行提示词；不得回退源码或重做已完成阶段]
+从 M13 基线按 docs/proposal-m14-memory-model.md 与 docs/proposal-m15-generics-stdlib.md 的 v2 规格逐阶段实现。
+本轮只完成阶段 <阶段编号>，先确认其前置阶段的验收结果。
+先阅读对应文档的阶段表和“小上下文执行方式”，按路由加载相关章节，不要求一次读完两份长文档。
+当前源码基线是 9e6f4c6；旧 M14/M15 已清理，待新增模块不是缺失依赖，不恢复旧实现或兼容层。
+逐条完成该阶段对应验收编号，运行相关测试，必要时迁移旧测试并说明语义变化。
+不要顺手引入“明确延后”的能力，也不要仅凭代码存在就标记阶段完成。
+交付：修改文件、通过/失败的测试命令与结果、尚未完成的验收项、下一阶段入口。
+```

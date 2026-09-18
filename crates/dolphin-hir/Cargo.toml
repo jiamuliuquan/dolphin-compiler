@@ -1,0 +1,11 @@
+[package]
+name = "dolphin-hir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-source.workspace = true
+dolphin-syntax.workspace = true
+dolphin-ir.workspace = true
+dolphin-package.workspace = true
+dolphin-std.workspace = true

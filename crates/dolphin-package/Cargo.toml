@@ -1,0 +1,13 @@
+[package]
+name = "dolphin-package"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-source.workspace = true
+serde.workspace = true
+sha2.workspace = true
+toml.workspace = true
+ureq.workspace = true
+url.workspace = true
+zip.workspace = true

@@ -1,0 +1,8 @@
+[package]
+group = "me.foxlab"
+name = "m16"
+version = "0.2.0"
+
+[[bin]]
+name = "m16"
+path = "src/main.do"

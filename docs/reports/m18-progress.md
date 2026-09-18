@@ -1477,7 +1477,8 @@ error: could not compile `llvm-sys` (lib) due to 1 previous error
   `libPolly.a` 也不存在，所以本地 `--features llvm` 从不触发该问题，无法在本机复现 apt 拆包
   路径。已用 PyYAML 解析验证 `ci.yml`，并确认新增的 `libPolly.a` 检查在本机会按预期报缺库
   （说明该守卫能拦截原先的失败条件）。
-- 状态：配置与文档已修复；远端 CI 需重新运行确认（本机不能伪造 runner 结果）。
+- 状态：配置与文档已修复；用户确认 GitHub Actions 在后续提交上通过（三平台 `test` 矩阵与 `llvm` lane；
+  tag 上的 `release` 仍未触发，保持“未验证”）。
 - 该修复不影响本批测试数量与其它结论。
 
 ## H18-10 当前文档与可运行示例核正
@@ -1614,3 +1615,119 @@ cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features 
 3. 本批修复的枚举构造缺陷只覆盖子模块裸名形式；跨模块 `mod.Enum.Variant(...)` 既有路径由
    `tests/build.rs::function_named_like_enum_variant_is_not_enum_construction` 等回归继续保护。
 4. 无阻塞；本报告不把 H18-11 记为完成。
+
+## H18-11 全量集成与阶段验收
+
+- 批次：H18-11
+- 状态：完成（Linux x86_64；两后端 × Debug/Release 本机；三平台默认 Cranelift lane 与 Linux LLVM lane
+  由用户确认远端 CI 通过；云 tag/`release` job 在发布 0.3.0 时最终确认）
+- 前置批次及报告：H18-10，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`7042b6d18bea3cfbfd88167cb73d139b4009beff`（`v0.2.0-M18-10-01`）。
+- 工作区开始时有已 staged 的 `docs/reports/m18-progress.md`（H18-09-CI 修复的状态行更新），已保留。
+- 本批修改：新增 `examples/m18/`（`dolphin.toml`、`src/main.do`、`README.md`）、
+  `examples/README.md`、`tests/build.rs`、`.github/workflows/ci.yml`（smoke 加 m18）、
+  `docs/roadmap.md`、`README.md`、`docs/implemented-features.md`、`docs/plan-m18-correctness.md`、
+  `docs/reports/m18-progress.md`；并按用户批准的发布决策把编译器版本从 `0.2.0` 升到 `0.3.0`
+  （`Cargo.toml`、`Cargo.lock`、`examples/m9|m15|m16` 的 lock 文件）。未 commit/push/tag。
+
+### examples/m18（组合回归示例）
+
+- 内容：泛型容器 `Box<T>`/泛型枚举 `Maybe<T>` 与 `match`；指针别名写
+  `pair.x = mutate(&pair)`（RHS 经 `*Pair` 把 `y` 改为 9）；`Pair` 按值传参与返回（聚合 sret）；
+  `Vec<i32>` + `defer numbers.deinit()`；`mem.alloc`/`mem.free` + `defer` 且切片跨函数求和。
+- 不依赖网络、不读未初始化存储、不使用未实现语法；`dc fmt --check` 通过。
+- 固定结果（Cranelift/LLVM × Debug/Release 一致）：stdout
+  `alias = 7 9\ngeneric = 40\nshifted = 8 10\nsum = 12\n`，exit `0`，stderr 空。
+- 回归测试：`tests/build.rs::h18_11_examples_m18_combination_regression`（可用后端 × Debug/Release，
+  直接构建 `examples/m18` 清单并断言 stdout/exit/stderr）。
+- 命令已加入文档与 CI 冒烟（合同 5.3）：`examples/README.md`、`examples/m18/README.md`、
+  `.github/workflows/ci.yml` 发行包 smoke。
+
+### 验收编号核对（H18-00..10，缺项可见）
+
+| 编号 | 真实测试名（文件省略前缀） | H18-11 复验 |
+| --- | --- | --- |
+| H18-00 驱动 | `m18_harness.rs`：`harness_captures_success_stdout_and_exit`、`harness_reports_compile_failure_without_running`、`harness_captures_runtime_trap_exit_and_stderr`、`harness_honors_dolphin_profile`、`harness_terminates_timeout_and_reaps_child`、`harness_selects_explicit_llvm_backend` | 通过 |
+| PLACE-01..08 | `m18_place.rs`：`place_01_field_alias_keeps_rhs_side_effect`、`place_02_array_rhs_element_alias_preserved`、`place_03_index_target_evaluated_once`、`place_04_rhs_target_and_other_field`、`place_05_rejects_immutable_and_out_of_bounds_targets`、`place_05_dynamic_out_of_bounds_traps`、`place_06_pointer_slice_and_aggregate_fields`、`place_07_bounds_check_before_rhs`、`place_08_pointer_rebind_uses_pre_rhs_address`、`place_08_slice_descriptor_rebind_uses_pre_rhs_address` | 通过 |
+| LAYOUT-01..06 | `m18_layout.rs`：`layout_01_enum_sizes_and_alignments`、`layout_02_enum_slice_alloc_address_and_write`、`layout_03_enum_in_struct_and_struct_in_enum`、`layout_04_payloads_match_params_returns_and_copy`、`layout_05_free_full_slice_without_mismatch`、`layout_05_dynamic_bounds_trap_in_both_profiles`、`layout_06_rejects_oversized_nested_aggregate`；`dolphin-ir`：`enum_without_payload_is_four_four`、`enum_payload_starts_at_eight_and_size_is_padded`、`enum_payload_size_is_exact_for_max_components`、`enum_in_struct_uses_aligned_field_offsets` | 通过 |
+| CAST-01..02 | `m18_cast.rs`：`cast_01_float_to_int_saturates`、`cast_02_full_matrix_saturates_with_nan_zero` | 通过 |
+| GEN-01..05 | `m18_bounds.rs`：`gen_01_ignored_type_bound_is_rejected`、`gen_02_positive_hold_and_maybe`、`gen_02_negative_hold_and_maybe`、`gen_03_positive_signature_and_nested`、`gen_03_negative_nested_and_signature`、`gen_03_cross_module_trait_identity`、`gen_03_cross_module_negative_uses_qualified_trait`、`gen_05_associated_type_fields_and_payloads`、`gen_05_negative_type_and_missing_impl`；`manifest.rs::h18_04_type_bounds_across_path_dependency`；GEN-04 既有：`build.rs::m15_generic_functions_types_and_methods`、`m15_type_parameter_bounds_resolve_associated_types`、`m15b_iterator_protocol_and_rejection`、`rejects_unbounded_generic_type_expansion` | 通过 |
+| IMPL-01..04 | `m18_impl.rs`：`impl_01_construct_then_call_renamed_params`、`impl_01_associated_function_first_instantiation`、`impl_01_bound_checked_through_method_instantiation`、`impl_02_specialization_is_rejected`、`impl_02_missing_and_repeated_arguments_are_rejected`、`impl_02_reordered_and_arity_mismatch_are_rejected`、`impl_02_nested_argument_is_rejected`、`impl_02_blanket_impl_is_rejected`、`impl_02_impl_parameter_bound_is_rejected`、`impl_02_method_type_parameter_is_rejected`、`impl_02_generic_trait_argument_is_rejected`、`impl_02_unknown_target_is_rejected`、`impl_03_same_name_method_conflict_is_rejected`；`manifest.rs::h18_05_parameterized_impl_across_path_dependency` | 通过 |
+| IR-01..05 | `dolphin-ir::verify::tests` 18 项（`valid_minimal_program_passes`、`struct_kind_mismatch_is_rejected`、`value_self_cycle_is_rejected`、`value_mutual_cycle_is_rejected`、`pointer_recursion_is_allowed`、`invalid_local_index_is_rejected`、`invalid_block_target_is_rejected`、`location_count_mismatch_is_rejected`、`branch_condition_must_be_bool`、`set_local_type_mismatch_is_rejected`、`call_arity_mismatch_is_rejected`、`extern_without_body_is_allowed`、`library_without_main_is_allowed`、`invalid_source_is_rejected`、`enum_variant_out_of_range_is_rejected`、`return_type_mismatch_is_rejected`、`empty_return_in_non_unit_is_rejected`、`print_non_printable_is_rejected`）；`m18_sret.rs::loop_sret_alloca_does_not_accumulate_stack`；LLVM：`verifier_reports_stage_and_raw_error` | 通过 |
+| PKGSRC-01..06 | `packages.rs`：`h18_07_pkgsrc_01_path_before_remote_is_rejected`、`h18_07_pkgsrc_02_remote_before_path_is_rejected`、`h18_07_pkgsrc_03_same_repository_same_coordinate_is_reused`、`h18_07_pkgsrc_04_different_repository_or_version_is_rejected`、`h18_07_pkgsrc_05_locked_and_offline_do_not_bypass_source_check`、`h18_07_pkgsrc_06_same_canonical_path_aliases_are_reused` | 通过 |
+| BUILD-01 | `manifest.rs::h18_08_build_01_path_dependency_with_bins_loads_only_library`、`packages.rs::h18_08_build_01_path_and_published_dependency_agree` | 通过 |
+| BUILD-02 | `cli.rs::h18_08_build_02_manifest_optimization_is_the_default`、`h18_08_build_02_dependency_manifest_does_not_override_root_profile`、`h18_08_build_02_library_and_bins_share_effective_profile`；`manifest.rs::h18_08_build_03_explicit_profile_overrides_manifest_optimization` | 通过 |
+| BUILD-03 | `cli.rs::h18_08_build_03_explicit_debug_on_release_manifest_reports_leak`、`h18_08_build_03_explicit_release_on_debug_manifest_is_clean`、`h18_08_build_03_debug_runtime_reports_leak_and_invalid_free` | 通过 |
+| BUILD-04 | `cli.rs::h18_08_build_04_explicit_backend_beats_environment`；既有 `build.rs`/`ffi.rs`/`manifest.rs`/`cli.rs` 全回归 | 通过 |
+| CI-01..05 | `ci.yml` 三 job 依赖表（H18-09 节）；`backend.rs::debug_backends_agree`、`release_backends_agree`（固定 exit 25、`7 10 12 25\n`、stderr 空）、`typed_ir_has_no_backend_types`、`llvm_debug_profile_emits_dwarf`；`manifest.rs::h18_09_method_diagnostics_use_defining_file`；Darwin shared-library fixture 按平台选项（`ffi06_shared_library_integration`） | 用户确认远端 CI 通过；本机全绿 |
+| DOC-01..04 | `doc_examples.rs`：`current_doc_links_exist`、`doc_examples_are_classified`、`doc_examples_build_and_run`、`website_translations_are_in_sync`、`fixed_defects_moved_to_history`；`build.rs::h18_10_enum_construction_in_submodule` | 通过 |
+| H18-11 | `build.rs::h18_11_examples_m18_combination_regression`；§5.3 示例与发行包 smoke | 通过 |
+
+### 实际运行命令与测试数量
+
+```bash
+# 合同 5.1 默认门禁
+cargo fmt --all -- --check                                            # 通过
+cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings  # 通过
+DOLPHIN_BACKEND=cranelift cargo test --workspace --exclude dolphin-codegen-llvm       # 323 passed
+git diff --check                                                      # 通过
+
+# 合同 5.2 LLVM 门禁
+llvm-config --version                                                 # 22.1.8
+cargo clippy --workspace --all-targets --features llvm -- -D warnings # 通过
+DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm      # 330 passed
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples
+                                                                      # 153 passed
+DOLPHIN_BACKEND=llvm cargo test --features llvm --test m18_harness --test m18_place \
+  --test m18_layout --test m18_cast --test m18_bounds --test m18_impl --test m18_sret
+                                                                      # 48 passed
+cargo test -p dolphin-compiler --features llvm --test backend          # 4 passed
+
+# 合同 5.3 集成、示例与发行包
+cargo build --release --bins                                          # 通过
+./target/release/dc fmt --check examples crates/dolphin-std/src       # 通过
+./target/release/dc check examples/m14                                # exit 0
+./target/release/dc run examples/m14                                  # exit 0，stderr 空
+./target/release/dc run examples/m15                                  # `42 22 true`，stderr 空
+./target/release/dc run examples/m18                                  # 固定四行，exit 0，stderr 空
+# 发行包：按 ci.yml 冒烟脚本，在解压归档（自带 rust-lld/libLLVM）上构建/运行
+#   m8(64)/m14/m15/m18、打包 m15math、坐标消费 smokeapp(42)、--locked --offline 重建
+#   -> SMOKE_SEQUENCE_OK（/tmp/opencode/h18-11/，本机 patchelf 隔离 venv）
+```
+
+默认 322→323（新增 `h18_11_examples_m18_combination_regression`），LLVM 329→330，
+合同显式列表 152→153；`examples/m18` 已在默认/LLVM 两套矩阵与发行包冒烟中执行。
+
+### 未运行的检查及原因
+
+- 本机只有 Linux；三平台默认 lane（macOS ARM64 / Windows x86_64）由用户确认的 GitHub Actions 覆盖，
+  不在本机重跑。macOS/Windows LLVM 不在 CI 矩阵内，H18-09-M/-W 节结论不变。
+- tag 上的 `release` job：H18-09 已修 Polly 配置，用户在发布 0.3.0 时做最终确认；本机不伪造。
+- 无 CRT/SDK 的干净环境验收仍属 H21。
+- `cargo test --release`（Rust profile）不改变 fixture 的 Dolphin profile，未运行。
+
+### 行为/兼容变化
+
+- 新增示例与 CI 冒烟步骤；无编译器行为、公开 API 或持久格式变化。
+- 版本号按用户批准从 `0.2.0` 升到 `0.3.0`：`Cargo.toml`（workspace）、`Cargo.lock`、
+  四个示例 lock 的 `compiler-version`；`.dlib`/lock 的 `compiler-version` 精确匹配策略不变，
+  `--locked` 在 m9/m15/m15math/m16 上用新编译器复验通过。示例各自的 package 版本未动（m15/m16 仍
+  为 `0.2.0`，`examples/m18` 为 `0.3.0`）。
+- 阶段状态更新：roadmap M18 勾选完成、README 里程碑行、implemented-features 头部与 H18-11 合同状态。
+
+### 剩余问题和下一批输入（M19 / H19-00）
+
+1. M18 已按合同关闭；下一阶段按 [M18-M21 计划](../plan-m18-plus.md)先执行 `H19-00` 设计冻结：
+   `docs/proposal-m19-cli-stdlib.md` 必须冻结参数/环境、字节 I/O、文件、资源状态与 defer、错误类型、
+   本地库构建、用户测试和错误处理语法，并给出唯一方案、拒绝方案与验收例。
+2. `build --lib` 同时打包 `.dlib`、归档禁止 path 依赖的开发体验问题按合同留给 H19-00 决策；
+   M18 未擅自删除打包行为或放宽 path 依赖限制。
+3. 仍未承诺的边界（供 H19-00/H21 引用）：内存安全无借用/悬垂检查，trap/`_Exit` 不执行 defer；
+   调试仅 LLVM Debug 的 Unix DWARF；无一般定长数组/嵌套数组；无增量编译与稳定二进制 ABI；
+   `.dlib` 仅源码归档且要求编译器版本完全一致；干净环境 SDK/sysroot 策略待 H21。
+4. 未发现被无理由推迟的 P0/P1 已知正确性问题：`implemented-features.md` §1.1 当前无未修复审计项，
+   §1.2 记录 H18-01..10 修复并链接回归测试。

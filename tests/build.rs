@@ -2361,3 +2361,48 @@ fn h18_10_enum_construction_in_submodule() {
     }
     fs::remove_dir_all(project).expect("temporary project should be removed");
 }
+
+/// H18-11：`examples/m18` 组合回归示例在可用后端 × Debug/Release 上构建并运行，
+/// 固定 stdout/exit，且 Debug 下无泄漏报告。
+#[test]
+fn h18_11_examples_m18_combination_regression() {
+    use dolphin_compiler::{BuildSettings, build_manifest, load_manifest};
+    use support::backends;
+
+    const EXPECTED: &str = "alias = 7 9\ngeneric = 40\nshifted = 8 10\nsum = 12\n";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/m18");
+    let manifest = load_manifest(&root).expect("examples/m18 should load");
+    for backend in backends() {
+        for profile in [BuildProfile::Debug, BuildProfile::Release] {
+            let artifacts = build_manifest(
+                &manifest,
+                None,
+                profile,
+                BuildSettings::with_backend(backend),
+            )
+            .unwrap_or_else(|error| {
+                panic!("examples/m18 must build ({backend:?}/{profile:?}): {error}")
+            });
+            assert_eq!(artifacts.len(), 1);
+            let output = Command::new(&artifacts[0].executable)
+                .output()
+                .expect("examples/m18 should run");
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "backend={backend:?} profile={profile:?} stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                EXPECTED,
+                "backend={backend:?} profile={profile:?}"
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "examples/m18 must not report leaks ({backend:?}/{profile:?}): {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}

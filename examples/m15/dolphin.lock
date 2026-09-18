@@ -1,5 +1,5 @@
 version = 1
-compiler-version = "0.2.0"
+compiler-version = "0.3.0"
 
 [[package]]
 coordinate = "me.foxlab:m15math:1.0.0"

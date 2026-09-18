@@ -103,6 +103,17 @@ jobs:
           test "$output" = "42 22 true"
           test ! -s m15.stderr
 
+          # M18 组合回归示例：泛型容器/枚举、聚合与指针别名写、defer 清理。
+          smoke/dc build examples/m18
+          set +e
+          output=$(./examples/m18/target/m18 2>m18.stderr)
+          code=$?
+          set -e
+          test "$code" -eq 0
+          expected=$'alias = 7 9\ngeneric = 40\nshifted = 8 10\nsum = 12'
+          test "$output" = "$expected"
+          test ! -s m18.stderr
+
           # M15-C/D 库打包：发行包中的 dc 也能产出确定性 `.dlib` 与摘要。
           smoke/dc package examples/m15/mathlib
           test -f examples/m15/mathlib/target/package/m15math-1.0.0.dlib

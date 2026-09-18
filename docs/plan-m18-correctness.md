@@ -149,7 +149,7 @@ fn main() {
 | H18-08 | 项目目标与 profile 一致性 | H18-07 | 完成（Linux 本机两后端；profile 用 Debug runtime 行为验证，见 [m18-progress](reports/m18-progress.md)） |
 | H18-09 | LLVM CI 与发布质量门禁 | H18-08 | 完成（配置与 Linux 本机步骤已验证；Windows 复验：默认 lane 与打包冒烟本机通过，CRLF 格式门禁已按用户决定以 `.gitattributes` 修复并复验；macOS 复验：默认 lane、Darwin ffi、打包冒烟与 LLVM 22 lane 本机通过，rust-lld/libLLVM 环境缺口与两个 ELF 专用 DWARF 断言已按用户批准最小修复；远端 CI/tag 门禁待平台验收，见 [m18-progress](reports/m18-progress.md)） |
 | H18-10 | 当前文档与可运行示例核正 | H18-09 | 完成（文档示例抽取测试与示例修复，见 [m18-progress](reports/m18-progress.md)） |
-| H18-11 | 全量集成与阶段验收 | H18-10 | 待实施 |
+| H18-11 | 全量集成与阶段验收 | H18-10 | 完成（Linux 本机全量门禁 + `examples/m18` + 发行包冒烟；三平台默认 lane 与 LLVM lane 由用户确认远端 CI 通过，见 [m18-progress](reports/m18-progress.md)） |
 
 上述顺序是默认交接顺序，不建议多个代理同时修改 lower/layout/codegen。H18-06 若超过一个上下文，可先做 ID/CFG/location 校验，再做类型/表达式/Place 和 LLVM 校验；两个子批次都完成后才能关闭 H18-06。
 

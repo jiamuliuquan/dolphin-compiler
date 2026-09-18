@@ -290,7 +290,7 @@ UTF-8 源文件
 | M15 | 已完成 | 泛型、方法与 trait；源码标准库 `Vec`/`String`/`CString`、`Option`/`Result`/`Iterator`；lib 目标、path/坐标依赖、确定性 `.dlib`、仓库/缓存/锁与条件发布 |
 | M16 | 已完成 | 后端无关类型化 IR、`CodegenBackend` 接口、可选 LLVM 后端、双后端稳定性测试与基准 |
 | M17 | 已完成 | DWARF 调试信息（LLVM Debug）、`dc fmt` 格式化器、`dc lsp` 语言服务器 |
-| M18 | 待实施 | 组合语义正确性、泛型约束、IR 校验、项目/包回归、LLVM CI 与发布门禁 |
+| M18 | 已完成 | 组合语义正确性、泛型约束、IR 校验、项目/包回归、LLVM CI 与发布门禁（证据见 [M18 进度报告](docs/reports/m18-progress.md)） |
 | M19 | 待设计冻结 | 真实 CLI、参数与基础 I/O、文本处理、用户 `dc test` |
 | M20 | 待设计冻结 | 结构化诊断、共享项目分析、文件 overlay、项目级 LSP 与工具验收 |
 | M21 | 条件规划 | 性能测量、按证据优化、包兼容身份与干净环境交付 |

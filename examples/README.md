@@ -28,6 +28,7 @@ cargo build --release
 | [M13](m13/README.md) | 结构体、枚举、`match` 模式匹配、跨模块类型引用 | 输出并退出码 `49` |
 | [M14](m14/README.md) | 手动内存（`std.mem`）、指针/切片、`defer`、字符串视图、`extern "C"` | 输出并退出码 `0`；`ffi/` 需预编译 C fixture |
 | [M15](m15/README.md) | 泛型函数/结构体/枚举、单态化、方法与泛型 `impl`、trait 静态分派、`Vec<T>` 与 `for` 迭代协议、prelude `Option`/`Result` | 输出 `42 22 true` |
+| [M18](m18/README.md) | 组合回归：泛型容器/枚举、聚合按值传参与指针别名写、`Vec`/`mem` + `defer` 清理 | 输出并退出码 `0`；Debug stderr 为空 |
 
 ## 通用构建方式
 

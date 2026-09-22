@@ -1075,6 +1075,9 @@ dolphin_runtime_finish
 - `?T` 可选类型和 `?` 错误传播运算符。
 - 网络与子进程标准库。
 - 闭包和异常。
+- 链式字段上的直接方法调用（`a.b.method()`）与 `return match ... Result.Err(...)` 的泛型构造臂
+  类型推断：前者按路径解析为函数名而报未知函数，后者报无法推断类型参数；组合错误路径时先
+  绑定局部变量（`val x = a.b; x.method()`、`val e = ...; return Result.Err(e)`）即可（H19-06）。
 - 闭源二进制 Dolphin 库包、稳定二进制 ABI、增量编译、交叉编译。
 - Cranelift 后端的调试信息、Windows/PDB 调试信息，以及多错误恢复。
 

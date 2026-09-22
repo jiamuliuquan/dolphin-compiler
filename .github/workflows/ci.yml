@@ -214,7 +214,7 @@ jobs:
       - run: cargo build --bins --features llvm
       - run: cargo clippy --workspace --all-targets --features llvm -- -D warnings
       - run: DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm
-      - run: DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd
+      - run: DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors
       - run: cargo test -p dolphin-compiler --features llvm --test backend
 
   # 发布：仅在 tag 上触发，且必须等三平台质量门禁与 LLVM lane 全部成功。

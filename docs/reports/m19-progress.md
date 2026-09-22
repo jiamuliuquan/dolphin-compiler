@@ -886,3 +886,106 @@ installation 显式列表中）。
 2. H19-05 已关闭（a/b/c 全部通过）；H19-07 的真实应用需使用本批的 `dc test` 与 `std.test`。
 3. 本批未改动 IR/layout/lower/runtime；`dc test` 的 runner 属 CLI/driver 层。
 4. 无阻塞；M19 未完成，本报告不把 M19 或 H19-07 记为完成。
+
+## H19-06 Result/defer 组合与有限语法补齐
+
+- 批次：H19-06（组合回归；未新增语法，D3 保持）
+- 状态：完成（Linux x86_64；Cranelift/LLVM × Dolphin Debug/Release 本机；macOS/Windows 由远端 CI lane 覆盖，待平台确认）
+- 前置批次及报告：H19-05c，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`f4bd056`（`v0.3.0-M19-05c`），工作区干净。
+- 本批修改：`tests/m19_errors.rs`（新）、`.github/workflows/ci.yml`、`README.md`、
+  `docs/installation.md`、`docs/implemented-features.md`、`docs/proposal-m19-cli-stdlib.md`、
+  `docs/plan-m18-plus.md`、本报告。**无编译器/运行时/标准库源码改动**。未 commit/push/tag。
+
+### 决策与结论（D3 复核）
+
+- 用既有 `Result` + `match` + helper + `defer` 写完了四类失败路径（资源清理、错误值/视图寿命、
+  返回快照/清理顺序、I/O 错误处理），**无需新增语法**：不加 match 语句块、`?`、if/block 表达式或异常。
+- 组合中发现两处表达限制，均可用局部绑定绕过，不阻塞目标程序，也不构成本批要改的语义决策：
+  1. 字段访问结果上直接调用方法（`report.error.code()`）被按路径解析为函数名而报未知函数；
+     先 `val reported = report.error;` 再 `reported.code()`。
+  2. `return match ... { Result.Err(error) => Result.Err(error), ... }` 的 Err 构造臂报
+     `cannot infer type argument T`；先绑定错误再 `return Result.Err(error)`。
+  两条已记入 implemented-features 的当前限制。
+
+### 修改文件与关键实现
+
+- `tests/m19_errors.rs`：ERR-01..04，四个 Dolphin 程序 + 每例在可用后端 × Debug/Release 上
+  `dc build` 并以 argv 运行，断言固定 stdout/stderr/exit；Debug 的 stderr 为空同时覆盖无分配泄漏
+  与无未关闭句柄报告。
+
+### 验收映射
+
+| 验收点 | 测试名 | 期望与结果 |
+| --- | --- | --- |
+| ERR-01 | `m19_errors.rs::err_01_early_return_cleans_resources` | 空文件读后早返回 exit 4、非空 exit 0、缺失文件 exit 2；三条路径 stdout 分别为 `clean 1`/`clean 1`/空，Debug stderr 空（defer 释放缓冲并关闭句柄）；4 组合通过 |
+| ERR-02 | `err_02_error_views_not_dangling` | 失败 `open` 的 `Error` 经结构体与 helper 传递后仍可读（`kind=not-found has-code=true`、`again=not-found`）；`Builder` 视图在其存活期内经 `from_utf8` 使用（`prefix=view`、`whole=view-after`）；Builder deinit 无泄漏；exit 0；4 组合通过 |
+| ERR-03 | `err_03_return_snapshot_and_defer_order` | 固定 stdout `clean 1`（内层清理）→`value=42`（返回快照在释放缓冲前取得）→`clean 3`→`clean 2`（外层逆序、退出时读 tag 最新值）；exit 0、Debug stderr 空；4 组合通过 |
+| ERR-04 | `err_04_io_error_not_trap` | 缺失文件→`missing=not-found`、对只写流 `read`→`read-on-write-err=true`、含 NUL 路径→`nul=invalid`；全部走 `Result`，exit 0（不是 101/104）、stderr 空；4 组合通过 |
+
+### 修复前复现结果
+
+- 本批不修生产代码，没有“修复前失败”的源码回归；四个验收用例是既有语义的新覆盖，首次运行即通过。
+- 为证明 ERR-01 的泄漏断言有效，手工探针在 `src/main.do` 中故意不注册 `defer`：
+  Debug 产物输出 `Dolphin: 1 open handle(s) not closed at exit`、exit 0——即测试的
+  `stderr.is_empty()` 会捕获清理失效（探针在 `/tmp/opencode/h19-06/leak/`，未提交）。
+- 编写失败路径时最初尝试 `report.error.code()` 与 `return match ... Result.Err(...)`，分别得到
+  `unknown function report.error.code` 与 `cannot infer type argument T`；按上节局部绑定改写后通过。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m19_errors`：4 passed；`--features llvm` 同样 4 passed。
+- 手工探针：四类程序的 stdout/stderr/exit 与固定期望一致；无 101/104/句柄报告。
+- 完整门禁与发行包冒烟全绿（见下）。
+
+### 实际运行命令与测试数量
+
+```bash
+cargo test -p dolphin-compiler --test m19_errors                          # 4 passed
+cargo test -p dolphin-compiler --features llvm --test m19_errors          # 4 passed
+cargo test --workspace --exclude dolphin-codegen-llvm                     # 359 passed (355→359)
+cargo test --workspace --features llvm                                    # 366 passed (362→366)
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples \
+  --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors
+                                                                          # 189 passed (185→189)
+cargo test -p dolphin-compiler --features llvm --test backend             # 4 passed
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features llvm \
+  -- -D warnings && git diff --check                                       # 全部通过
+# §5.3 / 发行包冒烟（本机 patchelf 隔离 venv）
+cargo build --release --bins
+./target/release/dc fmt --check examples crates/dolphin-std/src
+./target/release/dc run examples/m14|m15|m18                              # 固定输出、exit 0、stderr 空
+python3 scripts/package.py --target x86_64-unknown-linux-gnu --out-dir /tmp/opencode/h19-06/dist
+# 解压归档后按 ci.yml 冒烟序列（m8/m14/m15/m18、打包 m15math、坐标消费、--locked --offline）
+                                                                          # SMOKE_SEQUENCE_OK
+```
+
+日志与产物在 `/tmp/opencode/h19-06/`；`--test m19_errors` 已加入 `ci.yml` LLVM lane、README 与
+installation 的显式列表。
+
+### 未运行的检查及原因
+
+- macOS/Windows 本机未运行；四个用例只用既有跨平台 `std.fs`/`std.io`/`std.text`/`defer` 组合，
+  由远端 CI 三平台默认 lane（`cargo test --workspace` 含 `m19_errors`）覆盖，本机不伪造。
+- `/dev/full` 等受控写失败不重复覆盖（FS-03 已有）；权限失败需要非 root 受控 fixture，未新增。
+- 未测试“defer 中再注册 defer/跳转”等规格明确不支持的写法。
+- tag/release 未触发。
+
+### 行为/兼容变化
+
+- 无：本批不改编译器、运行时、标准库或 CLI；新增的只是回归测试与文档中的当前限制说明。
+- 目标程序的失败路径已证明可用既有语法表达；D3 的“不新增语法”结论在本批得到验证。
+
+### 剩余问题和下一批输入（H19-07）
+
+1. H19-07：用已实现的 `std.process`/`std.io`/`std.fs`/`std.text`/`std.test` 完成
+   `examples/m19/textstats`（lib）与 `examples/m19/dtext`（bin）及两包 `tests/*.do`；
+   编译器集成测试实际调用命令行并断言三路结果；三平台默认后端与 Linux LLVM 均验证。
+2. 测试矩阵要求：空输入、正常 UTF-8、无末尾换行、无匹配、非法参数、缺失文件、可控读写失败、
+   重复运行无资源累积；标准库公开条目逐项记录拥有权/失效/错误规则；发布包可构建该项目。
+3. 失败路径写法沿用本批模式（先绑定错误/视图再使用）；`return match` 与链式方法调用的限制见上。
+4. 无阻塞；M19 未完成，本报告不把 M19 或 H19-07 记为完成。

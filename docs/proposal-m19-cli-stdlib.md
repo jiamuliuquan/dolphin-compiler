@@ -670,7 +670,10 @@ native code 是否存在，不绑定整段渲染文本。新测试文件必须�
 
 - D1、D2、D3 已于 2026-09-22 由用户确认；H19-01、H19-02、H19-03、H19-04 已完成对应实现
   （见 [M19 报告](reports/m19-progress.md)）。H19-05a/b/c 已完成（构建、发现/harness/`std.test`、
-  子进程执行/超时/分类/过滤/汇总），TEST-01..06 均有真实测试。H19-06/07 未实施，M19 未完成。
+  子进程执行/超时/分类/过滤/汇总），TEST-01..06 均有真实测试。H19-06 以组合回归完成：
+  ERR-01..04（`tests/m19_errors.rs`）证明既有 `Result`/`match`/helper/`defer` 足以写完失败路径，
+  **未新增任何语法**；两处组合限制（字段后直接方法调用、`return match` 的 Err 构造臂推断）
+  用局部绑定绕过，详见 [M19 报告](reports/m19-progress.md) H19-06 节。H19-07 未实施，M19 未完成。
 - H19-02 经用户确认把 unit-like 返回值从 `Result<(), Error>` 改为 `Result<bool, Error>`（当前语言
   无 Unit 值；`Result<Unit, E>` 会触发诊断），并修复了暴露的两个编译器缺陷（Unit payload 诊断、
   LLVM 重复 extern 符号）。规格第 4.1 节已同步。

@@ -320,7 +320,7 @@ cargo build --release --bins
 # 可选 LLVM 后端（需要本机 LLVM 开发库）：额外覆盖 `dolphin-codegen-llvm`
 cargo clippy --workspace --features llvm --all-targets -- -D warnings
 DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm
-DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors
 cargo test -p dolphin-compiler --features llvm --test backend
 ```
 

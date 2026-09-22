@@ -850,6 +850,9 @@ dolphin_stream_write
 dolphin_stream_flush
 dolphin_stream_close
 dolphin_stream_is_open
+dolphin_stream_open
+dolphin_stream_release
+dolphin_stream_from_raw
 dolphin_runtime_finish
 ```
 
@@ -917,7 +920,8 @@ dolphin_runtime_finish
 - **模块与 API**：`std`（`Option`/`Result`/`Iterator`）、`std.collections`（`Vec<T>`、`SliceIter<T>`、
   `Range`）、`std.text`（`String`、`concat`/`trim`/`substring`/`starts_with`/`ends_with`/`contains`/
   `from_utf8`、`TextError`）、`std.ffi`（`CString`、`CStringError`）、`std.process`（进程参数与环境，
-  H19-01）、`std.error` 与 `std.io`（错误类别与标准流字节 I/O，H19-02）。
+  H19-01）、`std.error` 与 `std.io`（错误类别与标准流字节 I/O，H19-02）、`std.fs`（文件打开与模式，
+  H19-03）。
 - **导入与 prelude**：`use std.mem;`、`use std.text;`、`use std.collections.Vec;` 与类型导入；
   `Option`/`Result`/`Iterator` 作为最小 prelude 自动可用，被本模块定义或显式导入时遮蔽。
 - **迭代器协议**：`for x in expr` 要求 `expr` 实现 `Iterator`；数组与切片经只读切片适配到
@@ -943,7 +947,14 @@ dolphin_runtime_finish
   `Err(NotOwned)` 且不影响后续写入，副本共享运行时状态、`close` 幂等。成功类返回值用 `bool`
   （`true`）而非 Unit：当前语言无 Unit 值（`Result<Unit, E>` 会得到诊断）。异常 UTF-8 字节可读入
   `[]u8`，但转 `string` 必须经 `std.text.from_utf8` 校验；`string.from_bytes` 保持 104 trap 语义。
-  `release`/`from_raw` 与 `std.fs.open` 一起在 H19-03 提供。
+  `release(self): usize` 显式转交自有句柄（源句柄置 0，接收者用 `from_raw` 接管）；借用/已关闭返回 0；
+  `from_raw(handle)` 对非法/已关闭/借用 id 得到已关闭句柄（`is_open=false`、读写 `Err(Closed)`）。
+- **`std.fs`（H19-03）**：`OpenMode{Read, Write, Append}` 与
+  `open(path: string, mode): Result<Stream, Error>`。`Read` 不存在 → `NotFound`；目录 → Unix
+  `IsADirectory`、Windows `InvalidArgument`；`Write` 创建/截断、`Append` 创建/追加（Unix 0644）。
+  路径含内部 NUL 在调用运行时前返回 `InvalidArgument`；Windows UTF-8→UTF-16 失败同样报错。
+  句柄是自有资源：`close` 幂等，重绑定前必须 `close`/`release`；Debug 运行时在退出收尾报告
+  未关闭的自有流（`Dolphin: N open handle(s) not closed at exit`，退出码不变），借用标准流不计入。
 - **所有权边界**：容器赋值/元素读取/Vec.clone 是浅复制；clear/deinit 不递归释放拥有型元素。`Vec<String>` 等需按 API 契约逐元素释放；view 不延长缓冲寿命，可写 deinit 的接收者应为 var。
 - **`Unit` 约束（H19-02）**：`Unit` 没有运行时值，不能作为 struct 字段或 enum payload 按值存储；
   实例化时给出诊断，不再在 codegen 内部 panic。

@@ -1,8 +1,9 @@
 # M19 规格：真实 CLI、标准库与用户测试（H19-00 冻结）
 
 > 状态：H19-00 设计冻结产物。**除 H19-01 已实现的 `std.process` 参数/环境与
-> `dc run -- <应用参数>` 转发、H19-02 已实现的 `std.error` 与 `std.io` 标准流字节 I/O 外，
-> 本文其余 API 均未实现**；未实现的条目不能写进“已实现功能”。
+> `dc run -- <应用参数>` 转发、H19-02 已实现的 `std.error` 与 `std.io` 标准流字节 I/O、
+> H19-03 已实现的 `std.fs` 文件打开与 `release`/`from_raw` 句柄转交外，本文其余 API 均未实现**；
+> 未实现的条目不能写进“已实现功能”。
 > 实现顺序与验收编号见 [M18-M21 计划](plan-m18-plus.md) 第 5 节与本文“测试矩阵”。
 >
 > 前置：M18 已完成并通过阶段验收（[m18-progress](reports/m18-progress.md)）。
@@ -200,6 +201,10 @@ pub fn open(path: string, mode: OpenMode): Result<std.io.Stream, Error>
 - Windows 路径转 UTF-16 失败（含未配对代理项）→ `InvalidArgument`。
 - 关闭/读写与 `std.io` 同一组方法（`read`/`write`/`write_all`/`flush`/`close`/
   `close_abort`/`is_open`/`release`/`from_raw`）。
+
+实现状态（H19-03）：以上 `open` 与 `release`/`from_raw` 已落地；`Read` 在 Unix 用 `fstat` 识别目录并
+返回 `IsADirectory`，Windows 用文件属性识别并返回 `InvalidArgument`。Debug 运行时在退出收尾报告
+未关闭的自有流（`Dolphin: N open handle(s) not closed at exit`，退出码不变）；借用标准流不计入。
 
 ### 5.2 拒绝方案
 
@@ -599,9 +604,12 @@ native code 是否存在，不绑定整段渲染文本。新测试文件必须�
 
 ## 16. 未决与阻塞
 
-- D1、D2、D3 已于 2026-09-22 由用户确认；H19-01、H19-02 已完成对应实现（见 [M19 报告](reports/m19-progress.md)）。
+- D1、D2、D3 已于 2026-09-22 由用户确认；H19-01、H19-02、H19-03 已完成对应实现
+  （见 [M19 报告](reports/m19-progress.md)）。
 - H19-02 经用户确认把 unit-like 返回值从 `Result<(), Error>` 改为 `Result<bool, Error>`（当前语言
   无 Unit 值；`Result<Unit, E>` 会触发诊断），并修复了暴露的两个编译器缺陷（Unit payload 诊断、
   LLVM 重复 extern 符号）。规格第 4.1 节已同步。
+- H19-03 的受控关闭失败没有可移植注入方式（`close(2)` 对普通文件不报错）；用模式不匹配读写、
+  Linux `/dev/full` 写入失败、幂等重复关闭与 invalid 句柄覆盖，未伪造真实关闭失败。
 - `dc test` 支持 `--release`/`--debug`（默认 Debug），已在 §9.1 冻结；不作为阻塞项。
 - 若 H19-06 证明必须新增语法，按第 10.2 节停止并重新冻结（不预先批准）。

@@ -116,28 +116,54 @@ static int dolphin_unregister_alloc(void *pointer, size_t bytes) {
     return 0;
 }
 
+/* 句柄状态（M19/H19-02、H19-03）：标准流借用，文件流自有并登记在
+ * `dolphin_owned_streams`；登记表供 release/from_raw 校验与 Debug 报告。 */
+struct dolphin_stream_state {
+    int open;
+    int owned;
+    HANDLE native;
+    struct dolphin_stream_state *next;
+};
+
+static struct dolphin_stream_state *dolphin_owned_streams = NULL;
+
 extern "C" void dolphin_runtime_finish(void) {
     size_t leaked = 0;
     for (struct dolphin_alloc_record *record = dolphin_live_allocs; record != NULL;
          record = record->next) {
         leaked += 1;
     }
-    if (leaked == 0) {
-        return;
-    }
-    char buffer[160];
-    int length = snprintf(buffer, sizeof(buffer),
-                          "Dolphin: %llu allocation(s) leaked at exit\n",
-                          (unsigned long long)leaked);
-    if (length > 0) {
-        dolphin_write_error(buffer, (size_t)length);
-    }
-    for (struct dolphin_alloc_record *record = dolphin_live_allocs; record != NULL;
-         record = record->next) {
-        length = snprintf(buffer, sizeof(buffer), "  address=%p bytes=%llu\n", record->pointer,
-                          (unsigned long long)record->bytes);
+    if (leaked > 0) {
+        char buffer[160];
+        int length = snprintf(buffer, sizeof(buffer),
+                              "Dolphin: %llu allocation(s) leaked at exit\n",
+                              (unsigned long long)leaked);
         if (length > 0) {
             dolphin_write_error(buffer, (size_t)length);
+        }
+        for (struct dolphin_alloc_record *record = dolphin_live_allocs; record != NULL;
+             record = record->next) {
+            length = snprintf(buffer, sizeof(buffer), "  address=%p bytes=%llu\n",
+                              record->pointer, (unsigned long long)record->bytes);
+            if (length > 0) {
+                dolphin_write_error(buffer, (size_t)length);
+            }
+        }
+    }
+    size_t open_handles = 0;
+    for (struct dolphin_stream_state *stream = dolphin_owned_streams; stream != NULL;
+         stream = stream->next) {
+        if (stream->open) {
+            open_handles += 1;
+        }
+    }
+    if (open_handles > 0) {
+        char handle_buffer[96];
+        int handle_length = snprintf(handle_buffer, sizeof(handle_buffer),
+                                     "Dolphin: %llu open handle(s) not closed at exit\n",
+                                     (unsigned long long)open_handles);
+        if (handle_length > 0) {
+            dolphin_write_error(handle_buffer, (size_t)handle_length);
         }
     }
 }
@@ -453,15 +479,9 @@ extern "C" int dolphin_last_error_code(void) {
  * Windows 的 flush 使用 FlushFileBuffers；读写失败保留 GetLastError。
  * ------------------------------------------------------------------------- */
 
-struct dolphin_stream_state {
-    int open;
-    int owned;
-    HANDLE native;
-};
-
-static struct dolphin_stream_state dolphin_stdin_state = {1, 0, NULL};
-static struct dolphin_stream_state dolphin_stdout_state = {1, 0, NULL};
-static struct dolphin_stream_state dolphin_stderr_state = {1, 0, NULL};
+static struct dolphin_stream_state dolphin_stdin_state = {1, 0, NULL, NULL};
+static struct dolphin_stream_state dolphin_stdout_state = {1, 0, NULL, NULL};
+static struct dolphin_stream_state dolphin_stderr_state = {1, 0, NULL, NULL};
 
 extern "C" uintptr_t dolphin_stream_stdin(void) {
     if (dolphin_stdin_state.native == NULL) {
@@ -575,6 +595,124 @@ extern "C" int dolphin_stream_close(uintptr_t id) {
 extern "C" uint8_t dolphin_stream_is_open(uintptr_t id) {
     struct dolphin_stream_state *state = (struct dolphin_stream_state *)id;
     return (uint8_t)(state != NULL && state->open);
+}
+
+/* ---------------------------------------------------------------------------
+ * 文件流（M19/H19-03）。
+ *
+ * mode：0=Read、1=Write（创建/截断）、2=Append（创建/追加）。路径按 UTF-8 解码，
+ * 非法编码或内部 NUL 返回 InvalidArgument；自有句柄登记供 release/from_raw
+ * 校验与 Debug 报告。
+ * ------------------------------------------------------------------------- */
+
+static int dolphin_stream_open_wide(const wchar_t *path, int mode, uintptr_t *out_handle) {
+    DWORD access;
+    DWORD disposition;
+    switch (mode) {
+        case 0:
+            access = GENERIC_READ;
+            disposition = OPEN_EXISTING;
+            break;
+        case 1:
+            access = GENERIC_WRITE;
+            disposition = CREATE_ALWAYS;
+            break;
+        case 2:
+            access = FILE_APPEND_DATA;
+            disposition = OPEN_ALWAYS;
+            break;
+        default:
+            dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+            return ERROR_INVALID_PARAMETER;
+    }
+    // Windows 的目录按规格报 InvalidArgument（不是 PermissionDenied）。
+    DWORD attributes = GetFileAttributesW(path);
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        dolphin_set_error(DOLPHIN_ERR_INVALID, (int)ERROR_DIRECTORY);
+        return (int)ERROR_DIRECTORY;
+    }
+    HANDLE native = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                disposition, FILE_ATTRIBUTE_NORMAL, NULL);    if (native == INVALID_HANDLE_VALUE) {
+        DWORD code = GetLastError();
+        dolphin_set_error(dolphin_kind_from_win32(code), (int)code);
+        return (int)code;
+    }
+    struct dolphin_stream_state *state =
+        (struct dolphin_stream_state *)malloc(sizeof(*state));
+    if (state == NULL) {
+        CloseHandle(native);
+        dolphin_set_error(DOLPHIN_ERR_OTHER, 0);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    state->open = 1;
+    state->owned = 1;
+    state->native = native;
+    state->next = dolphin_owned_streams;
+    dolphin_owned_streams = state;
+    *out_handle = (uintptr_t)state;
+    dolphin_set_error(DOLPHIN_ERR_OTHER, 0);
+    return 0;
+}
+
+extern "C" int dolphin_stream_open(const uint8_t *path, uintptr_t length, int mode,
+                                   uintptr_t *out_handle) {
+    for (uintptr_t index = 0; index < length; index += 1) {
+        if (path[index] == 0) {
+            dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+            return ERROR_INVALID_PARAMETER;
+        }
+    }
+    if (length > 0x7FFFFFFFu) {
+        dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+        return ERROR_INVALID_PARAMETER;
+    }
+    int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char *)path,
+                                     (int)length, NULL, 0);
+    if (needed <= 0) {
+        dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+        return ERROR_INVALID_PARAMETER;
+    }
+    wchar_t *wide = (wchar_t *)malloc(((size_t)needed + 1) * sizeof(wchar_t));
+    if (wide == NULL) {
+        dolphin_set_error(DOLPHIN_ERR_OTHER, 0);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    int written = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char *)path,
+                                      (int)length, wide, needed);
+    if (written != needed) {
+        free(wide);
+        dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+        return ERROR_INVALID_PARAMETER;
+    }
+    wide[needed] = L'\0';
+    int result = dolphin_stream_open_wide(wide, mode, out_handle);
+    free(wide);
+    return result;
+}
+
+/// 显式转交：返回可被 `from_raw` 接管的 id；借用/已关闭/未知 id 返回 0。
+uintptr_t dolphin_stream_release(uintptr_t id) {
+    for (struct dolphin_stream_state *state = dolphin_owned_streams; state != NULL;
+         state = state->next) {
+        if ((uintptr_t)state == id) {
+            return (state->open && state->owned) ? id : 0;
+        }
+    }
+    return 0;
+}
+
+/// 接管 id：仅接受登记表中的 open 自有流；非法/已关闭/借用 id 返回 0。
+uintptr_t dolphin_stream_from_raw(uintptr_t id) {
+    if (id == 0) {
+        return 0;
+    }
+    for (struct dolphin_stream_state *state = dolphin_owned_streams; state != NULL;
+         state = state->next) {
+        if ((uintptr_t)state == id) {
+            return state->open ? id : 0;
+        }
+    }
+    return 0;
 }
 
 extern "C" void dolphin_print_string(const char *data, uintptr_t length) {

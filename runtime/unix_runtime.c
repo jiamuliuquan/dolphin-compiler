@@ -6,6 +6,8 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #define DOLPHIN_EXIT_TRAP 101
 #define DOLPHIN_EXIT_ALLOC 102
@@ -52,6 +54,24 @@ __attribute__((constructor)) static void dolphin_install_traps(void) {
     signal(SIGFPE, dolphin_runtime_trap);
     signal(SIGTRAP, dolphin_runtime_trap);
 }
+
+/* ---------------------------------------------------------------------------
+ * 句柄状态（M19/H19-02、H19-03）。
+ *
+ * 所有流（标准流与文件流）共享同一状态结构；标准流是借用（owned=0），
+ * 文件流是自有（owned=1）并登记在 `dolphin_owned_streams` 中。登记表用于
+ * `release`/`from_raw` 的安全校验与 Debug 未关闭句柄报告；句柄状态一旦分配
+ * 不释放，过期句柄最多得到“已关闭”错误而不会访问悬垂内存。
+ * ------------------------------------------------------------------------- */
+
+struct dolphin_stream_state {
+    int open;
+    int owned;
+    int native;
+    struct dolphin_stream_state *next;
+};
+
+static struct dolphin_stream_state *dolphin_owned_streams = NULL;
 
 /* ---------------------------------------------------------------------------
  * 分配器与 Debug 存活分配登记表（M14-C/R04）。
@@ -108,22 +128,37 @@ void dolphin_runtime_finish(void) {
          record = record->next) {
         leaked += 1;
     }
-    if (leaked == 0) {
-        return;
-    }
-    char buffer[160];
-    int length = snprintf(buffer, sizeof(buffer),
-                          "Dolphin: %llu allocation(s) leaked at exit\n",
-                          (unsigned long long)leaked);
-    if (length > 0) {
-        dolphin_write_error(buffer, (size_t)length);
-    }
-    for (struct dolphin_alloc_record *record = dolphin_live_allocs; record != NULL;
-         record = record->next) {
-        length = snprintf(buffer, sizeof(buffer), "  address=%p bytes=%llu\n", record->pointer,
-                          (unsigned long long)record->bytes);
+    if (leaked > 0) {
+        char buffer[160];
+        int length = snprintf(buffer, sizeof(buffer),
+                              "Dolphin: %llu allocation(s) leaked at exit\n",
+                              (unsigned long long)leaked);
         if (length > 0) {
             dolphin_write_error(buffer, (size_t)length);
+        }
+        for (struct dolphin_alloc_record *record = dolphin_live_allocs; record != NULL;
+             record = record->next) {
+            length = snprintf(buffer, sizeof(buffer), "  address=%p bytes=%llu\n",
+                              record->pointer, (unsigned long long)record->bytes);
+            if (length > 0) {
+                dolphin_write_error(buffer, (size_t)length);
+            }
+        }
+    }
+    size_t open_handles = 0;
+    for (struct dolphin_stream_state *stream = dolphin_owned_streams; stream != NULL;
+         stream = stream->next) {
+        if (stream->open) {
+            open_handles += 1;
+        }
+    }
+    if (open_handles > 0) {
+        char handle_buffer[96];
+        int handle_length = snprintf(handle_buffer, sizeof(handle_buffer),
+                                     "Dolphin: %llu open handle(s) not closed at exit\n",
+                                     (unsigned long long)open_handles);
+        if (handle_length > 0) {
+            dolphin_write_error(handle_buffer, (size_t)handle_length);
         }
     }
 }
@@ -363,15 +398,9 @@ int dolphin_last_error_code(void) {
  * 读写包装内部重试 EINTR，短读/短写原样返回给调用方。
  * ------------------------------------------------------------------------- */
 
-struct dolphin_stream_state {
-    int open;
-    int owned;
-    int native;
-};
-
-static struct dolphin_stream_state dolphin_stdin_state = {1, 0, 0};
-static struct dolphin_stream_state dolphin_stdout_state = {1, 0, 1};
-static struct dolphin_stream_state dolphin_stderr_state = {1, 0, 2};
+static struct dolphin_stream_state dolphin_stdin_state = {1, 0, 0, NULL};
+static struct dolphin_stream_state dolphin_stdout_state = {1, 0, 1, NULL};
+static struct dolphin_stream_state dolphin_stderr_state = {1, 0, 2, NULL};
 
 uintptr_t dolphin_stream_stdin(void) {
     return (uintptr_t)&dolphin_stdin_state;
@@ -479,6 +508,114 @@ int dolphin_stream_close(uintptr_t id) {
 uint8_t dolphin_stream_is_open(uintptr_t id) {
     struct dolphin_stream_state *state = dolphin_stream_of(id);
     return (uint8_t)(state != NULL && state->open);
+}
+
+/* ---------------------------------------------------------------------------
+ * 文件流（M19/H19-03）。
+ *
+ * mode：0=Read、1=Write（创建/截断）、2=Append（创建/追加）。自有句柄登记在
+ * `dolphin_owned_streams`，供 `release`/`from_raw` 校验与 Debug 报告；路径必须
+ * 无内部 NUL，失败返回 native 错误码并设置 last-error。
+ * ------------------------------------------------------------------------- */
+
+int dolphin_stream_open(const uint8_t *path, uintptr_t length, int mode, uintptr_t *out_handle) {
+    for (uintptr_t index = 0; index < length; index += 1) {
+        if (path[index] == 0) {
+            dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+            return EINVAL;
+        }
+    }
+    char stack_buffer[512];
+    char *buffer = stack_buffer;
+    if (length + 1 > sizeof(stack_buffer)) {
+        buffer = (char *)malloc((size_t)length + 1);
+        if (buffer == NULL) {
+            dolphin_set_error(DOLPHIN_ERR_OTHER, 0);
+            return ENOMEM;
+        }
+    }
+    if (length > 0) {
+        memcpy(buffer, path, (size_t)length);
+    }
+    buffer[length] = '\0';
+
+    int flags;
+    switch (mode) {
+        case 0:
+            flags = O_RDONLY;
+            break;
+        case 1:
+            flags = O_WRONLY | O_CREAT | O_TRUNC;
+            break;
+        case 2:
+            flags = O_WRONLY | O_CREAT | O_APPEND;
+            break;
+        default:
+            if (buffer != stack_buffer) {
+                free(buffer);
+            }
+            dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+            return EINVAL;
+    }
+    int native;
+    do {
+        native = open(buffer, flags, 0644);
+    } while (native < 0 && errno == EINTR);
+    if (buffer != stack_buffer) {
+        free(buffer);
+    }
+    if (native < 0) {
+        int code = errno;
+        dolphin_set_error(dolphin_kind_from_errno(code), code);
+        return code;
+    }
+    struct stat info;
+    if (fstat(native, &info) == 0 && S_ISDIR(info.st_mode)) {
+        close(native);
+        dolphin_set_error(DOLPHIN_ERR_IS_DIR, EISDIR);
+        return EISDIR;
+    }
+    struct dolphin_stream_state *state =
+        (struct dolphin_stream_state *)malloc(sizeof(*state));
+    if (state == NULL) {
+        int code = errno;
+        close(native);
+        dolphin_set_error(DOLPHIN_ERR_OTHER, code);
+        return code;
+    }
+    state->open = 1;
+    state->owned = 1;
+    state->native = native;
+    state->next = dolphin_owned_streams;
+    dolphin_owned_streams = state;
+    *out_handle = (uintptr_t)state;
+    dolphin_set_error(DOLPHIN_ERR_OTHER, 0);
+    return 0;
+}
+
+/// 显式转交：返回可被 `from_raw` 接管的 id；借用/已关闭/未知 id 返回 0。
+uintptr_t dolphin_stream_release(uintptr_t id) {
+    for (struct dolphin_stream_state *state = dolphin_owned_streams; state != NULL;
+         state = state->next) {
+        if ((uintptr_t)state == id) {
+            return (state->open && state->owned) ? id : 0;
+        }
+    }
+    return 0;
+}
+
+/// 接管 id：仅接受登记表中的 open 自有流；非法/已关闭/借用 id 返回 0。
+uintptr_t dolphin_stream_from_raw(uintptr_t id) {
+    if (id == 0) {
+        return 0;
+    }
+    for (struct dolphin_stream_state *state = dolphin_owned_streams; state != NULL;
+         state = state->next) {
+        if ((uintptr_t)state == id) {
+            return state->open ? id : 0;
+        }
+    }
+    return 0;
 }
 
 void dolphin_print_string(const char *data, uintptr_t length) {

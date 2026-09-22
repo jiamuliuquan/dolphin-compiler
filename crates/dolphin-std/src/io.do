@@ -29,6 +29,8 @@ extern "C" {
     fn dolphin_stream_flush(stream: usize): i32;
     fn dolphin_stream_close(stream: usize): i32;
     fn dolphin_stream_is_open(stream: usize): u8;
+    fn dolphin_stream_release(stream: usize): usize;
+    fn dolphin_stream_from_raw(stream: usize): usize;
 }
 
 pub fn stdin(): Stream {
@@ -125,6 +127,21 @@ impl Stream {
     pub fn is_open(self: *const Self): bool {
         return dolphin_stream_is_open(self->handle) != 0_u8;
     }
+
+    /// 显式转交自有句柄：成功返回可用 `from_raw` 接管的 id，并把本句柄置为已关闭；
+    /// 借用/已关闭/未知 id 返回 0 且不改变状态。
+    pub fn release(self: *Self): usize {
+        val handle = dolphin_stream_release(self->handle);
+        if handle != 0_usize {
+            self->handle = 0_usize;
+        }
+        return handle;
+    }
+}
+
+/// 接管由 `open`/`release` 得到的 id；非法、已关闭或借用 id 得到已关闭句柄。
+pub fn from_raw(handle: usize): Stream {
+    return Stream(dolphin_stream_from_raw(handle));
 }
 
 pub fn eprint(bytes: []const u8): Result<bool, Error> {

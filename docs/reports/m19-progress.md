@@ -326,3 +326,110 @@ installation 的显式列表。
    不要改动借用标准流语义。
 3. 新测试文件 `tests/m19_io.rs` 已进入显式列表；H19-03 新增文件同样要加入。
 4. 无阻塞；本报告不把 M19 记为完成。
+
+## H19-03 文件操作与资源错误路径
+
+- 批次：H19-03
+- 状态：完成（Linux x86_64；Cranelift/LLVM × Dolphin Debug/Release 本机；macOS/Windows 由远端 CI lane 覆盖，待平台确认）
+- 前置批次及报告：H19-02，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`1d888811edcf5edcaabee40029e4c046dcdff4a9`（`v0.3.0-M19-02`），工作区干净。
+- 本批修改：`runtime/{unix_runtime.c,windows_runtime.cpp}`、
+  `crates/dolphin-std/src/{lib.rs,io.do,fs.do}`、`tests/m19_fs.rs`、
+  `.github/workflows/ci.yml`、`README.md`、`docs/installation.md`、`docs/implemented-features.md`，
+  以及规格/计划/本报告的状态同步。未 commit/push/tag。
+
+### 修改文件与关键实现
+
+- 运行时（Unix/Windows）：
+  - 句柄状态扩展为登记表（`next` 链）；自有文件流在 `open` 时分配并登记，借用标准流不登记；
+    状态不释放，过期句柄最多得到 `Closed`，不会访问悬垂内存。
+  - `dolphin_stream_open(path, len, mode, out)`：mode 0=Read、1=Write（创建/截断）、2=Append
+    （创建/追加）；路径先查内部 NUL；Unix `open(2)` + `fstat` 识别目录（`IsADirectory`），
+    Windows `CreateFileW` + 文件属性识别目录（`InvalidArgument`），Windows 路径按
+    `WC_ERR_INVALID_CHARS` 转 UTF-16。
+  - `dolphin_stream_release` / `dolphin_stream_from_raw`：基于登记表的安全转交/接管；未知、已关闭、
+    借用 id 返回 0。
+  - Debug `dolphin_runtime_finish` 不再在无分配泄漏时提前返回；除分配泄漏外还报告未关闭的自有流
+    （`Dolphin: N open handle(s) not closed at exit`），退出码不变；Release 不追踪。
+- `std.io`：新增 `release(self: *Self): usize`（成功时源句柄置 0）与 `from_raw(handle): Stream`
+  （非法/已关闭/借用 id 得到已关闭句柄）；`close` 保持幂等。
+- `std.fs`（新单元）：`OpenMode{Read,Write,Append}` 与 `open`；NUL 路径在调用运行时前报
+  `InvalidArgument`；返回自有 `Stream`。
+- `tests/m19_fs.rs`：FS-01..06，argv 传路径、直接运行、断言固定 stdout/stderr/exit。
+
+### 验收映射
+
+| 验收点 | 测试名 | 期望与结果 |
+| --- | --- | --- |
+| FS-01 | `m19_fs.rs::fs_01_empty_small_multi_chunk` | 空文件 `total=0 checksum=0 open=true`；小文件与 100 KiB+37 字节多块文件字节数/校验和固定；4 组合通过 |
+| FS-02 | `fs_02_missing_dir_and_bad_path` | 不存在 → `kind=not-found`；目录 → Unix `is-dir` / Windows `invalid`（三种模式）；合法文件成功且 Debug 无句柄报告；含 NUL 路径 → `kind=invalid code=0`；4 组合通过 |
+| FS-03 | `fs_03_injected_read_write_close_failure` | 对只写流 `read`、对只读流 `write` 均返回 Err；重复 `close` 均成功且 `open-after=false`；`from_raw(0)` 读写返回 `Err(Closed)`；Linux `/dev/full` 写入失败 exit 2（非 trap）；4 组合通过 |
+| FS-04 | `fs_04_space_and_unicode_path` | 完整路径含空格与中文（`数据 dir/文件 name.txt`）可打开并读出固定标签；4 组合通过 |
+| FS-05 | `fs_05_truncate_and_append` | `Write` 把 10 字节文件截断为 `xy`，`Append` 追加为 `xyz`；`Append` 可创建新文件；4 组合通过 |
+| FS-06 | `fs_06_state_machine_close_rebind_handoff` | `release`+`from_raw` 转交：`released=true first-open=false second-open=true` 且 Debug stderr 空；未关闭就重绑定：Debug 报告 1 个未关闭句柄、Release 不报告、exit 均为 0；显式关闭后退出无报告；4 组合通过 |
+
+### 修复前复现结果
+
+新功能先写回归：临时 `git stash push` 撤下 H19-03 的运行时/`std.io`/`std.fs` 改动后运行
+`cargo test -p dolphin-compiler --test m19_fs`，6 项全部失败，均为
+`unknown import std.fs.open`（日志 `/tmp/opencode/h19-03/pre-fix-fs.log`）。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m19_fs`：6 passed；`--features llvm` 同样 6 passed
+  （每例 Cranelift+LLVM × Debug/Release）。
+- 手工探针：读取/缺失/目录/NUL 分类正确；`.release`+`from_raw` 状态机符合规格；未关闭重绑定在
+  Debug 输出 `Dolphin: 1 open handle(s) not closed at exit`、Release 为空。
+- 完整门禁与发行包冒烟全绿（见下）。
+
+### 实际运行命令与测试数量
+
+```bash
+cargo test -p dolphin-compiler --test m19_fs                              # 6 passed
+cargo test -p dolphin-compiler --features llvm --test m19_fs              # 6 passed
+cargo test --workspace --exclude dolphin-codegen-llvm                     # 339 passed (333→339)
+cargo test --workspace --features llvm                                    # 346 passed (340→346)
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples \
+  --test m19_args --test m19_io --test m19_fs                             # 169 passed (163→169)
+cargo test -p dolphin-compiler --features llvm --test backend             # 4 passed
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features llvm \
+  -- -D warnings && git diff --check                                       # 全部通过
+# §5.3 / 发行包冒烟（本机 patchelf 隔离 venv）
+cargo build --release --bins
+./target/release/dc fmt --check examples crates/dolphin-std/src
+./target/release/dc run examples/m14|m15|m18                              # 固定输出、exit 0、stderr 空
+# 解压归档后按 ci.yml 冒烟序列（m8/m14/m15/m18、打包 m15math、坐标消费、--locked --offline）
+                                                                          # SMOKE_SEQUENCE_OK
+```
+
+日志与产物在 `/tmp/opencode/h19-03/`；`--test m19_fs` 已加入 `ci.yml` LLVM lane、README 与
+installation 的显式列表。
+
+### 未运行的检查及原因
+
+- macOS/Windows 本机未运行；`CreateFileW` 路径、目录识别与 Debug 句柄报告由远端 CI 三平台默认 lane
+  （`cargo test --workspace` 含 `m19_fs`）覆盖，本机不伪造。
+- 受控 `close(2)` 失败没有可移植注入方式（普通文件关闭不会失败）；用模式不匹配读写、Linux
+  `/dev/full` 写入失败、幂等重复关闭与 invalid 句柄覆盖，未伪造真实关闭失败（规格 §16 已注明）。
+- `dc test`（H19-05）、文本 builder/整数解析（H19-04）、真实 `dtext` 应用（H19-07）未实施。
+- tag/release 未触发。
+
+### 行为/兼容变化
+
+- 新增保留模块 `std.fs`；`std.io` 增加 `release`/`from_raw`（此前规格列出、实现留到本批）。
+- Debug 运行时新增未关闭自有流报告；不影响退出码，正常清理程序 stderr 仍为空。Release 不追踪。
+- 目录打开在 Unix/Windows 分别归入 `IsADirectory`/`InvalidArgument`；NUL 路径显式拒绝。无破坏性变更。
+
+### 剩余问题和下一批输入（H19-04）
+
+1. H19-04：文本与数值（TEXT-01..04）：行遍历/分割、`std.text.Builder`（增长式字符串，扩容后旧视图
+   失效）、`parse_i64`/`parse_u64`（空串/非法/溢出返回 `Result`，不走算术 trap）；不为 M19 加
+   HashMap/正则。
+2. 目标工具 `dtext` 的行/CRLF/无末尾换行规则见规格第 11 节；H19-04 的 Builder 是应用累积跨块行的
+   基础，需先定义 view 失效规则。
+3. 新测试文件 `tests/m19_fs.rs` 已进入显式列表；H19-04 新增文件同样要加入。
+4. 无阻塞；本报告不把 M19 记为完成。

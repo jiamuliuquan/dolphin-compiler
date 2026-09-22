@@ -2,14 +2,15 @@
 
 > 状态：H19-00 设计冻结产物。**除 H19-01 已实现的 `std.process` 参数/环境与
 > `dc run -- <应用参数>` 转发、H19-02 已实现的 `std.error` 与 `std.io` 标准流字节 I/O、
-> H19-03 已实现的 `std.fs` 文件打开与 `release`/`from_raw` 句柄转交外，本文其余 API 均未实现**；
+> H19-03 已实现的 `std.fs` 文件打开与 `release`/`from_raw` 句柄转交、H19-04 已实现的
+> `std.text.lines`/`Builder`/`parse_i64`/`parse_u64` 外，本文其余 API 均未实现**；
 > 未实现的条目不能写进“已实现功能”。
 > 实现顺序与验收编号见 [M18-M21 计划](plan-m18-plus.md) 第 5 节与本文“测试矩阵”。
 >
 > 前置：M18 已完成并通过阶段验收（[m18-progress](reports/m18-progress.md)）。
 >
-> 决策请求：D1–D3 已由用户于 2026-09-22 确认（见第 12 节）。H19-01 已解阻，但尚未派发；
-> 在收到 H19-01 批次指令前不开始编码。
+> 决策请求：D1–D3 已由用户于 2026-09-22 确认（见第 12 节）。H19-01..H19-04 已完成；
+> H19-05 及之后等待人工派发。
 
 ## 1. 范围与非目标
 
@@ -535,6 +536,47 @@ block/if 表达式、`?` 或异常。
 - 跨平台：三平台默认后端（Cranelift）与 Linux LLVM 均验证；路径含空格与 Unicode 的用例
   覆盖三平台。
 
+### 11.1 dtext 依赖的文本/数值 API（H19-04 实现，规格补充）
+
+H19-04 按上述目标程序补齐 `std.text` 的最小文本/数值能力；签名与拥有权在此冻结：
+
+```dolphin
+pub enum NumberError { Empty, InvalidDigit, Overflow }
+
+pub struct Lines { /* 私有字段 */ }
+impl Lines { pub fn init(storage: []const u8): Lines }
+impl Iterator for Lines { type Item = []const u8; }
+pub fn lines(bytes: []const u8): Lines
+
+pub struct Builder { /* 私有字段 */ }
+impl Builder {
+    pub fn init(): Builder
+    pub fn with_capacity(capacity: usize): Builder
+    pub fn len(self: *const Self): usize
+    pub fn is_empty(self: *const Self): bool
+    pub fn append(self: *Self, s: string)
+    pub fn append_bytes(self: *Self, bytes: []const u8)
+    pub fn view(self: *const Self): []const u8
+    pub fn consume(self: *Self, count: usize)
+    pub fn clear(self: *Self)
+    pub fn deinit(self: *Self)
+}
+
+pub fn parse_i64(s: string): Result<i64, NumberError>
+pub fn parse_u64(s: string): Result<u64, NumberError>
+```
+
+- `lines` 的规则与第 11 节 `dtext` 行定义逐字一致（`\n` 分隔、去掉紧邻 `\n` 前一个 `\r`、
+  孤立 `\r` 保留、无 `\n` 的非空尾段算一行、空输入 0 行）；产出**借用视图**、零分配、
+  不校验 UTF-8（调用方需要文本时用 `from_utf8`）。
+- `Builder` 是**拥有型**缓冲，`view()` 返回**借用视图**，在下一次
+  `append`/`append_bytes`/`consume`/`clear`/`deinit` 之后失效（扩容替换底层存储）；
+  构造中允许暂不完整的 UTF-8，因此 `view()` 是原始字节。长度和与扩容倍增溢出走 102
+  分配失败通道，不做算术 trap。
+- `parse_i64` 接受一个可选 `-`/`+`，`parse_u64` 只接受可选 `+`；随后必须至少有一位 ASCII
+  数字，无空白/下划线/进制前缀。溢出在乘加前检查并返回 `NumberError.Overflow`，不触发 101。
+- 测试矩阵 TEXT-01..04 见第 14 节；实现证据见 [M19 报告](reports/m19-progress.md) H19-04 节。
+
 ## 12. 需用户确认的最小决策请求
 
 | 编号 | 请求 | 推荐 | 确认结果 |
@@ -543,7 +585,8 @@ block/if 表达式、`?` 或异常。
 | D2 | 测试发现与运行约定：`tests/*.do` + `test_*` 自动发现（不新增 `[[test]]` 清单字段）、`target/test/` 输出、断言失败退出码 `106`、0 测试/过滤无匹配退出 1 | 按第 9 节冻结 | 2026-09-22 用户同意 |
 | D3 | M19 不新增语法（含 match 语句块）；保留 M14 defer 语义，用句柄状态机与显式 `close`/`release` 处理重绑定 | 按第 10 节冻结 | 2026-09-22 用户同意 |
 
-D1–D3 已确认；H19-01 及之后批次解阻，等待人工派发后实施。未派发前不开始编码。
+D1–D3 已确认；H19-01..H19-04 已实现（见 [M19 报告](reports/m19-progress.md)），
+H19-05 及之后批次等待人工派发后实施。未派发前不开始编码。
 
 ## 13. 运行时平台封装（源码入口与 ABI）
 
@@ -596,7 +639,8 @@ native code 是否存在，不绑定整段渲染文本。新测试文件必须�
 - **清单/持久格式**：`dolphin.toml` 不新增字段（D2 自动发现）；`dolphin.lock` 与 `.dlib`
   格式、`compiler-version` 精确匹配策略不变；`dc test` 不写锁以外的持久文件。
 - **资源模型**：`defer` 语义不变；新增的只是 `std.io`/`std.fs` 句柄状态机契约与
-  Debug open-handle 报告。既有 `mem.alloc/free`、`Vec`/`String`/`CString` 行为不变。
+  Debug open-handle 报告。既有 `mem.alloc/free`、`Vec`/`String`/`CString` 行为不变；
+  `std.text` 的 `Lines`/`Builder`/`parse_i64`/`parse_u64` 为纯增量（第 11.1 节）。
 - **退出码**：`101`–`104` 不变；新增 `106` 仅由 `std.test` 断言失败使用。清理失败不新增退出码。
 - **保留命名**：`std.process`/`std.io`/`std.fs`/`std.error`/`std.test` 成为保留的 std 模块名；
   用户模块本就不能占用 `std` 命名空间，无额外破坏。
@@ -604,7 +648,7 @@ native code 是否存在，不绑定整段渲染文本。新测试文件必须�
 
 ## 16. 未决与阻塞
 
-- D1、D2、D3 已于 2026-09-22 由用户确认；H19-01、H19-02、H19-03 已完成对应实现
+- D1、D2、D3 已于 2026-09-22 由用户确认；H19-01、H19-02、H19-03、H19-04 已完成对应实现
   （见 [M19 报告](reports/m19-progress.md)）。
 - H19-02 经用户确认把 unit-like 返回值从 `Result<(), Error>` 改为 `Result<bool, Error>`（当前语言
   无 Unit 值；`Result<Unit, E>` 会触发诊断），并修复了暴露的两个编译器缺陷（Unit payload 诊断、

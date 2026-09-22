@@ -433,3 +433,109 @@ installation 的显式列表。
    基础，需先定义 view 失效规则。
 3. 新测试文件 `tests/m19_fs.rs` 已进入显式列表；H19-04 新增文件同样要加入。
 4. 无阻塞；本报告不把 M19 记为完成。
+
+## H19-04 必要文本/数字处理
+
+- 批次：H19-04
+- 状态：完成（Linux x86_64；Cranelift/LLVM × Dolphin Debug/Release 本机；macOS/Windows 由远端 CI lane 覆盖，待平台确认）
+- 前置批次及报告：H19-03，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`21c3e35`（`v0.3.0-M19-03`），工作区干净。
+- 本批修改：`crates/dolphin-std/src/text.do`、`tests/m19_text.rs`（新）、
+  `.github/workflows/ci.yml`、`README.md`、`docs/installation.md`、`docs/implemented-features.md`、
+  `docs/proposal-m19-cli-stdlib.md`（新增 §11.1 与状态）、`docs/plan-m18-plus.md`、本报告。
+  未 commit/push/tag。
+
+### 修改文件与关键实现
+
+- `crates/dolphin-std/src/text.do`（纯增量，既有 `String`/`concat`/`substring`/`from_utf8`
+  等行为不变）：
+  - `Lines` + `lines(bytes: []const u8): Lines`：按 `\n` 切分，行内容去掉紧邻 `\n` 前的一个
+    `\r`（孤立 `\r` 保留），无 `\n` 的非空尾段算一行，空输入 0 行；`Iterator.Item = []const u8`
+    是借用视图，零分配、不做 UTF-8 校验（行边界是 ASCII 字节）。
+  - `Builder`（增长式字节缓冲）：`init`/`with_capacity`/`append(string)`/`append_bytes`/`len`/
+    `is_empty`/`view(): []const u8`/`consume(count)`/`clear`/`deinit`。`view()` 是借用视图，在下一次
+    `append*`/`consume`/`clear`/`deinit` 后失效（扩容替换底层存储）；构造中允许暂不完整的 UTF-8。
+    长度和/倍增溢出按 `Vec` 的既有模式走 102 分配失败通道，不做算术 trap。
+  - `NumberError{Empty, InvalidDigit, Overflow}`、`parse_i64`（可选 `-`/`+`）、`parse_u64`（可选 `+`）：
+    只接受 ASCII 数字，溢出在乘加前检查并返回 `Overflow`；负数直接按 i64 累积，使
+    `-9223372036854775808` 可表示且不触发 101。
+- `tests/m19_text.rs`：TEXT-01..04，每个用例在可用后端 × Dolphin Debug/Release 上构建，
+  断言固定 stdout、stderr 为空（Debug 同时覆盖 Builder 释放无泄漏与无句柄报告）、exit 0。
+
+### 验收映射
+
+| 验收点 | 测试名 | 期望与结果 |
+| --- | --- | --- |
+| TEXT-01 | `m19_text.rs::text_01_lines_crlf_no_final_newline` | 空串 0 行；`"a"`/`"a\n"` 1 行；`"a\n\n"` 2 行（含空行）；`"a\r\nb"` 去 CRLF；`"a\rb"` 保留孤立 `\r`；`"a\r\r\n"` 只去一个 `\r`；`"x\ny"` 尾行无换行仍计数；固定 stdout；4 组合通过 |
+| TEXT-02 | `text_02_utf8_boundaries` | `aé日` 字节长 6；合法区间切出 `é`/`日`；结束/开始/中间落在续字节 → `InvalidBoundary`；越界/逆序 → `OutOfBounds`；空区间成功；多字节行遍历保留原字节；`from_utf8` 对 `61 FF 62` 返回 Err；4 组合通过 |
+| TEXT-03 | `text_03_parse_signed_extremes_overflow` | i64 min/max 精确值；`+42`/`-0`；超界、超长、空串、仅符号、尾随/前导空白、`0x10`、`1_000` 全部返回对应 `NumberError`；u64 max 精确值、`+1` 成功、`-1` 非法；exit 0（无 101 trap）；4 组合通过 |
+| TEXT-04 | `text_04_builder_grow_and_deinit` | 2000 字节经多次扩容后 `from_utf8` 成功、长度/校验和固定；`consume(10)` 后首字节与长度固定；超量 `consume` 清空；清空后可复用；`with_capacity(4)` 扩容后内容 `abcdef`；跨两次 `append_bytes` 的 `é`（`C3`+`A9`）校验成功；Debug stderr 为空（deinit 无泄漏）；4 组合通过 |
+
+### 修复前复现结果
+
+新功能先写回归：`git stash push -- crates/dolphin-std/src/text.do` 撤下实现后运行
+`cargo test -p dolphin-compiler --test m19_text`，4 项全部失败，分别为
+`unknown import std.text.lines/Builder/NumberError`（日志 `/tmp/opencode/h19-04/pre-fix.log`）。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m19_text`：4 passed；`--features llvm` 同样 4 passed
+  （每例 Cranelift+LLVM × Debug/Release，stderr 为空）。
+- 手工探针（默认后端）：行切分、极值解析、Builder 扩容/consume/clear、跨块 UTF-8 校验结果
+  与固定期望一致；`-9223372036854775808` 输出精确，无 101/104。
+- 完整门禁与发行包冒烟全绿（见下）。
+
+### 实际运行命令与测试数量
+
+```bash
+cargo test -p dolphin-compiler --test m19_text                            # 4 passed
+cargo test -p dolphin-compiler --features llvm --test m19_text            # 4 passed
+cargo test --workspace --exclude dolphin-codegen-llvm                     # 343 passed (339→343)
+cargo test --workspace --features llvm                                    # 350 passed (346→350)
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples \
+  --test m19_args --test m19_io --test m19_fs --test m19_text             # 173 passed (169→173)
+cargo test -p dolphin-compiler --features llvm --test backend             # 4 passed
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features llvm \
+  -- -D warnings && git diff --check                                       # 全部通过
+# §5.3 / 发行包冒烟（本机 patchelf 隔离 venv）
+cargo build --release --bins
+./target/release/dc fmt --check examples crates/dolphin-std/src
+./target/release/dc run examples/m14|m15|m18                              # 固定输出、exit 0、stderr 空
+python3 scripts/package.py --target x86_64-unknown-linux-gnu --out-dir /tmp/opencode/h19-04/dist
+# 解压归档后按 ci.yml 冒烟序列（m8/m14/m15/m18、打包 m15math、坐标消费、--locked --offline）
+                                                                          # SMOKE_SEQUENCE_OK
+```
+
+日志与产物在 `/tmp/opencode/h19-04/`；`--test m19_text` 已加入 `ci.yml` LLVM lane、README 与
+installation 的显式列表。
+
+### 未运行的检查及原因
+
+- macOS/Windows 本机未运行；本批是纯 Dolphin 源码标准库与测试改动，无平台分支/运行时改动，
+  由远端 CI 三平台默认 lane（`cargo test --workspace` 含 `m19_text`）覆盖，本机不伪造。
+- 无受控“视图失效后使用旧视图”测试：语言无 use-after-free 检测，直接读旧视图是未定义行为；
+  规格只冻结契约并测试扩容后新视图正确（TEXT-04），不把未定义行为纳入保证。
+- `dc test`（H19-05）、真实 `dtext` 应用（H19-07）未实施；`Builder.consume` 的 O(n) 前缀搬移
+  在 H19-07 应用循环中按“每块一次 consume”使用，未在本批做性能测量。
+- tag/release 未触发。
+
+### 行为/兼容变化
+
+- `std.text` 纯增量：新增 `Lines`/`lines`/`Builder`/`NumberError`/`parse_i64`/`parse_u64`；
+  既有 `String`/`CString`/`concat`/`trim`/`substring`/`from_utf8`/查询函数行为不变。
+- 无 IR/layout/lower/runtime 改动；两个后端使用同一份源码标准库，TEXT-01..04 均在
+  Cranelift 与 LLVM × Debug/Release 上通过。
+
+### 剩余问题和下一批输入（H19-05）
+
+1. H19-05 必须按规格 §9.2 拆为 H19-05a（`dc test` 命令与 `target/test/` 产物）、H19-05b
+   （`tests/*.do` + `test_*` 发现与 harness、可见性）、H19-05c（子进程执行、超时、汇总），
+   分别交接，不合并为一次实现。
+2. 本批已提供应用累积跨块行的 Builder 与行规则；H19-07 的 `dtext` 使用 `Builder.view()` +
+   `consume` 处理完整行，并在 `from_utf8` 校验失败时报 `dtext: invalid UTF-8`（退出 1）。
+3. 新测试文件 `tests/m19_text.rs` 已进入显式列表；H19-05 新增文件同样要加入。
+4. 无阻塞；本报告不把 M19 记为完成。

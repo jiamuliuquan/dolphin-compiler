@@ -919,7 +919,8 @@ dolphin_runtime_finish
   `PackageId::STD`；`std.mem` 仍是无源码的内建入口。用户模块不能占用 `std` 命名空间。
 - **模块与 API**：`std`（`Option`/`Result`/`Iterator`）、`std.collections`（`Vec<T>`、`SliceIter<T>`、
   `Range`）、`std.text`（`String`、`concat`/`trim`/`substring`/`starts_with`/`ends_with`/`contains`/
-  `from_utf8`、`TextError`）、`std.ffi`（`CString`、`CStringError`）、`std.process`（进程参数与环境，
+  `from_utf8`、`TextError`、H19-04 的 `lines`/`Builder`/`parse_i64`/`parse_u64`/`NumberError`）、
+  `std.ffi`（`CString`、`CStringError`）、`std.process`（进程参数与环境，
   H19-01）、`std.error` 与 `std.io`（错误类别与标准流字节 I/O，H19-02）、`std.fs`（文件打开与模式，
   H19-03）。
 - **导入与 prelude**：`use std.mem;`、`use std.text;`、`use std.collections.Vec;` 与类型导入；
@@ -955,6 +956,14 @@ dolphin_runtime_finish
   路径含内部 NUL 在调用运行时前返回 `InvalidArgument`；Windows UTF-8→UTF-16 失败同样报错。
   句柄是自有资源：`close` 幂等，重绑定前必须 `close`/`release`；Debug 运行时在退出收尾报告
   未关闭的自有流（`Dolphin: N open handle(s) not closed at exit`，退出码不变），借用标准流不计入。
+- **`std.text` 文本/数值（H19-04）**：`lines(bytes: []const u8): Lines` 按 `\n` 切分，去掉紧邻
+  `\n` 前的一个 `\r`，孤立 `\r` 保留，无 `\n` 的非空尾段算一行，空输入 0 行；产出 `[]const u8`
+  **借用视图**、零分配、不校验 UTF-8。`Builder` 是**拥有型**增长缓冲：`init`/`with_capacity`/
+  `append(string)`/`append_bytes([]const u8)`/`len`/`is_empty`/`view`/`consume`/`clear`/`deinit`；
+  `view(): []const u8` 是借用视图，在下一次 `append*`/`consume`/`clear`/`deinit` 后失效（扩容会
+  替换底层存储），构造中允许暂不完整的 UTF-8，转文本前用 `from_utf8` 校验；长度和/倍增溢出走
+  102，不做算术 trap。`parse_i64`/`parse_u64` 只接受可选 `+`（`parse_i64` 还可选 `-`）与 ASCII
+  数字，`NumberError{Empty, InvalidDigit, Overflow}` 在乘加前检查溢出，不触发 101。
 - **所有权边界**：容器赋值/元素读取/Vec.clone 是浅复制；clear/deinit 不递归释放拥有型元素。`Vec<String>` 等需按 API 契约逐元素释放；view 不延长缓冲寿命，可写 deinit 的接收者应为 var。
 - **`Unit` 约束（H19-02）**：`Unit` 没有运行时值，不能作为 struct 字段或 enum payload 按值存储；
   实例化时给出诊断，不再在 codegen 内部 panic。

@@ -1239,3 +1239,171 @@ cargo build --release --bins                                      # 通过
    若远端 Windows lane 在此期间运行过，应同样失败。建议核对远端 lane 状态，不要把“由远端 CI
    lane 覆盖”当作已通过。
 4. Windows 已复验；M19 阶段待 macOS 结果后由用户确认完成。
+
+## H19-07-M macOS 平台复验
+
+- 批次：H19-07 的 macOS 平台复验（补充节，不新增批次编号；含 2 个 macOS 受控读写失败用例新增）
+- 状态：完成（macOS 26.6.2 arm64 本机：默认 Cranelift lane、M19 定向套件、`examples/m19` 手工冒烟、
+  LLVM 22 lane、aarch64 发行包与归档冒烟全部通过；**未发现 macOS 编译器/运行时/标准库缺陷**；
+  M18 已记录的 rust-lld/libLLVM 环境前提再次复现，见下；远端 CI/tag 未运行）
+- 前置批次及报告：H19-07-W，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`36f0042`（`v0.3.0-M19-07-win`），工作区干净。
+- 本批修改：`tests/m19_app.rs`（新增 2 个非 Linux Unix 受控读写失败用例）、`docs/plan-m18-plus.md`、
+  本报告。**无编译器/运行时/标准库/示例/CI 源码改动**。未 commit/push/tag。
+
+### 环境
+
+| 项 | 值 |
+| --- | --- |
+| 平台 | macOS 26.6.2（25G83），arm64（Apple Silicon） |
+| rustc / cargo | 1.98.1（host `aarch64-apple-darwin`） |
+| C 编译器 | Apple clang 21.0.0（`/Library/Developer/CommandLineTools`） |
+| LLVM 22 dev | `/opt/homebrew/opt/llvm@22`（22.1.8，`libPolly.a` 存在）；默认 lane 不依赖 |
+| 验证用 `dc` | `cargo build --release --bins`（HEAD + 本节测试改动）与打包后的
+  `dolphin-0.3.0-aarch64-apple-darwin.tar.gz` |
+
+### 环境前提：rust-lld/libLLVM（M18 已记录，无新增源码改动）
+
+不带 dyld 回退直接运行时，`dc` 链接每个 Dolphin 程序都失败：
+
+```text
+error[E0000]: linking `<...>/dtext` failed
+dyld[...]: Library not loaded: @rpath/libLLVM.dylib
+  Referenced from: .../.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-lld
+```
+
+根因与 H18-09-M 节相同：Rust 1.96+ 的 rustup `rust-lld` 动态依赖 `@rpath/libLLVM.dylib`，其 rpath
+指向官方构建机路径，而库实际在 `$(rustc --print sysroot)/lib`。按 H18-09-M 已批准的本机做法，
+本节所有命令均带（CI 的 macOS 步骤等价处理）：
+
+```bash
+export DYLD_FALLBACK_LIBRARY_PATH="$(rustc --print sysroot)/lib"
+```
+
+发行包不受影响：`scripts/package.py` 复制 `libLLVM.dylib` 并给 `rust-lld` 追加 `@loader_path`
+rpath；归档冒烟用 `env -u DYLD_FALLBACK_LIBRARY_PATH ./dc env` 证明不依赖 rustup 工具链。
+
+### 修改文件与关键实现
+
+- `tests/m19_app.rs`（仅测试，无产品代码）：
+  - `app_06b_write_failure_readonly_stdout`（`#[cfg(all(unix, not(target_os = "linux")))]`）：
+    stdout 绑定只读 fd，`write_all` 失败 → exit 1、stderr `dtext: cannot write output (other)\n`、
+    不 trap。Linux 已有 `/dev/full` 用例，排除 Linux 保持既有矩阵计数不变。
+  - `app_06c_read_failure_writeonly_stdin`（同 cfg）：stdin 绑定只写 fd，`read` 失败 → exit 1、
+    stdout 空、stderr `dtext: cannot read input (other)\n`、不 trap。这是“可控读失败”的第一个可移植
+    注入（H19-07 Linux 节曾如实标注该路径无注入方式）。
+  - 两个用例都在可用后端 × Dolphin Debug/Release 上 `dc build --bin dtext` 后运行，断言三路结果。
+
+### 验收映射（macOS）
+
+| 验收点 | 真实测试名/命令 | 后端/profile | 结果 |
+| --- | --- | --- | --- |
+| 布局/D1 + `--help` | `m19_app.rs::app_01_layout_build_and_help` | Cranelift × Debug/Release | 4 组合通过 |
+| stdin 行规则/IO/ARGS/TEXT | `app_02_stdin_and_line_rules` | Cranelift × Debug/Release | 4 组合通过（空输入、正常 UTF-8、无末尾换行、无匹配、CRLF、Unicode、`-`） |
+| FS/TEXT 文件 + 重复运行 | `app_03_file_input_and_repeated_runs` | Cranelift × Debug/Release | 4 组合通过（空格/中文路径；Debug 连跑 5 次 stderr 空） |
+| 用法错误 | `app_04_usage_errors` | Cranelift × Debug/Release | 4 组合通过（exit 2 + 固定 stderr） |
+| 打开/编码错误 | `app_05_open_and_encoding_errors` | Cranelift × Debug/Release | 4 组合通过（缺失 `not-found`、目录 `is-dir`、非法 UTF-8） |
+| 可控写失败（Linux `/dev/full`） | `app_06_write_failure_not_trap` | — | macOS 按 cfg 跳过；由 `app_06b` 覆盖 |
+| **可控写失败（macOS 新增）** | `app_06b_write_failure_readonly_stdout` | Cranelift × Debug/Release | 4 组合通过 |
+| **可控读失败（macOS 新增）** | `app_06c_read_failure_writeonly_stdin` | Cranelift × Debug/Release | 4 组合通过 |
+| 应用自测 | `app_07_dc_test_self_checks` | Cranelift × Debug/Release | 4 组合通过（两包各 `5 passed; 0 failed; 0 filtered out`） |
+| ARGS-01..04 | `m19_args.rs` 4 项 | Cranelift × Debug/Release | 4 passed |
+| IO-01..04 | `m19_io.rs` 4 项 | Cranelift × Debug/Release | 4 passed（IO-03 的 `/dev/full` 子用例 Linux-only） |
+| FS-01..06 | `m19_fs.rs` 6 项 | Cranelift × Debug/Release | 6 passed（FS-03 的 `/dev/full` 子用例 Linux-only） |
+| TEXT-01..04 | `m19_text.rs` 4 项 | Cranelift × Debug/Release | 4 passed |
+| TEST-01..06 | `m19_test_cmd.rs` 12 项 | Cranelift × Debug/Release | 12 passed（60.3s，含 30s 超时用例） |
+| ERR-01..04 | `m19_errors.rs` 4 项 | Cranelift × Debug/Release | 4 passed |
+| 默认 lane 全量 | `cargo test --workspace --exclude dolphin-codegen-llvm` | Cranelift | 367 passed / 0 failed |
+| LLVM lane 显式列表 | `DOLPHIN_BACKEND=llvm ... --features llvm` | Cranelift+LLVM × Debug/Release | 197 passed / 0 failed（`app_06` 除外） |
+| LLVM lane 全量 | `DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm` | 两后端 | 374 passed / 0 failed |
+| 后端一致性 | `cargo test -p dolphin-compiler --features llvm --test backend` | Cranelift+LLVM × Debug/Release | 4 passed（含 macOS DWARF 平台感知断言） |
+| 发行包 | `scripts/package.py --target aarch64-apple-darwin` + 归档冒烟 | 归档 `dc`（默认） | tar.gz + sha256；`SMOKE_SEQUENCE_OK` |
+
+### 修复前复现结果
+
+- 无生产缺陷可修。第一次（不带环境变量）运行 `cargo test -p dolphin-compiler --test m19_app`：
+  `0 passed; 6 failed`，全部为上面的 rust-lld/libLLVM 链接诊断；带已批准的环境变量后同一命令全绿，
+  这是环境前提而非 macOS 语义缺陷。
+- 新增用例首次运行：`app_06c` 的 fixture 用 `.write(true)` 打开不存在的文件，测试自身报
+  `Os { code: 2, kind: NotFound }`；加 `.create(true).truncate(true)` 后通过（缺陷在测试代码，不在产品）。
+  `app_06b` 首次即通过。
+- 负向探针（Python `os.open` 以只读/只写 fd 作为 stdout/stdin）确认失败路径由受控 I/O 失败触发：
+  read-only stdout → `dtext: cannot write output (other)` exit 1；write-only stdin →
+  `dtext: cannot read input (other)` exit 1、stdout 空。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m19_app`：8 passed（默认）；`--features llvm` 同样 8 passed
+  （每例 Cranelift+LLVM × Debug/Release）。
+- 手工冒烟（release `dc`，临时副本）：66/66 断言通过——plain `dc build` 拒绝 path 依赖（D1）、
+  `--bin` Debug/Release 构建、`--help`、stdin 全部行规则、空格+中文路径连跑 5 次 stderr 空、
+  4 类用法错误、缺失/目录/非法 UTF-8、两包 `dc test` 各 5 passed。
+- 发行包归档冒烟通过：m8（exit 64）、m14/m15/m18 固定输出且 stderr 空、m19 plain 拒绝 path 依赖 +
+  `--bin` 构建运行固定输出、两包 `dc test` 5+5、m15math 打包、坐标消费与 `--locked --offline` 重建。
+- fmt/clippy（默认与 `--features llvm`）/`git diff --check` 全部通过；无警告（带环境变量时
+  `rust-objcopy` strip 也不告警）。
+
+### 实际运行命令与测试数量
+
+```bash
+# 所有命令均带 export DYLD_FALLBACK_LIBRARY_PATH="$(rustc --print sysroot)/lib"
+cargo build --bins                                                      # 通过
+cargo test -p dolphin-compiler --test m19_app                           # 8 passed
+cargo test -p dolphin-compiler --features llvm --test m19_app           # 8 passed
+cargo test -p dolphin-compiler --test m19_args --test m19_io --test m19_fs \
+  --test m19_text --test m19_errors --test m19_test_cmd                 # 4+4+6+4+4+12 passed
+cargo test --workspace --exclude dolphin-codegen-llvm                   # 367 passed
+cargo fmt --all -- --check                                              # 通过
+cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings  # 通过
+cargo build --release --bins                                            # 通过
+./target/release/dc fmt --check examples crates/dolphin-std/src         # exit 0
+cargo test -p dolphin-compiler --features llvm --test backend           # 4 passed
+cargo clippy --workspace --all-targets --features llvm -- -D warnings   # 通过
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples \
+  --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd \
+  --test m19_errors --test m19_app                                      # 197 passed
+DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm        # 374 passed
+python3 scripts/package.py --target aarch64-apple-darwin --out-dir /tmp/opencode/h19-07-mac/dist
+#   tar.gz sha256 3958736335daaf10625bea97e39dd0ed6e499f6437db95036deeb70b1cbe2ffc
+# 解压归档后按 ci.yml 冒烟序列（m8/m14/m15/m18/m19、m15math 打包、坐标消费、--locked --offline）
+#   + m19 两包 dc test 5+5                                              # SMOKE_SEQUENCE_OK
+```
+
+日志与产物在 `/tmp/opencode/h19-07-mac/`（`m19_app.log`、`m19_suites.log`、`workspace-test*.log`、
+`llvm-*.log`、`package.log`、`smoke*.log`、`archive-smoke.log`、`dist/`），不在仓库内。
+新增用例属于已在 CI/README/installation 显式列表中的 `tests/m19_app.rs`，无需改 `--test` 列表。
+
+### 未运行的检查及原因
+
+- 远端 CI/tag：本机无 push/tag，未运行。
+- Windows zip 归档冒烟不在本机范围（H19-07-W 已注明仍待 runner/后续补充）。
+- LLVM lane：macOS 的 LLVM lane 不在 `ci.yml` 矩阵内（CI 的 LLVM lane 只要求 Ubuntu），
+  本机用 `/opt/homebrew/opt/llvm@22` 补跑不改变 CI 覆盖面；`llvm-config` 不在 PATH，按前缀显式指定。
+- 受控 `close(2)` 失败与 `EINTR` 注入仍无可移植方式（同 FS-03/规格 §16）。
+- `/dev/full` 子用例（`app_06`、IO-03、FS-03 的对应子用例）在 macOS 按冻结预期跳过；
+  macOS 的写失败由 `app_06b`、读失败由 `app_06c` 实际覆盖。
+- SIGPIPE（下游提前关闭管道）行为未测试：规格未要求，Linux 行为相同。
+- `--system-linker` 与 `dc test` 组合未单独运行（选项与 build 共用，链接器行为已由既有测试覆盖）。
+
+### 行为/兼容变化
+
+- 无产品行为变化；仅新增 2 个 `#[cfg(all(unix, not(target_os = "linux")))]` 测试，Linux 与 Windows 的
+  测试矩阵计数不变（新用例在两个平台不编译）。
+- macOS 复验未发现需要修改 `runtime/unix_runtime.c`、标准库、CLI 或链接器的缺陷；
+  H19-07-W 的 Windows 修复在 macOS 无回归（Unix 运行时未被触碰）。
+- `tests/m19_app.rs` 的新用例进入默认与 LLVM lane：macOS 默认 lane 365→367、LLVM 全量 372→374、
+  LLVM 显式列表 195→197。
+
+### 剩余问题和下一批输入
+
+1. Linux、Windows、macOS 三平台 H19-07 复验均已完成（Linux/Windows 证据见前两节）；M19 阶段待用户
+   确认完成后进入 M20。
+2. 下一阶段 M20：先执行 H20-00 设计冻结（新建 `docs/proposal-m20-project-tools.md`），
+   不提前实现项目分析或 LSP 代码。
+3. macOS 本机开发若不带 `DYLD_FALLBACK_LIBRARY_PATH`，`dc` 链接仍会失败（M18 已记录、CI 已处理）；
+   发行包不受影响。该环境项不是 M19 的产品缺陷，未在本批改产品代码。
+4. 本报告不把 M19 阶段记为完成；macOS 结果已出，等待用户确认。

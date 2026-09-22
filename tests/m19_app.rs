@@ -401,6 +401,87 @@ fn app_06_write_failure_not_trap() {
     }
 }
 
+/// 受控写失败（非 Linux Unix）：stdout 是只读描述符时 write 失败返回 1 + 固定诊断，不 trap。
+/// Linux 已由 `/dev/full` 用例覆盖，Windows 无同等可移植注入方式（如实标注，不伪造）。
+#[test]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn app_06b_write_failure_readonly_stdout() {
+    for backend in support::backends() {
+        for release in [false, true] {
+            let app = App::new("write-ro");
+            let context = format!("backend={} release={release}", backend.name());
+            assert_built(&app, backend.name(), release);
+
+            let file = app.root.join("input.txt");
+            fs::write(&file, b"a\n").expect("fixture");
+            let sink = app.root.join("readonly-stdout");
+            fs::write(&sink, b"").expect("fixture");
+            let readonly = fs::OpenOptions::new()
+                .read(true)
+                .open(&sink)
+                .expect("read-only stdout");
+            let output = Command::new(app.executable())
+                .arg(file.to_str().unwrap())
+                .stdout(Stdio::from(readonly))
+                .stderr(Stdio::piped())
+                .output()
+                .expect("dtext should run");
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{context} stderr={}",
+                stderr_text(&output)
+            );
+            assert_eq!(
+                stderr_text(&output),
+                "dtext: cannot write output (other)\n",
+                "{context}"
+            );
+        }
+    }
+}
+
+/// 受控读失败（非 Linux Unix）：stdin 是只写描述符时 read 失败返回 1 + 固定诊断，不 trap；
+/// 统计输出为零字节，失败不被吞掉也不变成 trap。Windows 不适用（如实标注）。
+#[test]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn app_06c_read_failure_writeonly_stdin() {
+    for backend in support::backends() {
+        for release in [false, true] {
+            let app = App::new("read-wo");
+            let context = format!("backend={} release={release}", backend.name());
+            assert_built(&app, backend.name(), release);
+
+            let sink = app.root.join("writeonly-stdin");
+            let writeonly = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&sink)
+                .expect("write-only stdin");
+            let output = Command::new(app.executable())
+                .stdin(Stdio::from(writeonly))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .expect("dtext should run");
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{context} stdout={} stderr={}",
+                stdout_text(&output),
+                stderr_text(&output)
+            );
+            assert!(output.stdout.is_empty(), "{context} stdout");
+            assert_eq!(
+                stderr_text(&output),
+                "dtext: cannot read input (other)\n",
+                "{context}"
+            );
+        }
+    }
+}
+
 /// 两个示例包各自的 `dc test` 全部通过（应用测试实际消费 path 依赖的公开泛型/核心 API）。
 #[test]
 fn app_07_dc_test_self_checks() {

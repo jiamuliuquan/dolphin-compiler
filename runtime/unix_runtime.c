@@ -263,6 +263,97 @@ void dolphin_check_utf8(const uint8_t *bytes, uintptr_t length) {
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * 进程参数与环境（M19/H19-01）。
+ *
+ * 生成的 C 入口 `main(i32, void *)` 在函数入口调用 `dolphin_init_args`，因此
+ * `dolphin_argv` 指向进程原始 argv，视图有效到进程结束。错误类别编号与
+ * 规格 `std.error.ErrorKind` 的稳定判别值一致（0..6）。
+ * ------------------------------------------------------------------------- */
+
+#define DOLPHIN_ERR_OTHER 0
+#define DOLPHIN_ERR_NOT_FOUND 1
+#define DOLPHIN_ERR_PERMISSION 2
+#define DOLPHIN_ERR_IS_DIR 3
+#define DOLPHIN_ERR_INVALID 4
+#define DOLPHIN_ERR_NOT_OWNED 5
+#define DOLPHIN_ERR_CLOSED 6
+
+static int dolphin_error_kind = 0;
+static int dolphin_error_code = 0;
+
+static void dolphin_set_error(int kind, int code) {
+    dolphin_error_kind = kind;
+    dolphin_error_code = code;
+}
+
+static int dolphin_argc = 0;
+static char **dolphin_argv = NULL;
+
+void dolphin_init_args(int argc, char **argv) {
+    dolphin_argc = argc;
+    dolphin_argv = argv;
+    dolphin_set_error(DOLPHIN_ERR_OTHER, 0);
+}
+
+uintptr_t dolphin_arg_count(void) {
+    return (uintptr_t)dolphin_argc;
+}
+
+const uint8_t *dolphin_arg(uintptr_t index, uintptr_t *out_len) {
+    if (dolphin_argv == NULL || index >= (uintptr_t)dolphin_argc) {
+        dolphin_set_error(DOLPHIN_ERR_NOT_FOUND, 0);
+        return NULL;
+    }
+    const char *argument = dolphin_argv[index];
+    size_t length = strlen(argument);
+    if (!dolphin_is_valid_utf8((const uint8_t *)argument, (uintptr_t)length)) {
+        dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+        return NULL;
+    }
+    *out_len = (uintptr_t)length;
+    return (const uint8_t *)argument;
+}
+
+const uint8_t *dolphin_env(const uint8_t *name, uintptr_t name_len, uintptr_t *out_len) {
+    char stack_buffer[256];
+    char *buffer = stack_buffer;
+    if (name_len + 1 > sizeof(stack_buffer)) {
+        buffer = (char *)malloc((size_t)name_len + 1);
+        if (buffer == NULL) {
+            dolphin_set_error(DOLPHIN_ERR_OTHER, 0);
+            return NULL;
+        }
+    }
+    if (name_len > 0) {
+        memcpy(buffer, name, (size_t)name_len);
+    }
+    buffer[name_len] = '\0';
+    const char *value = getenv(buffer);
+    if (buffer != stack_buffer) {
+        free(buffer);
+    }
+    if (value == NULL) {
+        dolphin_set_error(DOLPHIN_ERR_NOT_FOUND, 0);
+        return NULL;
+    }
+    size_t length = strlen(value);
+    if (!dolphin_is_valid_utf8((const uint8_t *)value, (uintptr_t)length)) {
+        dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+        return NULL;
+    }
+    *out_len = (uintptr_t)length;
+    return (const uint8_t *)value;
+}
+
+int dolphin_last_error_kind(void) {
+    return dolphin_error_kind;
+}
+
+int dolphin_last_error_code(void) {
+    return dolphin_error_code;
+}
+
 void dolphin_print_string(const char *data, uintptr_t length) {
     dolphin_write_all(data, (size_t)length);
 }

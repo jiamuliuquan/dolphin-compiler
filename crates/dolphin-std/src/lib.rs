@@ -16,4 +16,9 @@ pub const UNITS: &[(&str, &str, &str)] = &[
     ),
     ("std.text", "<std>/text.do", include_str!("text.do")),
     ("std.ffi", "<std>/ffi.do", include_str!("ffi.do")),
+    (
+        "std.process",
+        "<std>/process.do",
+        include_str!("process.do"),
+    ),
 ];

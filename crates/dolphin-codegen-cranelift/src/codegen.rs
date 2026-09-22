@@ -167,6 +167,7 @@ struct RuntimeIds {
     check_utf8: FuncId,
     check_align: FuncId,
     check_view: FuncId,
+    init_args: FuncId,
     finish: FuncId,
 }
 
@@ -266,6 +267,12 @@ fn declare_runtime_functions(
         check_utf8: declare(module, platform, "dolphin_check_utf8", &[pointer, pointer])?,
         check_align: declare(module, platform, "dolphin_check_align", &[pointer, pointer])?,
         check_view: declare(module, platform, "dolphin_check_view", &[pointer, pointer])?,
+        init_args: declare(
+            module,
+            platform,
+            "dolphin_init_args",
+            &[types::I32, pointer],
+        )?,
         finish: declare(module, platform, "dolphin_runtime_finish", &[])?,
     })
 }
@@ -470,6 +477,7 @@ fn define_function(
         check_utf8: module.declare_func_in_func(runtime_ids.check_utf8, &mut context.func),
         check_align: module.declare_func_in_func(runtime_ids.check_align, &mut context.func),
         check_view: module.declare_func_in_func(runtime_ids.check_view, &mut context.func),
+        init_args: module.declare_func_in_func(runtime_ids.init_args, &mut context.func),
         finish: module.declare_func_in_func(runtime_ids.finish, &mut context.func),
     };
     let string_refs: HashMap<String, GlobalValue> = strings
@@ -515,6 +523,15 @@ fn define_function(
             pointer_type,
             shape,
         );
+
+        if program.main == Some(function.id) {
+            // 入口是 C 的 `main(i32 argc, void *argv)`：把原始 argc/argv 交给
+            // 运行时，供 `std.process` 读取（Unix 直接保存字节 argv）。
+            let values = builder.block_params(entry).to_vec();
+            builder
+                .ins()
+                .call(runtime_refs.init_args, &[values[0], values[1]]);
+        }
 
         for (index, ir_block) in function.blocks.iter().enumerate() {
             if index != function.entry.0 {
@@ -722,6 +739,7 @@ struct RuntimeRefs {
     check_utf8: FuncRef,
     check_align: FuncRef,
     check_view: FuncRef,
+    init_args: FuncRef,
     finish: FuncRef,
 }
 

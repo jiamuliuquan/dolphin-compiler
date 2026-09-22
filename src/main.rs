@@ -36,7 +36,7 @@ enum Commands {
     Build(BuildArgs),
 
     /// Compile and execute the program
-    Run(BuildArgs),
+    Run(RunArgs),
 
     /// Produce a `.dlib` library package from the current library target
     Package(ProjectArgs),
@@ -170,6 +170,17 @@ struct BuildArgs {
     /// Do not access HTTP(S) repositories
     #[arg(long)]
     offline: bool,
+}
+
+/// `dc run` 的参数：编译选项 + `--` 之后原样转发给应用（H19-01）。
+#[derive(Args)]
+struct RunArgs {
+    #[command(flatten)]
+    build: BuildArgs,
+
+    /// Application arguments after `--`, passed through unchanged
+    #[arg(last = true)]
+    app_args: Vec<std::ffi::OsString>,
 }
 
 impl BuildArgs {
@@ -335,6 +346,8 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Run(args) => {
+            let app_args = args.app_args;
+            let args = args.build;
             if args.lib {
                 return Err((
                     "`--lib` builds a library; use `dc run --bin <name>` for an executable"
@@ -364,7 +377,7 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
                     settings,
                 )
                 .map_err(|error| (error.to_string(), color))?;
-                return run_executable(&artifact);
+                return run_executable(&artifact, &app_args);
             };
             let profile = BuildProfile::resolve(&manifest, explicit);
             let resolved = resolve_project(&manifest, args.resolve_options())
@@ -384,7 +397,7 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
                 ));
             }
             let artifact = select_run_target(&artifacts, color)?;
-            run_executable(artifact)
+            run_executable(artifact, &app_args)
         }
         Commands::Package(args) => {
             let input = args.input.unwrap_or_else(|| PathBuf::from("."));
@@ -616,9 +629,13 @@ fn print_info(manifest: &Manifest) {
     println!("optimization: {}", manifest.build.optimization);
 }
 
-/// 运行一个已构建的可执行文件并映射退出码。
-fn run_executable(artifact: &BuildArtifact) -> Result<ExitCode, (String, ColorMode)> {
+/// 运行一个已构建的可执行文件并映射退出码；`--` 之后的参数原样转发。
+fn run_executable(
+    artifact: &BuildArtifact,
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitCode, (String, ColorMode)> {
     let status = Command::new(&artifact.executable)
+        .args(app_args)
         .status()
         .map_err(|error| {
             (

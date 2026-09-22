@@ -4,6 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include <shellapi.h>
+
+// M19/H19-01：`CommandLineToArgvW` 取自 shell32；用默认库指令让 MSVC 对象
+// 带上依赖，rust-lld（COFF）与 link.exe 都会按 /DEFAULTLIB 解析。
+#pragma comment(lib, "shell32.lib")
 
 #define DOLPHIN_EXIT_TRAP 101
 #define DOLPHIN_EXIT_ALLOC 102
@@ -267,6 +272,177 @@ extern "C" void dolphin_check_utf8(const uint8_t *bytes, uintptr_t length) {
     if (!dolphin_is_valid_utf8(bytes, length)) {
         dolphin_exit_with(DOLPHIN_EXIT_UTF8, "Dolphin runtime error: invalid UTF-8\n");
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * 进程参数与环境（M19/H19-01）。
+ *
+ * Windows 的 CRT `main` 只提供 ANSI argv，会丢失非 ANSI 字符；这里改用
+ * `GetCommandLineW` + `CommandLineToArgvW` 取宽字符参数并惰性转成 UTF-8 缓存，
+ * 视图有效到进程结束。环境表由 `GetEnvironmentStringsW` 同样转换。
+ * 错误类别编号与规格 `std.error.ErrorKind` 的稳定判别值一致（0..6）。
+ * ------------------------------------------------------------------------- */
+
+#define DOLPHIN_ERR_OTHER 0
+#define DOLPHIN_ERR_NOT_FOUND 1
+#define DOLPHIN_ERR_PERMISSION 2
+#define DOLPHIN_ERR_IS_DIR 3
+#define DOLPHIN_ERR_INVALID 4
+#define DOLPHIN_ERR_NOT_OWNED 5
+#define DOLPHIN_ERR_CLOSED 6
+
+static int dolphin_error_kind = 0;
+static int dolphin_error_code = 0;
+
+static void dolphin_set_error(int kind, int code) {
+    dolphin_error_kind = kind;
+    dolphin_error_code = code;
+}
+
+/// 把宽字符串转为 UTF-8（含结尾 NUL）；非法 UTF-16 返回 NULL。
+static char *dolphin_utf16_to_utf8(const wchar_t *text) {
+    int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, NULL, 0, NULL, NULL);
+    if (needed <= 0) {
+        return NULL;
+    }
+    char *converted = (char *)malloc((size_t)needed);
+    if (converted == NULL) {
+        return NULL;
+    }
+    int written = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, converted, needed,
+                                      NULL, NULL);
+    if (written != needed) {
+        free(converted);
+        return NULL;
+    }
+    return converted;
+}
+
+static char **dolphin_utf8_args = NULL;
+static int *dolphin_utf8_arg_valid = NULL;
+static int dolphin_utf8_argc = 0;
+static int dolphin_args_ready = 0;
+
+static void dolphin_build_args(void) {
+    if (dolphin_args_ready) {
+        return;
+    }
+    dolphin_args_ready = 1;
+    int argc = 0;
+    wchar_t **wide = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (wide == NULL || argc <= 0) {
+        return;
+    }
+    dolphin_utf8_args = (char **)calloc((size_t)argc, sizeof(char *));
+    dolphin_utf8_arg_valid = (int *)calloc((size_t)argc, sizeof(int));
+    if (dolphin_utf8_args == NULL || dolphin_utf8_arg_valid == NULL) {
+        LocalFree(wide);
+        return;
+    }
+    dolphin_utf8_argc = argc;
+    for (int index = 0; index < argc; index += 1) {
+        char *converted = dolphin_utf16_to_utf8(wide[index]);
+        dolphin_utf8_args[index] = converted;
+        dolphin_utf8_arg_valid[index] = converted != NULL;
+    }
+    LocalFree(wide);
+}
+
+/// 保存入口参数。Windows 参数从宽字符 API 读取，因此忽略 ANSI argv。
+extern "C" void dolphin_init_args(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    dolphin_set_error(DOLPHIN_ERR_OTHER, 0);
+}
+
+extern "C" uintptr_t dolphin_arg_count(void) {
+    dolphin_build_args();
+    return (uintptr_t)dolphin_utf8_argc;
+}
+
+extern "C" const uint8_t *dolphin_arg(uintptr_t index, uintptr_t *out_len) {
+    dolphin_build_args();
+    if (index >= (uintptr_t)dolphin_utf8_argc) {
+        dolphin_set_error(DOLPHIN_ERR_NOT_FOUND, 0);
+        return NULL;
+    }
+    if (!dolphin_utf8_arg_valid[index] || dolphin_utf8_args[index] == NULL) {
+        dolphin_set_error(DOLPHIN_ERR_INVALID, 0);
+        return NULL;
+    }
+    *out_len = (uintptr_t)strlen(dolphin_utf8_args[index]);
+    return (const uint8_t *)dolphin_utf8_args[index];
+}
+
+static char **dolphin_utf8_env = NULL;
+static int dolphin_env_ready = 0;
+
+static void dolphin_build_env(void) {
+    if (dolphin_env_ready) {
+        return;
+    }
+    dolphin_env_ready = 1;
+    wchar_t *block = GetEnvironmentStringsW();
+    if (block == NULL) {
+        return;
+    }
+    int count = 0;
+    for (wchar_t *entry = block; *entry != L'\0'; entry += wcslen(entry) + 1) {
+        count += 1;
+    }
+    dolphin_utf8_env = (char **)calloc((size_t)count + 1, sizeof(char *));
+    if (dolphin_utf8_env == NULL) {
+        FreeEnvironmentStringsW(block);
+        return;
+    }
+    int index = 0;
+    for (wchar_t *entry = block; *entry != L'\0'; entry += wcslen(entry) + 1) {
+        // `=C:` 之类的特殊条目没有名字，跳过。
+        if (*entry == L'=') {
+            continue;
+        }
+        char *converted = dolphin_utf16_to_utf8(entry);
+        if (converted != NULL) {
+            dolphin_utf8_env[index] = converted;
+            index += 1;
+        }
+    }
+    FreeEnvironmentStringsW(block);
+}
+
+extern "C" const uint8_t *dolphin_env(const uint8_t *name, uintptr_t name_len, uintptr_t *out_len) {
+    dolphin_build_env();
+    if (dolphin_utf8_env == NULL) {
+        dolphin_set_error(DOLPHIN_ERR_OTHER, 0);
+        return NULL;
+    }
+    for (int index = 0; dolphin_utf8_env[index] != NULL; index += 1) {
+        const char *entry = dolphin_utf8_env[index];
+        const char *equals = strchr(entry, '=');
+        if (equals == NULL) {
+            continue;
+        }
+        size_t entry_name_len = (size_t)(equals - entry);
+        if (entry_name_len != (size_t)name_len) {
+            continue;
+        }
+        if (_strnicmp(entry, (const char *)name, entry_name_len) != 0) {
+            continue;
+        }
+        const char *value = equals + 1;
+        *out_len = (uintptr_t)strlen(value);
+        return (const uint8_t *)value;
+    }
+    dolphin_set_error(DOLPHIN_ERR_NOT_FOUND, 0);
+    return NULL;
+}
+
+extern "C" int dolphin_last_error_kind(void) {
+    return dolphin_error_kind;
+}
+
+extern "C" int dolphin_last_error_code(void) {
+    return dolphin_error_code;
 }
 
 extern "C" void dolphin_print_string(const char *data, uintptr_t length) {

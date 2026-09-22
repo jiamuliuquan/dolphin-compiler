@@ -88,7 +88,7 @@ my-project/
 ```text
 dc check <项目目录或main.do> [--locked] [--offline] [--color auto|always|never]
 dc build <项目目录或main.do> [--bin <名称>|--lib] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
-dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- <应用参数>...]
 dc package <项目目录> [--locked] [--offline]
 dc fetch <项目目录> [--locked] [--offline]
 dc publish <项目目录> [--repository <id>] [--locked] [--offline]
@@ -107,7 +107,7 @@ CLI 使用 Clap 解析参数。`dc --help`、`dc --version` 以及 `dc <子命�
 ./examples/m8/target/m8
 ```
 
-M8 示例预期退出码为 64。也可以直接编译一个不使用模块声明和导入的 `.do` 文件；依赖管理通过项目清单提供，见第 17 节。`dc test` 和 `dc run -- <应用参数>` 尚未实现，安排在 M19。
+M8 示例预期退出码为 64。也可以直接编译一个不使用模块声明和导入的 `.do` 文件；依赖管理通过项目清单提供，见第 17 节。`dc run ... -- <应用参数>` 自 H19-01 起原样转发参数（不经 shell，空参数/空格/Unicode/以 `-` 开头均保留，支持非法 UTF-8 字节）；`dc test` 尚未实现，安排在 M19 H19-05。
 
 ### 2.2a 项目清单 `dolphin.toml`
 
@@ -836,6 +836,12 @@ dolphin_is_valid_utf8
 dolphin_check_utf8
 dolphin_check_align
 dolphin_check_view
+dolphin_init_args
+dolphin_arg_count
+dolphin_arg
+dolphin_env
+dolphin_last_error_kind
+dolphin_last_error_code
 dolphin_runtime_finish
 ```
 
@@ -902,7 +908,8 @@ dolphin_runtime_finish
   `PackageId::STD`；`std.mem` 仍是无源码的内建入口。用户模块不能占用 `std` 命名空间。
 - **模块与 API**：`std`（`Option`/`Result`/`Iterator`）、`std.collections`（`Vec<T>`、`SliceIter<T>`、
   `Range`）、`std.text`（`String`、`concat`/`trim`/`substring`/`starts_with`/`ends_with`/`contains`/
-  `from_utf8`、`TextError`）、`std.ffi`（`CString`、`CStringError`）。
+  `from_utf8`、`TextError`）、`std.ffi`（`CString`、`CStringError`）、`std.process`（进程参数与环境，
+  H19-01）。
 - **导入与 prelude**：`use std.mem;`、`use std.text;`、`use std.collections.Vec;` 与类型导入；
   `Option`/`Result`/`Iterator` 作为最小 prelude 自动可用，被本模块定义或显式导入时遮蔽。
 - **迭代器协议**：`for x in expr` 要求 `expr` 实现 `Iterator`；数组与切片经只读切片适配到
@@ -912,6 +919,11 @@ dolphin_runtime_finish
   `as_mut_slice`/`iter`/`clone`/`clear`/`deinit`；backing 字段模块私有，扩容溢出走 102。
 - **`String`/`CString`**：拥有型缓冲 + 零分配视图；`substring`/`from_utf8` 返回 `Result`，
   `CString::from` 拒绝内部 NUL，`ptr()` 交给 C，`deinit` 释放。
+- **`std.process`（H19-01）**：`arg_count(): usize`、`arg(index): Result<string, ArgError>`、
+  `program_name()`、`env(name): EnvLookup`。返回值都是**借用视图**，有效到进程结束，不得
+  `deinit`/写入；`ArgError` 区分 `OutOfRange` 与 `NotUtf8`；`EnvLookup` 三态区分 `Found`/`Missing`/
+  `NotUtf8`。Unix 直接保存字节 argv 并校验 UTF-8；Windows 用宽字符 API 转 UTF-8（含未配对代理项
+  的条目为 `NotUtf8`）。`main` 仍无参数，源码兼容不变。
 - **所有权边界**：容器赋值/元素读取/Vec.clone 是浅复制；clear/deinit 不递归释放拥有型元素。`Vec<String>` 等需按 API 契约逐元素释放；view 不延长缓冲寿命，可写 deinit 的接收者应为 var。
 
 ## 17. lib 项目、包图与库包发布（M15-C…F，已完成）

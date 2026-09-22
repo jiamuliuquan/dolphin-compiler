@@ -303,6 +303,7 @@ struct RuntimeRefs<'ctx> {
     check_utf8: FunctionValue<'ctx>,
     check_align: FunctionValue<'ctx>,
     check_view: FunctionValue<'ctx>,
+    init_args: FunctionValue<'ctx>,
     finish: FunctionValue<'ctx>,
 }
 
@@ -326,6 +327,7 @@ fn declare_runtime_functions<'ctx>(
     let void1_f64 = void.fn_type(&[f64_type.into()], false);
     let void1_i8 = void.fn_type(&[i8_type.into()], false);
     let void2_ptr_i64 = void.fn_type(&[pointer.into(), i64_type.into()], false);
+    let void2_i32_ptr = void.fn_type(&[i32_type.into(), pointer.into()], false);
     let string_equal = i8_type.fn_type(
         &[
             pointer.into(),
@@ -363,6 +365,7 @@ fn declare_runtime_functions<'ctx>(
         check_utf8: declare("dolphin_check_utf8", void2_ptr_i64),
         check_align: declare("dolphin_check_align", void2_ptr_i64),
         check_view: declare("dolphin_check_view", void2_ptr_i64),
+        init_args: declare("dolphin_init_args", void2_i32_ptr),
         finish: declare("dolphin_runtime_finish", void0),
     }
 }
@@ -986,6 +989,17 @@ fn define_function<'ctx>(
         &slots,
         &program.types,
     );
+
+    if is_main {
+        // 入口是 C 的 `main(i32 argc, void *argv)`：把原始参数交给运行时，
+        // 供 `std.process` 读取（Unix 直接保存字节 argv）。
+        let argc = function_value
+            .get_nth_param(0)
+            .expect("main has argc")
+            .into_int_value();
+        let argv = function_value.get_nth_param(1).expect("main has argv");
+        builder_ok(builder.build_call(runtime.init_args, &[argc.into(), argv.into()], ""));
+    }
 
     let emitter = Emitter {
         context,

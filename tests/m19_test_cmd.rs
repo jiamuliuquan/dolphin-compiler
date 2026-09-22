@@ -457,7 +457,13 @@ fn test_05b_discovery_direct_children_order_and_helpers() {
         }
     }
 
-    // CLI：发现 3 个测试 -> 固定临时输出，未执行前以 1 退出。
+    // CLI：发现 3 个测试并逐个运行（空测试体全部通过）。
+    let expected = concat!(
+        "test test_alpha ... ok\n",
+        "test test_beta ... ok\n",
+        "test test_zeta ... ok\n",
+        "3 passed; 0 failed; 0 filtered out\n",
+    );
     for backend in support::backends() {
         for release in [false, true] {
             let profile = if release { "--release" } else { "--debug" };
@@ -465,16 +471,12 @@ fn test_05b_discovery_direct_children_order_and_helpers() {
             let output = base.dc_test_in(&directory, &["--backend", backend.name(), profile]);
             assert_eq!(
                 output.status.code(),
-                Some(1),
+                Some(0),
                 "{context} stdout={} stderr={}",
                 stdout_text(&output),
                 stderr_text(&output)
             );
-            assert_eq!(
-                stdout_text(&output),
-                "built 3 tests (execution lands in H19-05c)\n",
-                "{context}"
-            );
+            assert_eq!(stdout_text(&output), expected, "{context}");
             assert!(
                 output.stderr.is_empty(),
                 "{context} stderr={}",
@@ -521,8 +523,19 @@ fn test_05b_harness_dispatch_and_assertions() {
             );
             assert_eq!(
                 stdout_text(&output),
-                "built 4 tests (execution lands in H19-05c)\n",
+                concat!(
+                    "test test_expect_false ... FAILED (assertion)\n",
+                    "test test_fail ... FAILED (assertion)\n",
+                    "test test_helper ... ok\n",
+                    "test test_pass ... ok\n",
+                    "2 passed; 2 failed; 0 filtered out\n",
+                ),
                 "{context}"
+            );
+            assert!(
+                stderr_text(&output).contains("Dolphin test assertion failed"),
+                "{context} stderr={}",
+                stderr_text(&output)
             );
             let artifact = artifact_at(&directory, "harness-tests");
 
@@ -627,18 +640,20 @@ fn test_05b_visibility_and_rejections() {
             let output = base.dc_test_in(&directory, &["--backend", backend.name(), profile]);
             assert_eq!(
                 output.status.code(),
-                Some(1),
+                Some(0),
                 "{context} stdout={} stderr={}",
                 stdout_text(&output),
                 stderr_text(&output)
             );
-            let artifact = artifact_at(&directory, "visibility-tests");
-            let ok = run_artifact(&artifact, &["--dolphin-test", "test_ok"]);
             assert_eq!(
-                ok.status.code(),
-                Some(0),
+                stdout_text(&output),
+                "test test_ok ... ok\n1 passed; 0 failed; 0 filtered out\n",
+                "{context}"
+            );
+            assert!(
+                output.stderr.is_empty(),
                 "{context} stderr={}",
-                stderr_text(&ok)
+                stderr_text(&output)
             );
         }
     }
@@ -714,4 +729,279 @@ fn test_05b_visibility_and_rejections() {
         "stderr={}",
         stderr_text(&output)
     );
+}
+
+/// 在可用后端 × Dolphin Debug/Release 上运行 `dc test`（附加 `extra` 参数）。
+fn for_each_combo(
+    project: &Project,
+    directory: &Path,
+    extra: &[&str],
+) -> Vec<(String, bool, Output)> {
+    let mut outputs = Vec::new();
+    for backend in support::backends() {
+        for release in [false, true] {
+            let profile = if release { "--release" } else { "--debug" };
+            let mut args = vec!["--backend", backend.name(), profile];
+            args.extend_from_slice(extra);
+            let output = project.dc_test_in(directory, &args);
+            outputs.push((backend.name().to_string(), release, output));
+        }
+    }
+    outputs
+}
+
+/// TEST-01：全部测试通过时逐行 `ok` + 固定汇总，exit 0。
+#[test]
+fn test_01_all_pass() {
+    let base = Project::new("c-01");
+    base.write("proj/dolphin.toml", &lib_manifest("allpass", ""));
+    base.write("proj/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    base.write(
+        "proj/tests/pass.do",
+        "use std.test.expect;\n\nfn test_a() {\n    expect(value() == 1);\n}\n\nfn test_b() {\n    println(\"marker-from-test\");\n    expect(true);\n}\n",
+    );
+    let directory = base.dir("proj");
+    // 子进程 stdout 直接继承：测试内输出按顺序出现在 runner 行之间，不被吞掉。
+    let expected = concat!(
+        "test test_a ... ok\n",
+        "marker-from-test\n",
+        "test test_b ... ok\n",
+        "2 passed; 0 failed; 0 filtered out\n",
+    );
+    for (backend, release, output) in for_each_combo(&base, &directory, &[]) {
+        let context = format!("backend={backend} release={release}");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{context} stdout={} stderr={}",
+            stdout_text(&output),
+            stderr_text(&output)
+        );
+        assert_eq!(stdout_text(&output), expected, "{context}");
+        assert!(
+            output.stderr.is_empty(),
+            "{context} stderr={}",
+            stderr_text(&output)
+        );
+    }
+}
+
+/// TEST-02：断言失败/运行时 trap 分别分类，失败后继续执行后续测试，exit 1。
+#[test]
+fn test_02_failure_nonzero() {
+    let base = Project::new("c-02");
+    base.write("proj/dolphin.toml", &lib_manifest("failures", ""));
+    base.write("proj/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    base.write(
+        "proj/tests/cases.do",
+        "use std.test.expect;\n\nfn test_assert() {\n    expect(false);\n}\n\nfn test_pass() {\n    expect(value() == 1);\n}\n\nfn test_trap() {\n    val maximum = 2147483647_i32;\n    val overflow = maximum + 1_i32;\n    expect(overflow > 0);\n}\n",
+    );
+    let directory = base.dir("proj");
+    let expected = concat!(
+        "test test_assert ... FAILED (assertion)\n",
+        "test test_pass ... ok\n",
+        "test test_trap ... FAILED (trap exit 101)\n",
+        "1 passed; 2 failed; 0 filtered out\n",
+    );
+    for (backend, release, output) in for_each_combo(&base, &directory, &[]) {
+        let context = format!("backend={backend} release={release}");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{context} stdout={} stderr={}",
+            stdout_text(&output),
+            stderr_text(&output)
+        );
+        assert_eq!(stdout_text(&output), expected, "{context}");
+        let stderr = stderr_text(&output);
+        assert!(
+            stderr.contains("Dolphin test assertion failed"),
+            "{context} stderr={stderr}"
+        );
+        assert!(
+            stderr.contains("Dolphin runtime error"),
+            "{context} stderr={stderr}"
+        );
+    }
+}
+
+/// TEST-03：`--filter` 子集与顺序、0 测试、过滤无匹配的冻结输出与退出码。
+#[test]
+fn test_03_filter_and_zero() {
+    let base = Project::new("c-03");
+    base.write("proj/dolphin.toml", &lib_manifest("filtering", ""));
+    base.write("proj/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    base.write(
+        "proj/tests/cases.do",
+        "use std.test.expect;\n\nfn test_alpha() {\n    expect(value() == 1);\n}\n\nfn test_beta() {\n    expect(value() == 1);\n}\n\nfn test_gamma() {\n    expect(value() == 1);\n}\n",
+    );
+    let directory = base.dir("proj");
+    let all = concat!(
+        "test test_alpha ... ok\n",
+        "test test_beta ... ok\n",
+        "test test_gamma ... ok\n",
+        "3 passed; 0 failed; 0 filtered out\n",
+    );
+    let filtered = "test test_beta ... ok\n1 passed; 0 failed; 2 filtered out\n";
+    for (backend, release, output) in for_each_combo(&base, &directory, &[]) {
+        let context = format!("backend={backend} release={release}");
+        assert_eq!(output.status.code(), Some(0), "{context}");
+        assert_eq!(stdout_text(&output), all, "{context}");
+    }
+    for (backend, release, output) in for_each_combo(&base, &directory, &["--filter", "beta"]) {
+        let context = format!("backend={backend} release={release}");
+        assert_eq!(output.status.code(), Some(0), "{context}");
+        assert_eq!(stdout_text(&output), filtered, "{context}");
+        assert!(output.stderr.is_empty(), "{context}");
+    }
+    for (backend, release, output) in for_each_combo(&base, &directory, &["--filter", "zzz"]) {
+        let context = format!("backend={backend} release={release}");
+        assert_eq!(output.status.code(), Some(1), "{context}");
+        assert_eq!(
+            stdout_text(&output),
+            "no tests matched filter\n",
+            "{context}"
+        );
+    }
+
+    let zero = Project::new("c-03-zero");
+    zero.write("proj/dolphin.toml", &lib_manifest("zero", ""));
+    zero.write("proj/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    let zero_directory = zero.dir("proj");
+    for (backend, release, output) in for_each_combo(&zero, &zero_directory, &[]) {
+        let context = format!("backend={backend} release={release}");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{context} stdout={} stderr={}",
+            stdout_text(&output),
+            stderr_text(&output)
+        );
+        assert_eq!(stdout_text(&output), "no tests found\n", "{context}");
+        assert!(
+            output.stderr.is_empty(),
+            "{context} stderr={}",
+            stderr_text(&output)
+        );
+    }
+}
+
+/// TEST-04：死循环测试 30 秒被 kill 并回收，后续测试继续，汇总标记超时。
+#[test]
+fn test_04_timeout_kills_and_continues() {
+    let base = Project::new("c-04");
+    base.write("proj/dolphin.toml", &lib_manifest("timeout", ""));
+    base.write("proj/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    base.write(
+        "proj/tests/cases.do",
+        "use std.test.expect;\n\nfn test_a_loop() {\n    while true {\n    }\n}\n\nfn test_b_after() {\n    expect(value() == 1);\n}\n",
+    );
+    let directory = base.dir("proj");
+    let expected = concat!(
+        "test test_a_loop ... FAILED (timeout after 30s)\n",
+        "test test_b_after ... ok\n",
+        "1 passed; 1 failed; 0 filtered out\n",
+    );
+    for (backend, release, output) in for_each_combo(&base, &directory, &[]) {
+        let context = format!("backend={backend} release={release}");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{context} stdout={} stderr={}",
+            stdout_text(&output),
+            stderr_text(&output)
+        );
+        assert_eq!(stdout_text(&output), expected, "{context}");
+        assert!(
+            output.stderr.is_empty(),
+            "{context} stderr={}",
+            stderr_text(&output)
+        );
+    }
+}
+
+/// TEST-05：lib-only、lib+bin、path 依赖三种项目都能发现并运行测试。
+#[test]
+fn test_05_lib_only_bin_and_path_dep() {
+    let base = Project::new("c-05");
+    base.write("lib-only/dolphin.toml", &lib_manifest("alpha", ""));
+    base.write("lib-only/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    base.write(
+        "lib-only/tests/ok.do",
+        "use std.test.expect;\nfn test_ok() {\n    expect(value() == 1);\n}\n",
+    );
+    base.write(
+        "lib-bin/dolphin.toml",
+        "[package]\ngroup = \"org.example\"\nname = \"beta\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/lib.do\"\n\n[[bin]]\nname = \"beta\"\npath = \"src/main.do\"\n",
+    );
+    base.write("lib-bin/src/lib.do", "pub fn value(): i32 { return 2; }\n");
+    base.write("lib-bin/src/main.do", "fn main(): i32 { return 0; }\n");
+    base.write(
+        "lib-bin/tests/ok.do",
+        "use std.test.expect;\nfn test_ok() {\n    expect(value() == 2);\n}\n",
+    );
+    base.write("dep/dolphin.toml", &lib_manifest("dep", ""));
+    base.write("dep/src/lib.do", "pub fn base(): i32 { return 5; }\n");
+    base.write(
+        "consumer/dolphin.toml",
+        &lib_manifest("gamma", "\n[dependencies]\ndep = { path = \"../dep\" }\n"),
+    );
+    base.write(
+        "consumer/src/lib.do",
+        "use dep;\npub fn total(): i32 { return dep.base() + 1; }\n",
+    );
+    base.write(
+        "consumer/tests/ok.do",
+        "use std.test.expect;\nfn test_ok() {\n    expect(total() == 6);\n}\n",
+    );
+    let expected = "test test_ok ... ok\n1 passed; 0 failed; 0 filtered out\n";
+    for relative in ["lib-only", "lib-bin", "consumer"] {
+        let directory = base.dir(relative);
+        for (backend, release, output) in for_each_combo(&base, &directory, &[]) {
+            let context = format!("dir={relative} backend={backend} release={release}");
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{context} stdout={} stderr={}",
+                stdout_text(&output),
+                stderr_text(&output)
+            );
+            assert_eq!(stdout_text(&output), expected, "{context}");
+            assert!(
+                output.stderr.is_empty(),
+                "{context} stderr={}",
+                stderr_text(&output)
+            );
+        }
+    }
+}
+
+/// TEST-06：测试确实实例化标准库公开泛型 API（`Vec<i32>`/`Option<i32>`），而非只做语法检查。
+#[test]
+fn test_06_stdlib_generic_instantiation() {
+    let base = Project::new("c-06");
+    base.write("proj/dolphin.toml", &lib_manifest("generics", ""));
+    base.write("proj/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    base.write(
+        "proj/tests/generic.do",
+        "use std.collections.Vec;\nuse std.test.expect;\n\nfn test_vec_and_option() {\n    var values = Vec<i32>::init();\n    defer values.deinit();\n    values.push(3_i32);\n    values.push(4_i32);\n    expect(values.len() == 2_usize);\n    val first = values.get(0_usize);\n    expect(first.is_some());\n    val item = match first {\n        Option.Some(inner) => inner,\n        Option.None => 0_i32,\n    };\n    expect(item == 3_i32);\n}\n",
+    );
+    let directory = base.dir("proj");
+    let expected = "test test_vec_and_option ... ok\n1 passed; 0 failed; 0 filtered out\n";
+    for (backend, release, output) in for_each_combo(&base, &directory, &[]) {
+        let context = format!("backend={backend} release={release}");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{context} stdout={} stderr={}",
+            stdout_text(&output),
+            stderr_text(&output)
+        );
+        assert_eq!(stdout_text(&output), expected, "{context}");
+        assert!(
+            output.stderr.is_empty(),
+            "{context} stderr={}",
+            stderr_text(&output)
+        );
+    }
 }

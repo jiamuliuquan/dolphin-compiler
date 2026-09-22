@@ -2,6 +2,8 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use dolphin_compiler::{
@@ -39,7 +41,7 @@ enum Commands {
     /// Compile and execute the program
     Run(RunArgs),
 
-    /// Discover tests/ and build the test target into target/test/ (M19/H19-05; execution lands in H19-05c)
+    /// Discover and run user tests in tests/ (M19/H19-05)
     Test(TestArgs),
 
     /// Produce a `.dlib` library package from the current library target
@@ -187,11 +189,15 @@ struct RunArgs {
     app_args: Vec<std::ffi::OsString>,
 }
 
-/// `dc test` 的编译选项（M19/H19-05a/b）。执行/过滤选项在 H19-05c 追加。
+/// `dc test` 的编译选项（M19/H19-05a/b）与执行选项（H19-05c）。
 #[derive(Args)]
 struct TestArgs {
     /// Dolphin project directory (defaults to the current directory)
     input: Option<PathBuf>,
+
+    /// Only run tests whose fully qualified name contains this substring
+    #[arg(long)]
+    filter: Option<String>,
 
     /// Disable optimizations for faster compilation
     #[arg(long, conflicts_with = "release")]
@@ -463,21 +469,48 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             let profile = BuildProfile::resolve(&manifest, args.explicit_profile());
             let resolved = resolve_project(&manifest, args.resolve_options())
                 .map_err(|error| (error.to_string(), color))?;
-            // H19-05b：发现 `tests/*.do` 的 `test_*` 并生成/构建 harness。
-            // 子进程执行与汇总属 H19-05c，因此未执行前绝不报成功：0 测试按冻结规则
-            // 输出 `no tests found`，有测试时输出临时构建信息，均以 1 退出。
+            // H19-05c：发现 + 生成 harness + 构建，然后逐个子进程运行选中的测试。
+            // 0 测试与过滤无匹配按冻结规则只输出固定消息并以 1 退出。
             let target =
                 build_test_target_with_graph(&manifest, profile, args.settings(), &resolved.graph)
                     .map_err(|error| (error.to_string(), color))?;
             if target.tests.is_empty() {
                 println!("no tests found");
-            } else {
-                println!(
-                    "built {} tests (execution lands in H19-05c)",
-                    target.tests.len()
-                );
+                return Ok(ExitCode::FAILURE);
             }
-            Ok(ExitCode::FAILURE)
+            let selected: Vec<_> = match &args.filter {
+                Some(filter) => target
+                    .tests
+                    .iter()
+                    .filter(|test| test.name.contains(filter.as_str()))
+                    .collect(),
+                None => target.tests.iter().collect(),
+            };
+            if selected.is_empty() {
+                println!("no tests matched filter");
+                return Ok(ExitCode::FAILURE);
+            }
+            let filtered_out = target.tests.len() - selected.len();
+            let mut passed = 0_usize;
+            let mut failed = 0_usize;
+            for test in selected {
+                match run_test_case(&target.artifact.executable, &test.name)? {
+                    TestOutcome::Passed => {
+                        println!("test {} ... ok", test.name);
+                        passed += 1;
+                    }
+                    TestOutcome::Failed(reason) => {
+                        println!("test {} ... FAILED ({reason})", test.name);
+                        failed += 1;
+                    }
+                }
+            }
+            println!("{passed} passed; {failed} failed; {filtered_out} filtered out");
+            if failed == 0 {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                Ok(ExitCode::FAILURE)
+            }
         }
         Commands::Package(args) => {
             let input = args.input.unwrap_or_else(|| PathBuf::from("."));
@@ -750,6 +783,65 @@ fn select_run_target(
                 .to_string(),
             color,
         ))
+    }
+}
+
+/// `dc test` 的单测试固定超时（规格 §9.1：30 秒，超时 kill 并继续）。
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 单个测试子进程的结果分类。
+enum TestOutcome {
+    Passed,
+    Failed(String),
+}
+
+/// 在独立子进程中运行一个测试；stdout/stderr 直接继承，超时 kill 并回收。
+///
+/// 退出码分类：0 通过；106 断言失败；其余（含信号终止统一按 1）为 `trap exit N`。
+fn run_test_case(executable: &Path, name: &str) -> Result<TestOutcome, (String, ColorMode)> {
+    let mut child = Command::new(executable)
+        .arg("--dolphin-test")
+        .arg(name)
+        .spawn()
+        .map_err(|error| {
+            (
+                format!("could not run `{}`: {error}", executable.display()),
+                ColorMode::Auto,
+            )
+        })?;
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Windows 异常终止会得到 0xC0000xxx 之类的负值编码，统一按 1 归类，
+                // 保持在冻结的输出格式内。
+                let code = status
+                    .code()
+                    .filter(|code| (0..=255).contains(code))
+                    .unwrap_or(1);
+                if code == 0 {
+                    return Ok(TestOutcome::Passed);
+                }
+                if code == 106 {
+                    return Ok(TestOutcome::Failed("assertion".to_string()));
+                }
+                return Ok(TestOutcome::Failed(format!("trap exit {code}")));
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    child.kill().ok();
+                    child.wait().ok();
+                    return Ok(TestOutcome::Failed("timeout after 30s".to_string()));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                return Err((
+                    format!("could not wait for `{}`: {error}", executable.display()),
+                    ColorMode::Auto,
+                ));
+            }
+        }
     }
 }
 

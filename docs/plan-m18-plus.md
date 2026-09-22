@@ -149,7 +149,7 @@ D1–D3 已确认（规格第 12 节），后续代码批次从 H19-01 起逐批
 | H19-02 | 标准流与字节 I/O | H19-01 | 完成（`std.error`/`std.io` 标准流，见 [报告](reports/m19-progress.md)） |
 | H19-03 | 文件操作与资源错误路径 | H19-02 | 完成（`std.fs` + `release`/`from_raw`，见 [报告](reports/m19-progress.md)） |
 | H19-04 | 必要文本/数字处理 | H19-03 | 完成（`std.text.lines`/`Builder`/`parse_i64`/`parse_u64`，见 [报告](reports/m19-progress.md)） |
-| H19-05 | 最小 dc test 与库开发闭环 | H19-04 | 进行中（H19-05a/b 完成：`dc test` 构建 + `tests/` 发现/harness/`std.test`；H19-05c 待实施，见 [报告](reports/m19-progress.md)） |
+| H19-05 | 最小 dc test 与库开发闭环 | H19-04 | 完成（H19-05a/b/c：构建 + `tests/` 发现/harness/`std.test` + 子进程执行/超时/过滤/汇总，见 [报告](reports/m19-progress.md)） |
 | H19-06 | Result/defer 组合与有限语法补齐 | H19-05 | 待实施 |
 | H19-07 | 真实应用、文档、三平台验收 | H19-06 | 待实施 |
 

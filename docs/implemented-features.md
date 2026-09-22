@@ -89,7 +89,7 @@ my-project/
 dc check <项目目录或main.do> [--locked] [--offline] [--color auto|always|never]
 dc build <项目目录或main.do> [--bin <名称>|--lib] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- <应用参数>...]
-dc test  <项目目录> [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc test  <项目目录> [--filter <子串>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc package <项目目录> [--locked] [--offline]
 dc fetch <项目目录> [--locked] [--offline]
 dc publish <项目目录> [--repository <id>] [--locked] [--offline]
@@ -108,7 +108,7 @@ CLI 使用 Clap 解析参数。`dc --help`、`dc --version` 以及 `dc <子命�
 ./examples/m8/target/m8
 ```
 
-M8 示例预期退出码为 64。也可以直接编译一个不使用模块声明和导入的 `.do` 文件；依赖管理通过项目清单提供，见第 17 节。`dc run ... -- <应用参数>` 自 H19-01 起原样转发参数（不经 shell，空参数/空格/Unicode/以 `-` 开头均保留，支持非法 UTF-8 字节）；`dc test` 自 H19-05a 起为库项目构建测试目标到 `target/test/<包名>-tests`（需要 `[lib]` 目标；不产出 `.dlib`、不要求可发布性，因此 path 依赖可解析），H19-05b 起发现 `tests/` 直接子文件中的 `test_*` 并生成 harness。**子进程执行与汇总（H19-05c）尚未实现**：0 个测试输出 `no tests found`，N>0 输出临时信息 `built N tests (execution lands in H19-05c)`，两者都以 1 退出；`dc build`/`run`/`package`/`check` 仍永不读取 `tests/`。
+M8 示例预期退出码为 64。也可以直接编译一个不使用模块声明和导入的 `.do` 文件；依赖管理通过项目清单提供，见第 17 节。`dc run ... -- <应用参数>` 自 H19-01 起原样转发参数（不经 shell，空参数/空格/Unicode/以 `-` 开头均保留，支持非法 UTF-8 字节）；`dc test`（H19-05）为库项目构建并运行用户测试：需要 `[lib]` 目标；不产出 `.dlib`、不要求可发布性，因此 path 依赖可解析；测试目标在 `target/test/<包名>-tests`。`dc build`/`run`/`package`/`check` 永不读取 `tests/`。
 
 ### 2.2a 项目清单 `dolphin.toml`
 
@@ -1006,14 +1006,17 @@ dolphin_runtime_finish
 - **原生文件**：依赖的原生输入按反向拓扑顺序（使用者先于提供者，共享依赖排在全部使用者之后）去重合并；
   同名不同内容 runtime 文件报冲突；包只在其列出的目标上可消费。
 - **示例**：`examples/m15` 通过 `math = { path = "mathlib" }` 演示 lib + path 依赖 + 跨包泛型。
-- **`dc test` 用户测试（H19-05a/b）**：需要 `[lib]` 目标；发现包根 `tests/` 的**直接子文件**
+- **`dc test` 用户测试（H19-05a/b/c）**：需要 `[lib]` 目标；发现包根 `tests/` 的**直接子文件**
   `*.do`（不递归）中的 `test_*` 函数，按函数名排序生成根模块入口，测试二进制输出到
   `target/test/<包名>-tests[.exe]`。测试文件不得声明 `pkg`、不得定义 `main`；`test_*` 必须无参数、
   无类型参数、返回 Unit（无返回类型标注）；其他函数可作为 helper。测试与 `src/*.do` 同属根模块，
   可访问根模块私有项与子模块 `pub` 项（子模块私有项不可见）。断言用 `std.test.expect/fail`。
-  入口的内部调用形式 `<二进制> --dolphin-test <名称>` 不对外承诺。子进程执行与汇总（含 `--filter`、
-  30s 超时、固定 `test <name> ... ok` 输出与 `N passed; M failed; K filtered out`）属 H19-05c，
-  尚未实现。
+  入口的内部调用形式 `<二进制> --dolphin-test <名称>` 不对外承诺。
+  **执行与汇总（H19-05c）**：每个测试在独立子进程中运行，stdout/stderr 直接继承；固定 30 秒超时
+  （超时 kill 并回收，继续后续测试）。`--filter <子串>` 按名称子串选择子集。输出固定为
+  `test <name> ... ok`、`... FAILED (assertion)`（退出码 106）、`... FAILED (trap exit N)`、
+  `... FAILED (timeout after 30s)`，最后一行 `N passed; M failed; K filtered out`；全部通过 0、
+  任一失败 1、0 测试 `no tests found` 1、过滤无匹配 `no tests matched filter` 1、用法错误 2。
 
 ## 18. 优化后端与开发工具（M16、M17，已完成）
 
@@ -1070,7 +1073,7 @@ dolphin_runtime_finish
 - 通配符导入、导入别名和重导出；依赖版本范围求解。外部 path/精确坐标库依赖已实现。
 - 三元表达式和隐式数值转换。
 - `?T` 可选类型和 `?` 错误传播运算符。
-- 参数/环境、文件/进程/网络标准库，用户测试命令 dc test 和 run 的应用参数转发。
+- 网络与子进程标准库。
 - 闭包和异常。
 - 闭源二进制 Dolphin 库包、稳定二进制 ABI、增量编译、交叉编译。
 - Cranelift 后端的调试信息、Windows/PDB 调试信息，以及多错误恢复。

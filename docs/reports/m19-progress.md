@@ -778,3 +778,111 @@ installation 显式列表中）。
 3. `tests/m19_test_cmd.rs` 扩展时保持 TEST-01..06 计划测试名；本批已提供
    `discover_tests`/`TestTarget.tests` 供 runner 复用，不需要重新解析测试文件。
 4. 无阻塞；H19-05 未关闭，本报告不把 M19 记为完成。
+
+## H19-05c 子进程执行与汇总
+
+- 批次：H19-05c（H19-05 的第三子批次；完成后 H19-05 关闭，M19 仍未完成）
+- 状态：完成（Linux x86_64；Cranelift/LLVM × Dolphin Debug/Release 本机；macOS/Windows 由远端 CI lane 覆盖，待平台确认）
+- 前置批次及报告：H19-05b，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`79f1f38`（`v0.3.0-M19-05b`），工作区干净。
+- 本批修改：`src/main.rs`、`tests/m19_test_cmd.rs`、`docs/proposal-m19-cli-stdlib.md`、
+  `docs/implemented-features.md`、`docs/plan-m18-plus.md`、本报告。未 commit/push/tag。
+
+### 修改文件与关键实现
+
+- `src/main.rs`：
+  - `dc test` 新增 `--filter <子串>`（按测试名单子串选择；在完整 harness 上运行，K=未选中数）。
+  - `run_test_case`：对每个测试启动独立子进程 `<二进制> --dolphin-test <名称>`，子进程
+    stdout/stderr 直接继承；`TEST_TIMEOUT = 30s`，超时 `kill` + `wait` 回收后继续。
+  - 退出码分类：0→`ok`；106→`FAILED (assertion)`；其余（无正常退出码的信号终止统一按 1）→
+    `FAILED (trap exit N)`；超时→`FAILED (timeout after 30s)`。
+  - 固定输出与汇总：`test <name> ... ok|FAILED (...)` 与 `N passed; M failed; K filtered out`；
+    全部通过 0、任一失败 1；0 测试 `no tests found`、过滤无匹配 `no tests matched filter`，均 1；
+    编译失败 1、用法错误 2（clap）。
+- `tests/m19_test_cmd.rs`：新增冻结名 TEST-01..06；H19-05b 的三个用例的 CLI 断言从临时
+  `built N tests (execution lands in H19-05c)`（b 的用户确认中间行为）更新为最终 runner 输出，
+  发现/harness/可见性断言保持不变；TEST-01 增加测试内 `println` 验证子进程 stdout 继承。
+
+### 验收映射
+
+| 验收点 | 测试名 | 期望与结果 |
+| --- | --- | --- |
+| TEST-01 | `m19_test_cmd.rs::test_01_all_pass` | 两个测试逐行 `ok`，测试内 `println("marker-from-test")` 原样出现在两行之间（stdout 继承、不被吞），汇总 `2 passed; 0 failed; 0 filtered out`，exit 0，stderr 空；4 组合通过 |
+| TEST-02 | `test_02_failure_nonzero` | `test_assert`→`FAILED (assertion)`、`test_pass` 在失败后仍执行→`ok`、`test_trap`（i32 溢出）→`FAILED (trap exit 101)`，汇总 `1 passed; 2 failed; 0 filtered out`，exit 1，stderr 含断言与 trap 固定文本；4 组合通过 |
+| TEST-03 | `test_03_filter_and_zero` | 无过滤按名排序 3 个 `ok`；`--filter beta` 只跑 `test_beta` 且 `1 passed; 0 failed; 2 filtered out` exit 0；`--filter zzz` → `no tests matched filter` exit 1；无 `tests/` → `no tests found` exit 1；4 组合通过 |
+| TEST-04 | `test_04_timeout_kills_and_continues` | 死循环 `test_a_loop` 固定 30s 被 kill 回收→`FAILED (timeout after 30s)`，后续 `test_b_after` 继续→`ok`，汇总 `1 passed; 1 failed; 0 filtered out`，exit 1；4 组合通过（本机 Debug 2 组合 60s、LLVM 4 组合 120s） |
+| TEST-05 | `test_05_lib_only_bin_and_path_dep` | lib-only、lib+bin、path 依赖三种项目各运行 1 个测试→`ok` + 汇总 + exit 0、stderr 空；4 组合 × 3 项目通过 |
+| TEST-06 | `test_06_stdlib_generic_instantiation` | 测试内实际实例化 `Vec<i32>`（push/len/get/deinit）与 `Option<i32>` match，通过→exit 0；4 组合通过 |
+| 回归 | H19-05a/b 的 6 个既有用例 | a 的 0 测试构建/无打包/用法反例不变；b 的发现/排序/harness 分发（含 106/3/2）/可见性/拒绝断言不变，仅 CLI 观测值更新为 runner 输出 |
+
+### 修复前复现结果
+
+新功能先写回归：`git stash push -- src/main.rs` 撤下 runner 后
+`cargo test -p dolphin-compiler --test m19_test_cmd` = 3 passed; 9 failed：TEST-01..06 与
+更新后的 b CLI 断言全部失败（`--filter` 为未知参数 exit 2、`dc test` 仍输出 b 的临时
+`built N tests ...`），H19-05a 的 3 个用例仍通过（日志 `/tmp/opencode/h19-05c/pre-fix.log`）。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m19_test_cmd`：12 passed（默认 60.3s，LLVM 120.4s）。
+- 手工探针：pass/assertion/trap 分类、`--filter` 子集与汇总、0 测试、无匹配、30s 超时 kill 后
+  继续，均与固定期望一致；发行包内 `dc test` 同样输出与退出码正确。
+- 完整门禁与发行包冒烟全绿（见下）。
+
+### 实际运行命令与测试数量
+
+```bash
+cargo test -p dolphin-compiler --test m19_test_cmd                        # 12 passed（60.3s）
+cargo test -p dolphin-compiler --features llvm --test m19_test_cmd        # 12 passed（120.4s）
+cargo test --workspace --exclude dolphin-codegen-llvm                     # 355 passed (349→355)
+cargo test --workspace --features llvm                                    # 362 passed (356→362)
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples \
+  --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd
+                                                                          # 185 passed (179→185)
+cargo test -p dolphin-compiler --features llvm --test backend             # 4 passed
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features llvm \
+  -- -D warnings && git diff --check                                       # 全部通过
+# §5.3 / 发行包冒烟（本机 patchelf 隔离 venv）
+cargo build --release --bins
+./target/release/dc fmt --check examples crates/dolphin-std/src
+./target/release/dc run examples/m14|m15|m18                              # 固定输出、exit 0、stderr 空
+python3 scripts/package.py --target x86_64-unknown-linux-gnu --out-dir /tmp/opencode/h19-05c/dist
+# 解压归档后按 ci.yml 冒烟序列（m8/m14/m15/m18、打包 m15math、坐标消费、--locked --offline）
+                                                                          # SMOKE_SEQUENCE_OK
+# 发行包 dc test 冒烟：assertion=FAILED (assertion)、trap=FAILED (trap exit 101)、
+# --filter pass 只跑 1 个测试并汇总 1 passed; 0 failed; 2 filtered out
+```
+
+日志与产物在 `/tmp/opencode/h19-05c/`；测试文件列表无新增（`m19_test_cmd` 已在 CI/README/
+installation 显式列表中）。
+
+### 未运行的检查及原因
+
+- macOS/Windows 本机未运行；Windows 的 `TerminateProcess`/无退出码归类由远端 CI 三平台默认
+  lane（`cargo test --workspace` 含 `m19_test_cmd`）覆盖，本机不伪造；`kill` 语义差异不额外断言。
+- `--system-linker` 与 `dc test` 的组合未单独运行（选项经 `compile_settings` 与 build 共用，
+  链接器行为已由既有构建测试覆盖）。
+- 0 测试 + `--filter` 组合未单独断言（先判 0 测试，输出 `no tests found`）。
+- 并行执行、随机顺序、重试、输出格式 JSON 等均不在规格内，未实现。
+- tag/release 未触发。
+
+### 行为/兼容变化
+
+- `dc test` 现在实际运行用户测试：全部通过 exit 0、任一失败 exit 1，并按规格逐行输出与汇总。
+  H19-05b 的用户确认中间行为（`built N tests (execution lands in H19-05c)`，exit 1）被最终行为
+  替换；`docs/proposal-m19-cli-stdlib.md` §9.2 与 implemented-features 已同步，b 测试断言已更新。
+- 新增 `--filter <子串>`；`dc build`/`run`/`check`/`package` 行为不变且仍不读取 `tests/`。
+- 断言失败（106）/trap/超时都以非零退出并在 stderr 保留子进程诊断，不被 runner 吞掉。
+
+### 剩余问题和下一批输入（H19-06）
+
+1. H19-06：Result/defer 组合与有限语法补齐（ERR-01..04 → `tests/m19_errors.rs`）；先用既有
+   `Result`/`match`/helper/`defer` 写完整失败路径，只有证明阻塞才按规格 §10.2 回到用户重新冻结，
+   不得自行新增语法。
+2. H19-05 已关闭（a/b/c 全部通过）；H19-07 的真实应用需使用本批的 `dc test` 与 `std.test`。
+3. 本批未改动 IR/layout/lower/runtime；`dc test` 的 runner 属 CLI/driver 层。
+4. 无阻塞；M19 未完成，本报告不把 M19 或 H19-07 记为完成。

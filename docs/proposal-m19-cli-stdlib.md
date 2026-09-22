@@ -446,6 +446,13 @@ pub fn fail()
   106）。**子进程执行/汇总未实现**：`dc test` 发现 0 个测试时输出 `no tests found`，发现 N>0 时
   输出临时信息 `built N tests (execution lands in H19-05c)`，两者都以 1 退出（不伪报通过）。
 - `H19-05c`：子进程执行与汇总（超时、退出码分类、过滤、汇总）。
+  **已实现（2026-09-22）**：每个测试用 `<二进制> --dolphin-test <名称>` 在独立子进程中运行，
+  子进程 stdout/stderr 直接继承；固定 30 秒超时，超时 kill 并回收后继续后续测试。退出码分类为
+  0→`ok`、106→`FAILED (assertion)`、其余→`FAILED (trap exit N)`（无正常退出码统一按 1）；
+  固定输出 `test <name> ...` 行与 `N passed; M failed; K filtered out`。`--filter <子串>` 按名称
+  子串选择子集（在完整 harness 上运行，K 为未选中数）。0 测试 `no tests found`、过滤无匹配
+  `no tests matched filter`，均以 1 退出；全部通过 0、任一失败 1、编译失败 1、用法错误 2。
+  H19-05 三个子批次完成。
 每个子批次独立正反例，全部通过才关闭 H19-05。
 
 ### 9.3 拒绝方案
@@ -647,9 +654,8 @@ native code 是否存在，不绑定整段渲染文本。新测试文件必须�
 
 ## 15. 兼容性影响
 
-- **CLI**：`dc test` 为新增子命令（H19-05a 起为库项目构建测试目标，发现/执行见 b/c）；
-  `dc run` 增加 `--` 之后的应用参数（增量语法，原有调用不变）。
-  `dc build --lib` 行为不变（D1）。用法错误仍为退出码 2。
+- **CLI**：`dc test` 为新增子命令（H19-05 已完成构建/发现/执行与汇总）；`dc run` 增加 `--` 之后
+  的应用参数（增量语法，原有调用不变）。`dc build --lib` 行为不变（D1）。用法错误仍为退出码 2。
 - **清单/持久格式**：`dolphin.toml` 不新增字段（D2 自动发现）；`dolphin.lock` 与 `.dlib`
   格式、`compiler-version` 精确匹配策略不变；`dc test` 不写锁以外的持久文件。
 - **资源模型**：`defer` 语义不变；新增的只是 `std.io`/`std.fs` 句柄状态机契约与
@@ -663,9 +669,8 @@ native code 是否存在，不绑定整段渲染文本。新测试文件必须�
 ## 16. 未决与阻塞
 
 - D1、D2、D3 已于 2026-09-22 由用户确认；H19-01、H19-02、H19-03、H19-04 已完成对应实现
-  （见 [M19 报告](reports/m19-progress.md)）。H19-05a/b 已完成（构建侧 + 发现/harness/断言），
-  H19-05c（子进程执行、超时、退出码分类、过滤、汇总）未实施，因此 §9.1 的 runner 输出与
-  TEST-01..04、TEST-06 的端到端验收尚未可用；`dc test` 当前对 N>0 个测试只构建并以 1 退出。
+  （见 [M19 报告](reports/m19-progress.md)）。H19-05a/b/c 已完成（构建、发现/harness/`std.test`、
+  子进程执行/超时/分类/过滤/汇总），TEST-01..06 均有真实测试。H19-06/07 未实施，M19 未完成。
 - H19-02 经用户确认把 unit-like 返回值从 `Result<(), Error>` 改为 `Result<bool, Error>`（当前语言
   无 Unit 值；`Result<Unit, E>` 会触发诊断），并修复了暴露的两个编译器缺陷（Unit payload 诊断、
   LLVM 重复 extern 符号）。规格第 4.1 节已同步。

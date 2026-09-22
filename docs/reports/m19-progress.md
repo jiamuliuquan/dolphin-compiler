@@ -1110,4 +1110,132 @@ installation 的显式列表；`ci.yml` 冒烟新增 M19 构建/运行步骤。
    Debug/Release）与 examples/m19 构建运行；重点确认：Windows 目录错误类别 `(invalid)`、
    路径含空格/Unicode、`/dev/full` 用例在非 Linux 上按 `cfg(target_os = "linux")` 跳过。
 2. 三平台通过后 M19 阶段完成，下一阶段为 M20（先做 H20-00 设计冻结，不提前实现）。
-3. 本报告不把 M19 阶段记为完成；macOS/Windows 结果未出前保持“Linux 已验收”。
+3. 本报告不把 M19 阶段记为完成；Windows 已由下方补充节复验，macOS 结果未出前保持
+   “Linux + Windows 已验收”。
+
+## H19-07-W Windows 平台复验与缺陷修复
+
+- 批次：H19-07 的 Windows 平台复验（补充节，不新增批次编号；含为通过复验所需的缺陷修复）
+- 状态：完成（Windows 10 企业版 25H2 本机：默认 Cranelift lane、`tests/m19_app.rs`、
+  examples/m19 构建运行、fmt/clippy/Release 构建全绿；发现并修复 4 个 Windows 构建/运行时缺陷
+  与 2 个 Windows 测试/门禁缺陷；LLVM lane、发行包冒烟、macOS 与远端 CI 未验证）
+- 前置批次及报告：H19-07，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`77c5717`（`v0.3.0-M19-07`），工作区干净。
+- 本批修改：`runtime/windows_runtime.cpp`、`crates/dolphin-platform/build.rs`、
+  `tests/m19_io.rs`、`tests/m19_test_cmd.rs`，以及本报告与计划状态同步。未 commit/push/tag。
+
+### 环境
+
+| 项 | 值 |
+| --- | --- |
+| 平台 | Windows 10 企业版 25H2（build 26200），x86_64 |
+| rustc / cargo | 1.98.1（host `x86_64-pc-windows-msvc`） |
+| C 编译器 | Visual Studio 2022 Community MSVC 19.44.35228（`cl` 不在 PATH；`build.rs` 自定位 `vcvars64.bat`，复验命令经 vcvars64 激活） |
+| 系统代码页 | 936（中文 GBK）；仓库源码为 UTF-8 无 BOM |
+| LLVM 22 dev | 不存在（无 `llvm-config`），未构建 `--features llvm` |
+| git EOL | `core.autocrlf=true` + 仓库 `.gitattributes`（`eol=lf`），工作树 LF |
+| 验证用 `dc` | `cargo build --release --bins`（HEAD + 本节修复） |
+
+### 发现与修复
+
+H19-07 报告的“macOS/Windows 未运行”在本机复验时暴露 6 个 Windows 专属缺陷；1–4 使 M19
+在 Windows 上不可构建或不可运行，5–6 使 Windows lane 的门禁/测试失败。均为平台实现缺陷，
+不涉及规格决策；Unix 源码与语义未改。
+
+| # | 位置 | 根因（修复前） | 修复 | 引入批次 |
+| --- | --- | --- | --- | --- |
+| 1 | `runtime/windows_runtime.cpp` | `dolphin_stream_state`/`dolphin_owned_streams` 被放在 `#ifdef DOLPHIN_DEBUG_RUNTIME` 内；`build.rs` 无条件编译 Debug/Release 两份 runtime 对象，Release 分支缺少定义 → `cl` 失败 | 结构/登记表移到 `#ifdef` 之前（与 `unix_runtime.c` 布局一致） | H19-03 |
+| 2 | `crates/dolphin-platform/build.rs` | `cl` 未加 `/utf-8`，MSVC 按系统代码页 936 解析 UTF-8 源码，中文注释吞掉后续字节 | `cl` 调用（直接与 `.bat` 回退两处）加 `/utf-8` | H19-01（该文件首次引入非 ASCII 注释） |
+| 3 | `runtime/windows_runtime.cpp` | `dolphin_stream_release`/`dolphin_stream_from_raw` 缺 `extern "C"`；Windows 为 C++ 编译单元产生名称修饰，用户程序链接 `undefined symbol` | 两个定义加 `extern "C"` | H19-03 |
+| 4 | `runtime/windows_runtime.cpp` | `dolphin_stream_read` 未把匿名管道写端关闭后的 `ERROR_BROKEN_PIPE`（109）按 EOF 处理；stdin 第二次读失败 | 该错误码返回 `Ok(0)`，与 `Ok(0)=EOF` 契约一致 | H19-02 |
+| 5 | `tests/m19_io.rs` | `IO_WRITE_FAILURE_PROGRAM` 只在 `cfg(target_os = "linux")` 子用例使用，非 Linux 为 dead_code → `clippy --all-targets -- -D warnings` 失败 | 常量加 `#[cfg(target_os = "linux")]` | H19-02 |
+| 6 | `tests/m19_test_cmd.rs` | TEST-05a 硬编码测试目标文件后缀 `.o`，Windows MSVC 产物为 `.obj` | 按 `cfg!(windows)` 选择后缀 | H19-05a |
+
+### 修复前复现结果
+
+```text
+# 缺陷 1+2：Windows 任何 cargo build 都在 build.rs 编译 runtime 失败
+error: failed to run custom build command for `dolphin-platform`
+  thread 'main' panicked at crates\dolphin-platform\build.rs:228:9:
+  `cl` failed to compile the Dolphin runtime
+# 手工 cl（无 /utf-8，代码页 936）从 windows_runtime.cpp:324 起语法错误雪崩；
+# 加 /utf-8 后 Debug 对象通过、Release 仍报 `dolphin_stream_state` 未定义（两缺陷独立）。
+
+# 缺陷 3：修复 1/2 后 m19_app 6 项全失败
+rust-lld: error: undefined symbol: dolphin_stream_release
+rust-lld: error: undefined symbol: dolphin_stream_from_raw
+
+# 缺陷 4：修复 3 后 m19_app 4 passed; 2 failed（app_02/app_05）
+dtext: cannot read input (other)
+# 探针：管道第二次 ReadFile 返回 ok=0 err=109 (ERROR_BROKEN_PIPE)
+
+# 缺陷 5：cargo test 编译警告（clippy -D warnings 会失败）
+warning: constant `IO_WRITE_FAILURE_PROGRAM` is never used
+
+# 缺陷 6：m19_test_cmd 11 passed; 1 failed
+dir=lib-only ... missing test object `...\target\test\alpha-tests.o`
+```
+
+修复前输出为本会话观测，未单独归档；最终证据日志在
+`C:\Users\jiangyc\AppData\Local\Temp\opencode\h19-07-win\`（`workspace-test.log`、`m19_app.log`、
+`smoke.log`），不在仓库内。
+
+### 修复后结果
+
+| 检查 | 结果 |
+| --- | --- |
+| `tests/m19_app.rs` | 6 passed（`app_06_write_failure_not_trap` 为 `#[cfg(target_os = "linux")]`，按冻结预期跳过）；Windows 目录错误类别 `(invalid)`、空格/Unicode 路径、stdin 管道读取均在用例内实际断言通过 |
+| M19 其余套件 | `m19_args` 4、`m19_io` 4、`m19_fs` 6、`m19_text` 4、`m19_errors` 4、`m19_test_cmd` 12 全通过 |
+| 完整默认 lane | `cargo test --workspace --exclude dolphin-codegen-llvm` = 364 passed; 0 failed（Linux 366；差值 2 为 `app_06` 与 `ffi06_shared_library_integration` 的既有平台门控） |
+| 门禁 | `cargo fmt --all -- --check`、`cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings`、`cargo build --release --bins`、`git diff --check` 全部通过 |
+| 手工冒烟（release `dc`，临时副本） | plain `dc build` 拒绝 path 依赖（exit 1、含 `path dependency`）；`--bin dtext` Debug/Release 构建成功；stdin `--filter a` → `lines=2 matched=1 bytes=4`、stderr 空、exit 0；`--help` 固定用法；目录输入 → `dtext: cannot open input (invalid)`；空格+中文路径文件 → `lines=2 matched=1 bytes=14`；`dc test textstats`/`dtext` 各 5 passed、exit 0 |
+
+### 实际运行命令与测试数量
+
+```powershell
+# 均经 vcvars64 激活 MSVC
+cargo build --bins                                                # 修复前失败；修复后通过
+cargo test -p dolphin-compiler --test m19_app                     # 6 passed
+cargo test -p dolphin-compiler --test m19_args --test m19_io --test m19_fs `
+  --test m19_text --test m19_errors                               # 22 passed
+cargo test -p dolphin-compiler --test m19_test_cmd                # 12 passed (61.0s)
+cargo test --workspace --exclude dolphin-codegen-llvm             # 364 passed
+cargo fmt --all -- --check                                        # 通过
+cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings  # 通过
+cargo build --release --bins                                      # 通过
+.\target\release\dc.exe fmt --check examples crates/dolphin-std/src  # 通过
+# examples/m19 手工冒烟见上表（脚本与日志在 h19-07-win\smoke.log）
+```
+
+### 未运行的检查及原因
+
+- LLVM lane：本机无 LLVM 22 开发环境（`llvm-config` 缺失），`--features llvm`、`tests/backend.rs`
+  与 LLVM × M19 组合未在 Windows 验证。
+- 发行包（`scripts/package.py` 的 Windows zip）与 `ci.yml` 归档冒烟序列：本机复验聚焦 M19
+  默认 lane，未运行；Windows 归档的 M19 冒烟仍待在 runner 或后续补充节确认。
+- 远端 CI/tag：本机无 push/tag 权限，不伪造。
+- macOS：无设备，未验证。
+- 缺陷 5 的“修复前 clippy 失败”未单独跑一次 clippy 复现；`cargo test` 编译已直接输出该
+  dead_code 警告，修复后 clippy 全绿。
+
+### 行为/兼容变化
+
+- Windows：修复 1 使 `cargo build` 恢复可用（H19-03 起 Windows 全平台构建失败）；修复 3 使
+  `std.io.release`/`from_raw` 在 Windows 可链接；修复 4 使 Windows 管道 stdin 读取在 EOF 返回
+  `Ok(0)`；修复 2 使中文代码页环境可构建；修复 5/6 使 Windows 的 clippy 门禁与 TEST-05a 断言成立。
+- Unix：未触碰 `unix_runtime.c`；测试改动仅为平台门控/后缀选择，Unix 行为与断言不变。
+- 无 API、CLI、IR、归档格式变化；所有修复只影响此前在 Windows 上失败的路径。
+
+### 剩余问题和下一批输入
+
+1. macOS 复验仍未运行（H19-07 剩余问题 1 的 macOS 部分）；本批未改 Unix 运行时，预计不受影响，
+   但仍需 macOS 本机或 CI 确认。
+2. 建议在 Windows 上补跑 `python scripts/package.py --target x86_64-pc-windows-msvc` 与
+   `ci.yml` 归档冒烟（含 M19 步骤），或由远端 Windows runner 覆盖。
+3. 本批修复未 commit/push/tag。缺陷 1 与代码页无关，H19-03..07 的 Windows 构建在本地必然失败；
+   若远端 Windows lane 在此期间运行过，应同样失败。建议核对远端 lane 状态，不要把“由远端 CI
+   lane 覆盖”当作已通过。
+4. Windows 已复验；M19 阶段待 macOS 结果后由用户确认完成。

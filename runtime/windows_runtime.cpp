@@ -71,6 +71,17 @@ struct TrapInstaller {
 TrapInstaller trap_installer;
 }
 
+/* 句柄状态（M19/H19-02、H19-03）：标准流借用，文件流自有并登记在
+ * `dolphin_owned_streams`；登记表供 release/from_raw 校验与 Debug 报告。 */
+struct dolphin_stream_state {
+    int open;
+    int owned;
+    HANDLE native;
+    struct dolphin_stream_state *next;
+};
+
+static struct dolphin_stream_state *dolphin_owned_streams = NULL;
+
 /* ---------------------------------------------------------------------------
  * Allocator and Debug live-allocation table (M14-C/R04).
  * See unix_runtime.c for the rationale.
@@ -116,17 +127,6 @@ static int dolphin_unregister_alloc(void *pointer, size_t bytes) {
     }
     return 0;
 }
-
-/* 句柄状态（M19/H19-02、H19-03）：标准流借用，文件流自有并登记在
- * `dolphin_owned_streams`；登记表供 release/from_raw 校验与 Debug 报告。 */
-struct dolphin_stream_state {
-    int open;
-    int owned;
-    HANDLE native;
-    struct dolphin_stream_state *next;
-};
-
-static struct dolphin_stream_state *dolphin_owned_streams = NULL;
 
 extern "C" void dolphin_runtime_finish(void) {
     size_t leaked = 0;
@@ -535,6 +535,12 @@ extern "C" int dolphin_stream_read(uintptr_t id, uint8_t *buffer, uintptr_t leng
     DWORD read_bytes = 0;
     if (!ReadFile(state->native, buffer, to_read, &read_bytes, NULL)) {
         DWORD code = GetLastError();
+        // 匿名管道写端关闭后 ReadFile 返回 ERROR_BROKEN_PIPE；按 EOF 处理，
+        // 与 Unix read(2) 返回 0 的契约一致（`Ok(0) = EOF`）。
+        if (code == ERROR_BROKEN_PIPE) {
+            *out_read = 0;
+            return 0;
+        }
         dolphin_set_error(dolphin_kind_from_win32(code), (int)code);
         return (int)code;
     }
@@ -692,7 +698,7 @@ extern "C" int dolphin_stream_open(const uint8_t *path, uintptr_t length, int mo
 }
 
 /// 显式转交：返回可被 `from_raw` 接管的 id；借用/已关闭/未知 id 返回 0。
-uintptr_t dolphin_stream_release(uintptr_t id) {
+extern "C" uintptr_t dolphin_stream_release(uintptr_t id) {
     for (struct dolphin_stream_state *state = dolphin_owned_streams; state != NULL;
          state = state->next) {
         if ((uintptr_t)state == id) {
@@ -703,7 +709,7 @@ uintptr_t dolphin_stream_release(uintptr_t id) {
 }
 
 /// 接管 id：仅接受登记表中的 open 自有流；非法/已关闭/借用 id 返回 0。
-uintptr_t dolphin_stream_from_raw(uintptr_t id) {
+extern "C" uintptr_t dolphin_stream_from_raw(uintptr_t id) {
     if (id == 0) {
         return 0;
     }

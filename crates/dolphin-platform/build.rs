@@ -196,6 +196,9 @@ fn compile_windows(out_dir: &Path, manifest_dir: &Path) {
             let mut command = Command::new("cl");
             command
                 .arg("/nologo")
+                // 源码是 UTF-8（含中文注释）；不加 `/utf-8` 时 MSVC 按系统代码页
+                // 解析，在中文 Windows（936）上会吞掉后续字节导致编译失败。
+                .arg("/utf-8")
                 .arg("/TP")
                 .arg("/c")
                 .arg(format!("/Fo{}", object.display()));
@@ -213,7 +216,7 @@ fn compile_windows(out_dir: &Path, manifest_dir: &Path) {
                 .map(|flag| format!(" {flag}"))
                 .unwrap_or_default();
             let contents = format!(
-                "@echo off\r\ncall \"{}\" >nul\r\ncl /nologo /TP /c /Fo\"{}\"{} \"{}\"\r\n",
+                "@echo off\r\ncall \"{}\" >nul\r\ncl /nologo /utf-8 /TP /c /Fo\"{}\"{} \"{}\"\r\n",
                 vcvars.as_ref().unwrap().display(),
                 object.display(),
                 debug_flag,

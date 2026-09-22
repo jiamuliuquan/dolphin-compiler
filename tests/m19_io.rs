@@ -133,6 +133,7 @@ fn main(): i32 {
 }
 "#;
 
+#[cfg(target_os = "linux")]
 const IO_WRITE_FAILURE_PROGRAM: &str = r#"
 use std.io.stdout;
 use std.io.eprint;

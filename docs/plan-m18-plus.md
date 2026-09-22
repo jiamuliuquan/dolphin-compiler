@@ -151,7 +151,7 @@ D1–D3 已确认（规格第 12 节），后续代码批次从 H19-01 起逐批
 | H19-04 | 必要文本/数字处理 | H19-03 | 完成（`std.text.lines`/`Builder`/`parse_i64`/`parse_u64`，见 [报告](reports/m19-progress.md)） |
 | H19-05 | 最小 dc test 与库开发闭环 | H19-04 | 完成（H19-05a/b/c：构建 + `tests/` 发现/harness/`std.test` + 子进程执行/超时/过滤/汇总，见 [报告](reports/m19-progress.md)） |
 | H19-06 | Result/defer 组合与有限语法补齐 | H19-05 | 完成（组合回归 ERR-01..04；未新增语法，见 [报告](reports/m19-progress.md)） |
-| H19-07 | 真实应用、文档、三平台验收 | H19-06 | 完成（Linux：`examples/m19` + `tests/m19_app.rs`；macOS/Windows 待用户后续验证，见 [报告](reports/m19-progress.md)） |
+| H19-07 | 真实应用、文档、三平台验收 | H19-06 | 完成（Linux：`examples/m19` + `tests/m19_app.rs`；Windows 复验：本机默认 lane 全绿，发现并修复 4 个构建/运行时与 2 个测试/门禁缺陷；macOS 待验证，见 [报告](reports/m19-progress.md)） |
 
 **H19-01：参数和环境。** 保留当前无参数 main 的源码兼容，推荐通过 std API 读取进程上下文；底层 argc/argv 已存在不代表语言能直接访问。`dc run <项目> [编译选项] -- <应用参数>` 必须原样传递空参数、空格、Unicode 和以 `-` 开头的参数，不经过 shell 拼接。env 缺项和编码失败按规格返回不同结果。验收 ARGS-01：直接运行与 dc run 参数一致；ARGS-02：参数转义/Unicode；ARGS-03：无环境项与非法输入；ARGS-04：main/exit 的历史行为不变。
 

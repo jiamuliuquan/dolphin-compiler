@@ -164,7 +164,11 @@ fn assert_test_target_built(
     let object = directory
         .join("target")
         .join("test")
-        .join(format!("{artifact_name}.o"));
+        .join(if cfg!(windows) {
+            format!("{artifact_name}.obj")
+        } else {
+            format!("{artifact_name}.o")
+        });
     assert!(
         object.is_file(),
         "{context}: missing test object `{}`",

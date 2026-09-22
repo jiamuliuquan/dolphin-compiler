@@ -132,7 +132,7 @@ llvm-config --version
 test -f "$(llvm-config --libdir)/libPolly.a"
 cargo clippy --workspace --all-targets --features llvm -- -D warnings
 DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm
-DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd
 cargo test -p dolphin-compiler --features llvm --test backend
 ```
 

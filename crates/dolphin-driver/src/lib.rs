@@ -508,6 +508,86 @@ pub fn build_library_with_graph(
     })
 }
 
+/// 构建测试目标（M19/H19-05a，仅路径依赖；CLI 先解析完整包图后调用 `_with_graph`）。
+pub fn build_tests(
+    manifest: &Manifest,
+    profile: BuildProfile,
+    settings: BuildSettings,
+    entry_source: &str,
+) -> Result<BuildArtifact, Diagnostic> {
+    let graph = resolver::resolve_paths_only(manifest)?;
+    build_tests_with_graph(manifest, profile, settings, &graph, entry_source)
+}
+
+/// 构建测试目标（M19/H19-05a）：库源码 + 生成的根模块入口 -> `target/test/<包名>-tests`。
+///
+/// 这是**开发/测试目标入口**，与 `build --lib` 不同：不产出 `.dlib`、不要求可发布性，
+/// 因此可以解析 path 依赖（D1：不放宽打包限制）。根包排除全部 `[[bin]]` 入口，
+/// 生成入口作为根模块源码注入（不写入用户 `src/`）；依赖包只贡献库源码。
+/// 需要 `[lib]` 目标；`main` 由生成的入口提供。
+pub fn build_tests_with_graph(
+    manifest: &Manifest,
+    profile: BuildProfile,
+    settings: BuildSettings,
+    graph: &PackageGraph,
+    entry_source: &str,
+) -> Result<BuildArtifact, Diagnostic> {
+    if manifest.lib.is_none() {
+        return Err(Diagnostic::plain(format!(
+            "`{}` does not declare a `[lib]` target; `dc test` requires a library target",
+            manifest.path.display()
+        )));
+    }
+    let platform = platform::host()?;
+    let directory = manifest.build.output.join("test");
+    fs::create_dir_all(&directory).map_err(|error| {
+        Diagnostic::plain(format!(
+            "could not create output directory `{}`: {error}",
+            directory.display()
+        ))
+    })?;
+    let entry = directory.join(format!("{}-tests.entry.do", manifest.package.name));
+    fs::write(&entry, entry_source).map_err(|error| {
+        Diagnostic::plain(format!(
+            "could not write generated test entry `{}`: {error}",
+            entry.display()
+        ))
+    })?;
+
+    let base = directory.join(format!("{}-tests", manifest.package.name));
+    let output = with_executable_suffix(&base, platform.as_ref());
+    let exclude: HashSet<PathBuf> = manifest.bins.iter().map(|bin| bin.path.clone()).collect();
+    let loaded = load_graph_sources_with_extra(
+        graph,
+        exclude,
+        vec![modules::ExtraSource {
+            path: entry,
+            text: entry_source.to_string(),
+        }],
+    )?;
+    let program = lower::lower_sources(&loaded.sources, &loaded.program, &loaded.packages)?;
+    let object = object_path(&base, platform.object_suffix());
+    select_backend(settings.backend)?.emit_program(
+        &program,
+        &object,
+        profile == BuildProfile::Release,
+        platform.as_ref(),
+    )?;
+    let native = package_native_inputs(graph, platform.as_ref())?;
+    linker::link(
+        platform.as_ref(),
+        &object,
+        &output,
+        settings.linker,
+        profile == BuildProfile::Debug,
+        &native,
+    )?;
+    Ok(BuildArtifact {
+        executable: output,
+        object,
+    })
+}
+
 /// 汇总依赖图中当前目标三元组的原生链接输入。
 ///
 /// 顺序为反向拓扑（使用者先于提供者），共享依赖排在全部使用者之后；同包沿用
@@ -641,6 +721,16 @@ fn load_graph_sources(
     graph: &PackageGraph,
     root_exclude: HashSet<PathBuf>,
 ) -> Result<modules::LoadedProgram, Diagnostic> {
+    load_graph_sources_with_extra(graph, root_exclude, Vec::new())
+}
+
+/// 与 [`load_graph_sources`] 相同，但给根包注入额外根模块源码（`dc test` 的
+/// 生成入口；后续 `tests/*.do` 也经此进入），不参与磁盘发现。
+fn load_graph_sources_with_extra(
+    graph: &PackageGraph,
+    root_exclude: HashSet<PathBuf>,
+    root_extra: Vec<modules::ExtraSource>,
+) -> Result<modules::LoadedProgram, Diagnostic> {
     let packages: Vec<modules::PackageSources> = graph
         .packages
         .iter()
@@ -662,6 +752,11 @@ fn load_graph_sources(
                     .iter()
                     .map(|bin| bin.path.clone())
                     .collect()
+            },
+            extra: if package.id == graph.root {
+                root_extra.clone()
+            } else {
+                Vec::new()
             },
         })
         .collect();

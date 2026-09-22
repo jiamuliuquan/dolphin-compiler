@@ -89,6 +89,7 @@ my-project/
 dc check <项目目录或main.do> [--locked] [--offline] [--color auto|always|never]
 dc build <项目目录或main.do> [--bin <名称>|--lib] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- <应用参数>...]
+dc test  <项目目录> [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc package <项目目录> [--locked] [--offline]
 dc fetch <项目目录> [--locked] [--offline]
 dc publish <项目目录> [--repository <id>] [--locked] [--offline]
@@ -107,7 +108,7 @@ CLI 使用 Clap 解析参数。`dc --help`、`dc --version` 以及 `dc <子命�
 ./examples/m8/target/m8
 ```
 
-M8 示例预期退出码为 64。也可以直接编译一个不使用模块声明和导入的 `.do` 文件；依赖管理通过项目清单提供，见第 17 节。`dc run ... -- <应用参数>` 自 H19-01 起原样转发参数（不经 shell，空参数/空格/Unicode/以 `-` 开头均保留，支持非法 UTF-8 字节）；`dc test` 尚未实现，安排在 M19 H19-05。
+M8 示例预期退出码为 64。也可以直接编译一个不使用模块声明和导入的 `.do` 文件；依赖管理通过项目清单提供，见第 17 节。`dc run ... -- <应用参数>` 自 H19-01 起原样转发参数（不经 shell，空参数/空格/Unicode/以 `-` 开头均保留，支持非法 UTF-8 字节）；`dc test` 自 H19-05a 起为库项目构建测试目标到 `target/test/<包名>-tests`（需要 `[lib]` 目标；不产出 `.dlib`、不要求可发布性，因此 path 依赖可解析）。**测试发现（H19-05b）与子进程执行/汇总（H19-05c）尚未实现**：当前命令不读取 `tests/`，一律输出 `no tests found` 并以 1 退出。
 
 ### 2.2a 项目清单 `dolphin.toml`
 

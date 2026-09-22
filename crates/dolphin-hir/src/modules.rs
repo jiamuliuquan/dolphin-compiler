@@ -26,6 +26,16 @@ pub struct PackageSources {
     pub source_root: PathBuf,
     /// 需要排除的入口文件（其他 bin、库构建时的全部 bin）。
     pub exclude: HashSet<PathBuf>,
+    /// 额外的**根模块**源码（不参与磁盘发现、不得声明 `pkg`）：`dc test` 的
+    /// 生成入口与 `tests/*.do` 由此注入，保持诊断指向真实/生成文件路径。
+    pub extra: Vec<ExtraSource>,
+}
+
+/// 注入到包根模块的额外源码（M19/H19-05a）。
+#[derive(Clone)]
+pub struct ExtraSource {
+    pub path: PathBuf,
+    pub text: String,
 }
 
 struct Unit {
@@ -83,6 +93,7 @@ pub fn load_sources(
         aliases: BTreeMap::new(),
         source_root: source_root.to_path_buf(),
         exclude: exclude.clone(),
+        extra: Vec::new(),
     }])
 }
 
@@ -101,14 +112,14 @@ pub fn load_packages(packages: &[PackageSources]) -> Result<LoadedProgram, Diagn
         discover_sources(&package.source_root, &mut paths)?;
         paths.retain(|path| !package.exclude.contains(path));
         paths.sort();
-        if paths.is_empty() {
+        if paths.is_empty() && package.extra.is_empty() {
             return Err(Diagnostic::plain(format!(
                 "source directory `{}` does not contain any `.do` files",
                 package.source_root.display()
             )));
         }
         let mut top_level = HashSet::new();
-        let mut parsed = Vec::with_capacity(paths.len());
+        let mut parsed = Vec::with_capacity(paths.len() + package.extra.len());
         for path in &paths {
             let text = fs::read_to_string(path).map_err(|error| {
                 Diagnostic::plain(format!("could not read `{}`: {error}", path.display()))
@@ -128,6 +139,17 @@ pub fn load_packages(packages: &[PackageSources]) -> Result<LoadedProgram, Diagn
             assign_source_id(&mut program, source_id);
             sources.push(source);
             parsed.push((source_id, relative, program));
+        }
+        // 注入的额外源码按根模块文件处理：不得声明 `pkg`，可访问根模块私有项。
+        for extra in &package.extra {
+            let source = SourceFile::new(extra.path.clone(), extra.text.clone());
+            let tokens = lexer::lex(&source)?;
+            let mut program = parser::parse(&source, tokens)?;
+            validate_package(&source, &program, "")?;
+            let source_id = sources.len();
+            assign_source_id(&mut program, source_id);
+            sources.push(source);
+            parsed.push((source_id, String::new(), program));
         }
         for (segment, target) in &package.aliases {
             if top_level.contains(segment) {

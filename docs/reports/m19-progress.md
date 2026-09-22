@@ -539,3 +539,116 @@ installation 的显式列表。
    `consume` 处理完整行，并在 `from_utf8` 校验失败时报 `dtext: invalid UTF-8`（退出 1）。
 3. 新测试文件 `tests/m19_text.rs` 已进入显式列表；H19-05 新增文件同样要加入。
 4. 无阻塞；本报告不把 M19 记为完成。
+
+## H19-05a `dc test` 测试目标入口
+
+- 批次：H19-05a（H19-05 的第一子批次；b/c 未实施，H19-05 不关闭）
+- 状态：完成（Linux x86_64；Cranelift/LLVM × Dolphin Debug/Release 本机；macOS/Windows 由远端 CI lane 覆盖，待平台确认）
+- 前置批次及报告：H19-04，见本文件上一节；子批次拆分依据规格 §9.2 与计划第 5.3 节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`d252afc`（`v0.3.0-M19-04`），工作区干净。
+- 本批修改：`crates/dolphin-hir/src/modules.rs`、`crates/dolphin-driver/src/lib.rs`、`src/main.rs`、
+  `tests/m19_test_cmd.rs`（新）、`.github/workflows/ci.yml`、`README.md`、`docs/installation.md`、
+  `docs/implemented-features.md`、`docs/proposal-m19-cli-stdlib.md`、`docs/plan-m18-plus.md`、本报告。
+  未 commit/push/tag。
+
+### 修改文件与关键实现
+
+- `crates/dolphin-hir/src/modules.rs`：`PackageSources` 新增 `extra: Vec<ExtraSource>`，把不参与
+  磁盘发现的源码按**根模块文件**注入（不得声明 `pkg`，可访问根模块私有项与子模块 `pub` 项）；
+  根包在磁盘源码被排除后仍有 `extra` 时不再报“没有 `.do` 文件”。`load_sources` 传空。
+- `crates/dolphin-driver/src/lib.rs`：新增 `build_tests`（仅路径依赖）与 `build_tests_with_graph`
+  （CLI 用完整包图）。需要 `[lib]` 目标；排除全部 `[[bin]]` 入口；生成入口写到
+  `target/test/<包名>-tests.entry.do` 并作为根模块注入；产出
+  `target/test/<包名>-tests[.exe]` 与 `.o`；**不调用打包路径**（无 `.dlib`、不要求可发布性）。
+  `load_graph_sources` 改为委托新的 `load_graph_sources_with_extra`。
+- `src/main.rs`：新增 `dc test <项目目录>` 子命令，编译选项与 build/run 一致
+  （`--debug`/`--release`、`--system-linker`、`--backend`、`--locked`/`--offline`）；缺清单、
+  bin-only、编译失败均 exit 1，clap 用法错误 exit 2。本批生成入口为占位
+  `fn main(): i32 { return 0; }`；发现（b）与执行/汇总（c）未实现，命令按冻结的 0 测试规则
+  输出 `no tests found` 并 exit 1。`BuildArgs` 与 `TestArgs` 共享 `explicit_profile`/
+  `compile_settings`/`resolve_options` 三个 helper。
+- `tests/m19_test_cmd.rs`：TEST-05a 构建侧、根模块契约与反例。
+
+### 验收映射
+
+| 验收点 | 测试名 | 期望与结果 |
+| --- | --- | --- |
+| TEST-05a（构建侧） | `m19_test_cmd.rs::test_05a_lib_only_bin_and_path_dep_targets` | lib-only、lib+bin、path 依赖三种项目在可用后端 × Debug/Release 上均 exit 1 + 固定 `no tests found`、stderr 空；`target/test/<名>-tests` 与 `.o` 存在；无 `target/package`、全项目无 `.dlib`；占位产物运行 exit 0 且 stderr 空；4 组合通过 |
+| 根模块契约 | `test_05a_generated_entry_is_root_module` | 驱动 API 注入调用私有 `secret()` 与 `pub value()` 的入口，产物 exit 8，证明生成入口与 `src/*.do` 同属根模块；4 组合通过 |
+| 反例/用法 | `test_05a_errors_usage_and_no_packaging` | 库源码错误 exit 1 + `unknown variable` 诊断、无产物；无清单 exit 1；bin-only exit 1 + `requires a library target`；`--locked` 无锁 exit 1；未知参数 exit 2；`dc check`/`dc build --lib` 忽略含非法文件的 `tests/`；`dc test` 可构建 path 依赖而 `dc package` 仍拒绝 path dependency（D1 不变） |
+
+### 修复前复现结果
+
+新功能先写回归：`git stash push` 撤下 HIR/driver/CLI 三个文件后
+`cargo test -p dolphin-compiler --test m19_test_cmd` 编译失败
+`error[E0432]: unresolved import dolphin_compiler::build_tests`；同一状态下
+`./target/debug/dc test <项目>` 输出 `error: unrecognized subcommand 'test'` 并 exit 2
+（日志 `/tmp/opencode/h19-05/pre-fix.log`、`pre-fix-cli.err`）。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m19_test_cmd`：3 passed；`--features llvm` 同样 3 passed
+  （每例 Cranelift+LLVM × Debug/Release）。
+- 手工探针：lib-only/lib+bin/path 依赖均生成 `target/test/<名>-tests`；产物 exit 0、stderr 空；
+  `dc package` 对 path 依赖仍报 `cannot publish: dependency ... is a path dependency`。
+- 完整门禁与发行包冒烟全绿（见下）。
+
+### 实际运行命令与测试数量
+
+```bash
+cargo test -p dolphin-compiler --test m19_test_cmd                        # 3 passed
+cargo test -p dolphin-compiler --features llvm --test m19_test_cmd        # 3 passed
+cargo test --workspace --exclude dolphin-codegen-llvm                     # 346 passed (343→346)
+cargo test --workspace --features llvm                                    # 353 passed (350→353)
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples \
+  --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd
+                                                                          # 176 passed (173→176)
+cargo test -p dolphin-compiler --features llvm --test backend             # 4 passed
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features llvm \
+  -- -D warnings && git diff --check                                       # 全部通过
+# §5.3 / 发行包冒烟（本机 patchelf 隔离 venv）
+cargo build --release --bins
+./target/release/dc fmt --check examples crates/dolphin-std/src
+./target/release/dc run examples/m14|m15|m18                              # 固定输出、exit 0、stderr 空
+python3 scripts/package.py --target x86_64-unknown-linux-gnu --out-dir /tmp/opencode/h19-05/dist
+# 解压归档后按 ci.yml 冒烟序列（m8/m14/m15/m18、打包 m15math、坐标消费、--locked --offline）
+                                                                          # SMOKE_SEQUENCE_OK
+# 发行包内 dc test 冒烟：lib 项目 -> target/test/archtest-tests，no tests found，exit 1
+```
+
+日志与产物在 `/tmp/opencode/h19-05/`；`--test m19_test_cmd` 已加入 `ci.yml` LLVM lane、README 与
+installation 的显式列表。
+
+### 未运行的检查及原因
+
+- macOS/Windows 本机未运行；本批改动为跨平台路径/模块加载与 CLI，由远端 CI 三平台默认 lane
+  （`cargo test --workspace` 含 `m19_test_cmd`）覆盖，本机不伪造。
+- 测试发现（`tests/*.do`、`test_*`、可见性）、`std.test.expect/fail`、`--filter`、30s 超时、
+  子进程隔离与汇总均未实现（H19-05b/c）；TEST-01..04、TEST-06 因此未运行。
+- 生成入口当前是占位 `main`，没有真实测试代码，因此本批未覆盖“测试 trap 后继续/超时回收”等
+  运行期路径；Debug 只验证占位产物 stderr 为空。
+- bin-only 项目被明确拒绝（`dc test` 需要 `[lib]`，避免与生成入口的 `main` 冲突）；规格
+  TEST-05 只要求 lib-only/lib+bin/path 依赖，此限制已写入规格 §9.2 与 implemented-features。
+- tag/release 未触发。
+
+### 行为/兼容变化
+
+- 新增 `dc test` 子命令（H19-05a 仅构建侧）；`dc build`/`run`/`check`/`package`/`publish` 行为不变，
+  且都不读取 `tests/`。`dc build --lib` 仍产出验证目标文件与 `.dlib`（D1 不变）。
+- `PackageSources` 新增 `extra` 字段（dolphin-hir 公共结构；当前唯一构造方是 driver，已同步）。
+- 生成的测试入口与目标文件写入 `target/test/`，不写入用户 `src/`。
+
+### 剩余问题和下一批输入（H19-05b）
+
+1. H19-05b：发现 `tests/` 直接子文件 `*.do`（不递归）、`test_*`（无参数/无类型参数/返回 Unit）、
+   拒绝测试文件中的 `main`、生成按全限定名排序的 harness 入口（内部 `--dolphin-test <名称>` 分发）、
+   测试文件按根模块编译并保持可见性（不把私有项改 `pub`）。生成入口应替换本批占位实现。
+2. H19-05c：子进程执行（30s 超时 kill 并继续）、退出码分类（assertion 106/trap/timeout）、
+   `--filter`、固定汇总格式与 0 测试/无匹配 exit 1。b 不得提前实现 c 的运行与汇总。
+3. `std.test`（`expect`/`fail` + 运行时 `dolphin_test_fail`）随 b 引入；§13 ABI 表已冻结。
+4. `tests/m19_test_cmd.rs` 已进入显式列表；b/c 扩展同一文件时保持 TEST-01..06 计划测试名。
+5. 无阻塞；H19-05 未关闭，本报告不把 M19 记为完成。

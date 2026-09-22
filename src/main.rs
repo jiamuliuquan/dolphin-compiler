@@ -7,8 +7,9 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use dolphin_compiler::{
     BackendChoice, BuildArtifact, BuildOptions, BuildProfile, BuildSettings, Cache, DependencyKind,
     LibraryArtifact, LinkerChoice, Manifest, ResolveOptions, build_library_with_graph,
-    build_manifest_with_graph, build_with_profile, check, check_library_with_graph,
-    check_manifest_with_graph, discover_manifest, host_platform, publish_library, resolve_project,
+    build_manifest_with_graph, build_tests_with_graph, build_with_profile, check,
+    check_library_with_graph, check_manifest_with_graph, discover_manifest, host_platform,
+    publish_library, resolve_project,
 };
 
 #[derive(Parser)]
@@ -37,6 +38,9 @@ enum Commands {
 
     /// Compile and execute the program
     Run(RunArgs),
+
+    /// Build the test target into target/test/ (M19/H19-05a; discovery and execution land in H19-05b/c)
+    Test(TestArgs),
 
     /// Produce a `.dlib` library package from the current library target
     Package(ProjectArgs),
@@ -183,38 +187,92 @@ struct RunArgs {
     app_args: Vec<std::ffi::OsString>,
 }
 
+/// `dc test` 的编译选项（M19/H19-05a）。测试发现与执行选项在 H19-05b/c 追加。
+#[derive(Args)]
+struct TestArgs {
+    /// Dolphin project directory (defaults to the current directory)
+    input: Option<PathBuf>,
+
+    /// Disable optimizations for faster compilation
+    #[arg(long, conflicts_with = "release")]
+    debug: bool,
+
+    /// Enable speed optimizations
+    #[arg(long, conflicts_with = "debug")]
+    release: bool,
+
+    /// Fall back to the system linker (cc/link) instead of the bundled rust-lld
+    #[arg(long)]
+    system_linker: bool,
+
+    /// Select the code generation backend (defaults to $DOLPHIN_BACKEND or cranelift)
+    #[arg(long, value_enum)]
+    backend: Option<BackendArg>,
+
+    /// Require an up-to-date dolphin.lock and do not rewrite it
+    #[arg(long)]
+    locked: bool,
+
+    /// Do not access HTTP(S) repositories
+    #[arg(long)]
+    offline: bool,
+}
+
+/// 显式 profile：`--release`/`--debug` 才算显式；两者都没传返回 `None`，
+/// 由命令在发现清单后按 `显式 > 清单 > Debug` 解析（`BuildProfile::resolve`）。
+fn explicit_profile(release: bool, debug: bool) -> Option<BuildProfile> {
+    if release {
+        Some(BuildProfile::Release)
+    } else if debug {
+        Some(BuildProfile::Debug)
+    } else {
+        None
+    }
+}
+
+fn compile_settings(system_linker: bool, backend: Option<BackendArg>) -> BuildSettings {
+    let linker = if system_linker {
+        LinkerChoice::System
+    } else {
+        LinkerChoice::default()
+    };
+    let backend = match backend {
+        Some(BackendArg::Cranelift) => BackendChoice::Cranelift,
+        Some(BackendArg::Llvm) => BackendChoice::Llvm,
+        None => BackendChoice::default(),
+    };
+    BuildSettings { linker, backend }
+}
+
+fn resolve_options(locked: bool, offline: bool) -> ResolveOptions {
+    ResolveOptions { offline, locked }
+}
+
 impl BuildArgs {
-    /// 显式 profile：`--release`/`--debug` 才算显式；两者都没传返回 `None`，
-    /// 由命令在发现清单后按 `显式 > 清单 > Debug` 解析（`BuildProfile::resolve`）。
     fn explicit_profile(&self) -> Option<BuildProfile> {
-        if self.release {
-            Some(BuildProfile::Release)
-        } else if self.debug {
-            Some(BuildProfile::Debug)
-        } else {
-            None
-        }
+        explicit_profile(self.release, self.debug)
     }
 
     fn settings(&self) -> BuildSettings {
-        let linker = if self.system_linker {
-            LinkerChoice::System
-        } else {
-            LinkerChoice::default()
-        };
-        let backend = match self.backend {
-            Some(BackendArg::Cranelift) => BackendChoice::Cranelift,
-            Some(BackendArg::Llvm) => BackendChoice::Llvm,
-            None => BackendChoice::default(),
-        };
-        BuildSettings { linker, backend }
+        compile_settings(self.system_linker, self.backend)
     }
 
     fn resolve_options(&self) -> ResolveOptions {
-        ResolveOptions {
-            offline: self.offline,
-            locked: self.locked,
-        }
+        resolve_options(self.locked, self.offline)
+    }
+}
+
+impl TestArgs {
+    fn explicit_profile(&self) -> Option<BuildProfile> {
+        explicit_profile(self.release, self.debug)
+    }
+
+    fn settings(&self) -> BuildSettings {
+        compile_settings(self.system_linker, self.backend)
+    }
+
+    fn resolve_options(&self) -> ResolveOptions {
+        resolve_options(self.locked, self.offline)
     }
 }
 
@@ -398,6 +456,20 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             }
             let artifact = select_run_target(&artifacts, color)?;
             run_executable(artifact, &app_args)
+        }
+        Commands::Test(args) => {
+            let input = args.input.clone().unwrap_or_else(|| PathBuf::from("."));
+            let manifest = require_manifest(&input, color)?;
+            let profile = BuildProfile::resolve(&manifest, args.explicit_profile());
+            let resolved = resolve_project(&manifest, args.resolve_options())
+                .map_err(|error| (error.to_string(), color))?;
+            // H19-05a：只构建测试目标；生成入口暂为占位 `main`，测试发现（H19-05b）
+            // 与子进程执行/汇总（H19-05c）落地前一律按冻结的 0 测试规则报告。
+            let entry = "fn main(): i32 {\n    return 0;\n}\n";
+            build_tests_with_graph(&manifest, profile, args.settings(), &resolved.graph, entry)
+                .map_err(|error| (error.to_string(), color))?;
+            println!("no tests found");
+            Ok(ExitCode::FAILURE)
         }
         Commands::Package(args) => {
             let input = args.input.unwrap_or_else(|| PathBuf::from("."));

@@ -108,7 +108,7 @@ CLI 使用 Clap 解析参数。`dc --help`、`dc --version` 以及 `dc <子命�
 ./examples/m8/target/m8
 ```
 
-M8 示例预期退出码为 64。也可以直接编译一个不使用模块声明和导入的 `.do` 文件；依赖管理通过项目清单提供，见第 17 节。`dc run ... -- <应用参数>` 自 H19-01 起原样转发参数（不经 shell，空参数/空格/Unicode/以 `-` 开头均保留，支持非法 UTF-8 字节）；`dc test` 自 H19-05a 起为库项目构建测试目标到 `target/test/<包名>-tests`（需要 `[lib]` 目标；不产出 `.dlib`、不要求可发布性，因此 path 依赖可解析）。**测试发现（H19-05b）与子进程执行/汇总（H19-05c）尚未实现**：当前命令不读取 `tests/`，一律输出 `no tests found` 并以 1 退出。
+M8 示例预期退出码为 64。也可以直接编译一个不使用模块声明和导入的 `.do` 文件；依赖管理通过项目清单提供，见第 17 节。`dc run ... -- <应用参数>` 自 H19-01 起原样转发参数（不经 shell，空参数/空格/Unicode/以 `-` 开头均保留，支持非法 UTF-8 字节）；`dc test` 自 H19-05a 起为库项目构建测试目标到 `target/test/<包名>-tests`（需要 `[lib]` 目标；不产出 `.dlib`、不要求可发布性，因此 path 依赖可解析），H19-05b 起发现 `tests/` 直接子文件中的 `test_*` 并生成 harness。**子进程执行与汇总（H19-05c）尚未实现**：0 个测试输出 `no tests found`，N>0 输出临时信息 `built N tests (execution lands in H19-05c)`，两者都以 1 退出；`dc build`/`run`/`package`/`check` 仍永不读取 `tests/`。
 
 ### 2.2a 项目清单 `dolphin.toml`
 
@@ -923,7 +923,7 @@ dolphin_runtime_finish
   `from_utf8`、`TextError`、H19-04 的 `lines`/`Builder`/`parse_i64`/`parse_u64`/`NumberError`）、
   `std.ffi`（`CString`、`CStringError`）、`std.process`（进程参数与环境，
   H19-01）、`std.error` 与 `std.io`（错误类别与标准流字节 I/O，H19-02）、`std.fs`（文件打开与模式，
-  H19-03）。
+  H19-03）、`std.test`（用户测试断言，H19-05b）。
 - **导入与 prelude**：`use std.mem;`、`use std.text;`、`use std.collections.Vec;` 与类型导入；
   `Option`/`Result`/`Iterator` 作为最小 prelude 自动可用，被本模块定义或显式导入时遮蔽。
 - **迭代器协议**：`for x in expr` 要求 `expr` 实现 `Iterator`；数组与切片经只读切片适配到
@@ -957,6 +957,9 @@ dolphin_runtime_finish
   路径含内部 NUL 在调用运行时前返回 `InvalidArgument`；Windows UTF-8→UTF-16 失败同样报错。
   句柄是自有资源：`close` 幂等，重绑定前必须 `close`/`release`；Debug 运行时在退出收尾报告
   未关闭的自有流（`Dolphin: N open handle(s) not closed at exit`，退出码不变），借用标准流不计入。
+- **`std.test` 用户测试（H19-05b）**：`expect(condition: bool)` 与 `fail()`；失败写 stderr
+  固定文本 `Dolphin test assertion failed` 并以 `106` 退出（与 trap 一样不展开栈、不执行 defer、
+  不运行 Debug 收尾报告）。不提供带消息断言；需要上下文时先 `println`。
 - **`std.text` 文本/数值（H19-04）**：`lines(bytes: []const u8): Lines` 按 `\n` 切分，去掉紧邻
   `\n` 前的一个 `\r`，孤立 `\r` 保留，无 `\n` 的非空尾段算一行，空输入 0 行；产出 `[]const u8`
   **借用视图**、零分配、不校验 UTF-8。`Builder` 是**拥有型**增长缓冲：`init`/`with_capacity`/
@@ -1003,6 +1006,14 @@ dolphin_runtime_finish
 - **原生文件**：依赖的原生输入按反向拓扑顺序（使用者先于提供者，共享依赖排在全部使用者之后）去重合并；
   同名不同内容 runtime 文件报冲突；包只在其列出的目标上可消费。
 - **示例**：`examples/m15` 通过 `math = { path = "mathlib" }` 演示 lib + path 依赖 + 跨包泛型。
+- **`dc test` 用户测试（H19-05a/b）**：需要 `[lib]` 目标；发现包根 `tests/` 的**直接子文件**
+  `*.do`（不递归）中的 `test_*` 函数，按函数名排序生成根模块入口，测试二进制输出到
+  `target/test/<包名>-tests[.exe]`。测试文件不得声明 `pkg`、不得定义 `main`；`test_*` 必须无参数、
+  无类型参数、返回 Unit（无返回类型标注）；其他函数可作为 helper。测试与 `src/*.do` 同属根模块，
+  可访问根模块私有项与子模块 `pub` 项（子模块私有项不可见）。断言用 `std.test.expect/fail`。
+  入口的内部调用形式 `<二进制> --dolphin-test <名称>` 不对外承诺。子进程执行与汇总（含 `--filter`、
+  30s 超时、固定 `test <name> ... ok` 输出与 `N passed; M failed; K filtered out`）属 H19-05c，
+  尚未实现。
 
 ## 18. 优化后端与开发工具（M16、M17，已完成）
 

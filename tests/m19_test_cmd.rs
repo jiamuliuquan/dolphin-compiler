@@ -13,7 +13,9 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dolphin_compiler::{BuildProfile, BuildSettings, build_tests, load_manifest};
+use dolphin_compiler::{
+    BuildProfile, BuildSettings, build_test_target, build_tests, load_manifest,
+};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -120,6 +122,14 @@ fn stdout_text(output: &Output) -> String {
 
 fn stderr_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// 直接运行测试二进制（内部 `--dolphin-test` 接口，H19-05c 的 runner 也用它）。
+fn run_artifact(artifact: &Path, args: &[&str]) -> Output {
+    Command::new(artifact)
+        .args(args)
+        .output()
+        .expect("test binary should run")
 }
 
 /// 断言一次成功的 `dc test` 构建：0 测试冻结输出、无打包产物、测试二进制与目标文件存在。
@@ -401,5 +411,307 @@ fn test_05a_errors_usage_and_no_packaging() {
         stderr_text(&packaged).contains("path dependency"),
         "stderr={}",
         stderr_text(&packaged)
+    );
+}
+
+/// TEST-05b：`tests/` 直接子文件发现（不递归）、`test_*` 排序与 helper 排除。
+#[test]
+fn test_05b_discovery_direct_children_order_and_helpers() {
+    let base = Project::new("b-discovery");
+    base.write("proj/dolphin.toml", &lib_manifest("discover", ""));
+    base.write(
+        "proj/src/lib.do",
+        "pub fn root_value(): i32 { return 1; }\n",
+    );
+    base.write(
+        "proj/tests/b_file.do",
+        "fn helper_from_b(): i32 { return 40; }\nfn test_zeta() { }\nfn test_alpha() { }\n",
+    );
+    base.write("proj/tests/a_file.do", "fn test_beta() { }\n");
+    base.write("proj/tests/nested/ignored.do", "fn test_nested() { }\n");
+    base.write("proj/tests/notes.txt", "not a test\n");
+    let directory = base.dir("proj");
+
+    let manifest = load_manifest(&directory).expect("manifest should load");
+    for backend in support::backends() {
+        for profile in [BuildProfile::Debug, BuildProfile::Release] {
+            let target =
+                build_test_target(&manifest, profile, BuildSettings::with_backend(backend))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "build_test_target failed backend={} profile={profile:?}: {error}",
+                            backend.name()
+                        )
+                    });
+            let names: Vec<&str> = target.tests.iter().map(|test| test.name.as_str()).collect();
+            assert_eq!(
+                names,
+                ["test_alpha", "test_beta", "test_zeta"],
+                "backend={} profile={profile:?}",
+                backend.name()
+            );
+            assert!(target.tests[0].path.ends_with("b_file.do"));
+            assert!(target.tests[1].path.ends_with("a_file.do"));
+            assert!(target.tests[2].path.ends_with("b_file.do"));
+            assert!(target.artifact.executable.is_file());
+        }
+    }
+
+    // CLI：发现 3 个测试 -> 固定临时输出，未执行前以 1 退出。
+    for backend in support::backends() {
+        for release in [false, true] {
+            let profile = if release { "--release" } else { "--debug" };
+            let context = format!("backend={} release={release}", backend.name());
+            let output = base.dc_test_in(&directory, &["--backend", backend.name(), profile]);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{context} stdout={} stderr={}",
+                stdout_text(&output),
+                stderr_text(&output)
+            );
+            assert_eq!(
+                stdout_text(&output),
+                "built 3 tests (execution lands in H19-05c)\n",
+                "{context}"
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "{context} stderr={}",
+                stderr_text(&output)
+            );
+            assert!(
+                artifact_at(&directory, "discover-tests").is_file(),
+                "{context}: missing test binary"
+            );
+        }
+    }
+}
+
+/// TEST-05b：harness 按内部名称分发；断言失败固定 106 文本；私有项与跨文件 helper 可见。
+#[test]
+fn test_05b_harness_dispatch_and_assertions() {
+    let base = Project::new("b-harness");
+    base.write("proj/dolphin.toml", &lib_manifest("harness", ""));
+    base.write(
+        "proj/src/lib.do",
+        "pub fn base(): i32 { return 1; }\nfn secret(): i32 { return 41; }\n",
+    );
+    base.write(
+        "proj/tests/checks.do",
+        "use std.test.expect;\nuse std.test.fail;\n\nfn test_pass() {\n    expect(secret() + base() == 42);\n}\n\nfn test_expect_false() {\n    expect(false);\n}\n\nfn test_fail() {\n    fail();\n}\n\nfn test_helper() {\n    expect(helper_with(40) == 40);\n    helper();\n}\n",
+    );
+    base.write(
+        "proj/tests/helpers.do",
+        "fn helper() { }\nfn helper_with(value: i32): i32 { return value; }\n",
+    );
+    let directory = base.dir("proj");
+
+    for backend in support::backends() {
+        for release in [false, true] {
+            let profile = if release { "--release" } else { "--debug" };
+            let context = format!("backend={} release={release}", backend.name());
+            let output = base.dc_test_in(&directory, &["--backend", backend.name(), profile]);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{context} stdout={} stderr={}",
+                stdout_text(&output),
+                stderr_text(&output)
+            );
+            assert_eq!(
+                stdout_text(&output),
+                "built 4 tests (execution lands in H19-05c)\n",
+                "{context}"
+            );
+            let artifact = artifact_at(&directory, "harness-tests");
+
+            let pass = run_artifact(&artifact, &["--dolphin-test", "test_pass"]);
+            assert_eq!(
+                pass.status.code(),
+                Some(0),
+                "{context} stderr={}",
+                stderr_text(&pass)
+            );
+            assert!(
+                pass.stderr.is_empty(),
+                "{context} stderr={}",
+                stderr_text(&pass)
+            );
+
+            let helper = run_artifact(&artifact, &["--dolphin-test", "test_helper"]);
+            assert_eq!(
+                helper.status.code(),
+                Some(0),
+                "{context} stderr={}",
+                stderr_text(&helper)
+            );
+
+            for name in ["test_expect_false", "test_fail"] {
+                let failed = run_artifact(&artifact, &["--dolphin-test", name]);
+                assert_eq!(
+                    failed.status.code(),
+                    Some(106),
+                    "{context} name={name} stderr={}",
+                    stderr_text(&failed)
+                );
+                assert_eq!(
+                    stderr_text(&failed),
+                    "Dolphin test assertion failed\n",
+                    "{context} name={name}"
+                );
+                assert!(stdout_text(&failed).is_empty(), "{context} name={name}");
+            }
+
+            let unknown = run_artifact(&artifact, &["--dolphin-test", "test_missing"]);
+            assert_eq!(unknown.status.code(), Some(3), "{context}: unknown test");
+            let no_args = run_artifact(&artifact, &[]);
+            assert_eq!(no_args.status.code(), Some(2), "{context}: no arguments");
+            let missing_name = run_artifact(&artifact, &["--dolphin-test"]);
+            assert_eq!(
+                missing_name.status.code(),
+                Some(2),
+                "{context}: missing test name"
+            );
+            let wrong_flag = run_artifact(&artifact, &["--other", "test_pass"]);
+            assert_eq!(wrong_flag.status.code(), Some(2), "{context}: wrong flag");
+        }
+    }
+}
+
+/// 写一个只有测试文件差异的项目并断言 `dc test` 以固定诊断拒绝。
+fn assert_test_rejected(tag: &str, package: &str, test_source: &str, needle: &str) {
+    let project = Project::new(tag);
+    project.write("dolphin.toml", &lib_manifest(package, ""));
+    project.write("src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    project.write("tests/case.do", test_source);
+    let output = project.dc_test_in(&project.root, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{tag}: stdout={} stderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+    assert!(
+        stderr_text(&output).contains(needle),
+        "{tag}: expected `{needle}` in stderr={}",
+        stderr_text(&output)
+    );
+    assert!(
+        !artifact_at(&project.root, &format!("{package}-tests")).exists(),
+        "{tag}: rejected project must not produce a test binary"
+    );
+}
+
+/// TEST-05b 可见性与反例：子模块 `pub` 可见、私有不可见；`pkg`/`main`/签名/重复/语法错误被拒。
+#[test]
+fn test_05b_visibility_and_rejections() {
+    // 正例：测试可访问子模块 `pub` 项（根模块私有项见 harness 用例的 `secret()`）。
+    let base = Project::new("b-visibility");
+    base.write("proj/dolphin.toml", &lib_manifest("visibility", ""));
+    base.write("proj/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    base.write(
+        "proj/src/util/helpers.do",
+        "pkg util;\npub fn shown(): i32 { return 2; }\nfn hidden(): i32 { return 1; }\n",
+    );
+    base.write(
+        "proj/tests/vis.do",
+        "use std.test.expect;\nuse util.helpers;\n\nfn test_ok() {\n    expect(helpers.shown() == 2);\n}\n",
+    );
+    let directory = base.dir("proj");
+    for backend in support::backends() {
+        for release in [false, true] {
+            let profile = if release { "--release" } else { "--debug" };
+            let context = format!("backend={} release={release}", backend.name());
+            let output = base.dc_test_in(&directory, &["--backend", backend.name(), profile]);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{context} stdout={} stderr={}",
+                stdout_text(&output),
+                stderr_text(&output)
+            );
+            let artifact = artifact_at(&directory, "visibility-tests");
+            let ok = run_artifact(&artifact, &["--dolphin-test", "test_ok"]);
+            assert_eq!(
+                ok.status.code(),
+                Some(0),
+                "{context} stderr={}",
+                stderr_text(&ok)
+            );
+        }
+    }
+
+    // 子模块私有项：可见性拒绝。
+    let private = Project::new("b-private");
+    private.write("proj/dolphin.toml", &lib_manifest("privacy", ""));
+    private.write("proj/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    private.write(
+        "proj/src/util/helpers.do",
+        "pkg util;\npub fn shown(): i32 { return 2; }\nfn hidden(): i32 { return 1; }\n",
+    );
+    private.write(
+        "proj/tests/vis.do",
+        "use std.test.expect;\nuse util.helpers;\n\nfn test_private() {\n    expect(helpers.hidden() == 1);\n}\n",
+    );
+    let output = private.dc_test_in(&private.dir("proj"), &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr_text(&output).contains("is private"),
+        "stderr={}",
+        stderr_text(&output)
+    );
+
+    assert_test_rejected(
+        "b-pkg",
+        "pkgtest",
+        "pkg tests;\nfn test_x() { }\n",
+        "must omit `pkg`",
+    );
+    assert_test_rejected(
+        "b-main",
+        "maintest",
+        "fn main() { }\nfn test_x() { }\n",
+        "must not define `main`",
+    );
+    assert_test_rejected(
+        "b-params",
+        "paramtest",
+        "fn test_x(value: i32) { }\n",
+        "must not take parameters",
+    );
+    assert_test_rejected(
+        "b-typeparams",
+        "typeparamtest",
+        "fn test_x<T>() { }\n",
+        "must not declare type parameters",
+    );
+    assert_test_rejected(
+        "b-return",
+        "returntest",
+        "fn test_x(): i32 { return 0; }\n",
+        "must return Unit",
+    );
+    assert_test_rejected(
+        "b-extern",
+        "externtest",
+        "extern \"C\" { fn test_x(); }\n",
+        "must be a function with a body",
+    );
+    assert_test_rejected("b-syntax", "syntaxtest", "fn test_x( {\n", "error[");
+
+    // 同名测试：同属根模块，发现阶段给出明确诊断。
+    let duplicate = Project::new("b-duplicate");
+    duplicate.write("proj/dolphin.toml", &lib_manifest("duptest", ""));
+    duplicate.write("proj/src/lib.do", "pub fn value(): i32 { return 1; }\n");
+    duplicate.write("proj/tests/one.do", "fn test_dup() { }\n");
+    duplicate.write("proj/tests/two.do", "fn test_dup() { }\n");
+    let output = duplicate.dc_test_in(&duplicate.dir("proj"), &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr_text(&output).contains("duplicate test `test_dup`"),
+        "stderr={}",
+        stderr_text(&output)
     );
 }

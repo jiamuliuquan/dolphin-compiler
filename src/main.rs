@@ -7,7 +7,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use dolphin_compiler::{
     BackendChoice, BuildArtifact, BuildOptions, BuildProfile, BuildSettings, Cache, DependencyKind,
     LibraryArtifact, LinkerChoice, Manifest, ResolveOptions, build_library_with_graph,
-    build_manifest_with_graph, build_tests_with_graph, build_with_profile, check,
+    build_manifest_with_graph, build_test_target_with_graph, build_with_profile, check,
     check_library_with_graph, check_manifest_with_graph, discover_manifest, host_platform,
     publish_library, resolve_project,
 };
@@ -39,7 +39,7 @@ enum Commands {
     /// Compile and execute the program
     Run(RunArgs),
 
-    /// Build the test target into target/test/ (M19/H19-05a; discovery and execution land in H19-05b/c)
+    /// Discover tests/ and build the test target into target/test/ (M19/H19-05; execution lands in H19-05c)
     Test(TestArgs),
 
     /// Produce a `.dlib` library package from the current library target
@@ -187,7 +187,7 @@ struct RunArgs {
     app_args: Vec<std::ffi::OsString>,
 }
 
-/// `dc test` 的编译选项（M19/H19-05a）。测试发现与执行选项在 H19-05b/c 追加。
+/// `dc test` 的编译选项（M19/H19-05a/b）。执行/过滤选项在 H19-05c 追加。
 #[derive(Args)]
 struct TestArgs {
     /// Dolphin project directory (defaults to the current directory)
@@ -463,12 +463,20 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             let profile = BuildProfile::resolve(&manifest, args.explicit_profile());
             let resolved = resolve_project(&manifest, args.resolve_options())
                 .map_err(|error| (error.to_string(), color))?;
-            // H19-05a：只构建测试目标；生成入口暂为占位 `main`，测试发现（H19-05b）
-            // 与子进程执行/汇总（H19-05c）落地前一律按冻结的 0 测试规则报告。
-            let entry = "fn main(): i32 {\n    return 0;\n}\n";
-            build_tests_with_graph(&manifest, profile, args.settings(), &resolved.graph, entry)
-                .map_err(|error| (error.to_string(), color))?;
-            println!("no tests found");
+            // H19-05b：发现 `tests/*.do` 的 `test_*` 并生成/构建 harness。
+            // 子进程执行与汇总属 H19-05c，因此未执行前绝不报成功：0 测试按冻结规则
+            // 输出 `no tests found`，有测试时输出临时构建信息，均以 1 退出。
+            let target =
+                build_test_target_with_graph(&manifest, profile, args.settings(), &resolved.graph)
+                    .map_err(|error| (error.to_string(), color))?;
+            if target.tests.is_empty() {
+                println!("no tests found");
+            } else {
+                println!(
+                    "built {} tests (execution lands in H19-05c)",
+                    target.tests.len()
+                );
+            }
             Ok(ExitCode::FAILURE)
         }
         Commands::Package(args) => {

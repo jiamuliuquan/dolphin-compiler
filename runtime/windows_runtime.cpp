@@ -14,6 +14,7 @@
 #define DOLPHIN_EXIT_ALLOC 102
 #define DOLPHIN_EXIT_INVALID_FREE 103
 #define DOLPHIN_EXIT_UTF8 104
+#define DOLPHIN_EXIT_TEST 106
 
 static void dolphin_write_all(const char *data, size_t length) {
     const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -790,4 +791,13 @@ extern "C" void dolphin_print_char(uint32_t value) {
 
 extern "C" uint8_t dolphin_string_equal(const char *a, uintptr_t a_length, const char *b, uintptr_t b_length) {
     return a_length == b_length && memcmp(a, b, (size_t)a_length) == 0;
+}
+
+// 测试断言失败（M19/H19-05b）：写固定文本并以 106 退出；与 trap 一样不展开
+// Dolphin 栈、不执行 defer、不运行 Debug 收尾报告。
+extern "C" void dolphin_test_fail(void) {
+    const char message[] = "Dolphin test assertion failed\n";
+    DWORD written;
+    (void)WriteFile(GetStdHandle(STD_ERROR_HANDLE), message, sizeof(message) - 1, &written, NULL);
+    ExitProcess(DOLPHIN_EXIT_TEST);
 }

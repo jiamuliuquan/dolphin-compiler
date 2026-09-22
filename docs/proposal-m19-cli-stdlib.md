@@ -437,6 +437,14 @@ pub fn fail()
   可访问根模块私有项。本批不读取 `tests/`、不执行子进程，因此一律按冻结的 0 测试规则
   输出 `no tests found` 并以 1 退出（发现与执行见 b/c）。
 - `H19-05b`：发现与 harness 生成（`tests/`、`test_*`、生成入口、可见性）。
+  **已实现（2026-09-22）**：发现包根 `tests/` 直接子文件（不递归）的 `test_*`；冻结校验
+  （测试文件不得声明 `pkg`/定义 `main`；`test_*` 无参数、无类型参数、返回 Unit、非 extern；
+  同名测试在发现阶段报错）；按全限定名排序生成入口，入口按内部参数 `--dolphin-test <名称>`
+  分发（未知名称 3、参数缺失/错误 2，不对外承诺）；全部 `tests/*.do`（含只定义 helper 的文件）
+  与生成入口一起作为根模块源码注入，可访问根模块私有项与子模块 `pub` 项。新增 `std.test`
+  （`expect`/`fail` + 运行时 `dolphin_test_fail`，失败写 `Dolphin test assertion failed` 并退出
+  106）。**子进程执行/汇总未实现**：`dc test` 发现 0 个测试时输出 `no tests found`，发现 N>0 时
+  输出临时信息 `built N tests (execution lands in H19-05c)`，两者都以 1 退出（不伪报通过）。
 - `H19-05c`：子进程执行与汇总（超时、退出码分类、过滤、汇总）。
 每个子批次独立正反例，全部通过才关闭 H19-05。
 
@@ -655,8 +663,9 @@ native code 是否存在，不绑定整段渲染文本。新测试文件必须�
 ## 16. 未决与阻塞
 
 - D1、D2、D3 已于 2026-09-22 由用户确认；H19-01、H19-02、H19-03、H19-04 已完成对应实现
-  （见 [M19 报告](reports/m19-progress.md)）。H19-05a 已完成（仅构建侧），H19-05b/c 未实施，
-  因此 §9.1 的发现/执行/汇总行为（含 TEST-01..04、TEST-06）尚未可用。
+  （见 [M19 报告](reports/m19-progress.md)）。H19-05a/b 已完成（构建侧 + 发现/harness/断言），
+  H19-05c（子进程执行、超时、退出码分类、过滤、汇总）未实施，因此 §9.1 的 runner 输出与
+  TEST-01..04、TEST-06 的端到端验收尚未可用；`dc test` 当前对 N>0 个测试只构建并以 1 退出。
 - H19-02 经用户确认把 unit-like 返回值从 `Result<(), Error>` 改为 `Result<bool, Error>`（当前语言
   无 Unit 值；`Result<Unit, E>` 会触发诊断），并修复了暴露的两个编译器缺陷（Unit payload 诊断、
   LLVM 重复 extern 符号）。规格第 4.1 节已同步。

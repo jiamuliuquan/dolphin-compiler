@@ -652,3 +652,129 @@ installation 的显式列表。
 3. `std.test`（`expect`/`fail` + 运行时 `dolphin_test_fail`）随 b 引入；§13 ABI 表已冻结。
 4. `tests/m19_test_cmd.rs` 已进入显式列表；b/c 扩展同一文件时保持 TEST-01..06 计划测试名。
 5. 无阻塞；H19-05 未关闭，本报告不把 M19 记为完成。
+
+## H19-05b 测试发现与 harness 生成
+
+- 批次：H19-05b（H19-05 的第二子批次；c 未实施，H19-05 不关闭）
+- 状态：完成（Linux x86_64；Cranelift/LLVM × Dolphin Debug/Release 本机；macOS/Windows 由远端 CI lane 覆盖，待平台确认）
+- 前置批次及报告：H19-05a，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`082e90a`（`v0.3.0-M19-05a`），工作区干净。
+- 本批修改：`crates/dolphin-driver/src/lib.rs`、`crates/dolphin-std/src/lib.rs`、
+  `crates/dolphin-std/src/test.do`（新）、`runtime/unix_runtime.c`、`runtime/windows_runtime.cpp`、
+  `src/main.rs`、`tests/m19_test_cmd.rs`、`docs/proposal-m19-cli-stdlib.md`、
+  `docs/implemented-features.md`、`docs/plan-m18-plus.md`、本报告。未 commit/push/tag。
+
+### 决策与阻塞处理
+
+- 规格 §9.2 把“子进程执行”整体划给 H19-05c，b 的命令在发现 N>0 个测试时没有冻结输出。
+  经用户 2026-09-22 确认采用**严格拆分**：0 测试 → `no tests found`；N>0 → 固定临时输出
+  `built N tests (execution lands in H19-05c)`；两者都 exit 1，未执行前绝不报成功。b 的验收
+  直接运行产物内部 `--dolphin-test` 接口。
+
+### 修改文件与关键实现
+
+- `crates/dolphin-driver/src/lib.rs`：
+  - `TestFunction`/`TestTarget` 与 `discover_tests`：读包根 `tests/` 的**直接子文件** `*.do`
+    （不递归），逐文件 lex/parse；拒绝 `pkg`、拒绝 `main`、要求 `test_*` 无参数、无类型参数、
+    无返回类型标注、非 extern；其余函数作为 helper；按函数名排序，同名测试在发现阶段报错。
+  - `generate_test_harness`：按名称排序生成入口，按内部参数 `--dolphin-test <名称>` 分发；
+    参数缺失/错误返回 2、未知名称返回 3（不对外承诺）；0 测试生成占位 `main`（保持 H19-05a
+    的构建行为）。测试文件（含只定义 helper 的文件）与入口一起作为根模块源码注入，保持
+    根模块私有项与子模块 `pub` 项的可见性。
+  - `build_test_target[_with_graph]` 返回发现的测试与产物；`build_test_sources_with_graph`
+    为公共构建实现，H19-05a 的 `build_tests*` 保持兼容。
+- `crates/dolphin-std/src/test.do`（新 `std.test`）与 `dolphin-std/src/lib.rs` 注册：
+  `expect(condition: bool)`、`fail()`；失败调用运行时 `dolphin_test_fail`。
+- `runtime/{unix_runtime.c,windows_runtime.cpp}`：新增 `DOLPHIN_EXIT_TEST 106` 与
+  `dolphin_test_fail`：写 stderr 固定文本 `Dolphin test assertion failed`，`_Exit`/`ExitProcess(106)`；
+  与 trap 一致不展开 Dolphin 栈、不执行 defer、不运行 Debug 收尾报告。
+- `src/main.rs`：`dc test` 改用发现 + harness；按用户确认的临时输出/退出码。
+- `tests/m19_test_cmd.rs`：新增 3 个 TEST-05b 用例。
+
+### 验收映射
+
+| 验收点 | 测试名 | 期望与结果 |
+| --- | --- | --- |
+| 发现/排序/helper | `m19_test_cmd.rs::test_05b_discovery_direct_children_order_and_helpers` | `tests/` 直接子文件的 `test_*` 按名排序为 `test_alpha/test_beta/test_zeta`（跨文件），`tests/nested/ignored.do` 与 `notes.txt` 不发现，`helper_from_b` 不算测试；CLI 固定 `built 3 tests (execution lands in H19-05c)`、stderr 空、exit 1、产物存在；可用后端 × Debug/Release 通过 |
+| harness/断言 | `test_05b_harness_dispatch_and_assertions` | `--dolphin-test test_pass`→0 且 stderr 空；`test_helper`（跨文件 helper + 私有 `secret()`）→0；`test_expect_false`/`test_fail`→106 且 stderr 恰为 `Dolphin test assertion failed\n`；未知名→3；无参数/缺名称/错误 flag→2；4 组合通过 |
+| 可见性/反例 | `test_05b_visibility_and_rejections` | 子模块 `pub fn shown` 可见且 `test_ok`→0；子模块私有 `hidden` → `is private`；测试文件 `pkg`/`main`/带参数/类型参数/返回类型/extern/语法错误/同名测试分别以固定诊断拒绝且不产出二进制；4 组合通过（反例覆盖前端诊断） |
+
+### 修复前复现结果
+
+新功能先写回归：`git stash push -u` 撤下 driver/stdlib/runtime/CLI 改动后
+`cargo test -p dolphin-compiler --test m19_test_cmd` 编译失败
+`error[E0432]: unresolved import dolphin_compiler::build_test_target`；同一状态下
+`dc test <含 tests/ 的项目>` 只输出 `no tests found`（发现缺失），exit 1
+（日志 `/tmp/opencode/h19-05b/pre-fix.log`、`pre-fix-cli.*`）。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m19_test_cmd`：6 passed（3 个 H19-05a + 3 个 H19-05b）；
+  `--features llvm` 同样 6 passed。
+- 手工探针：`dc test` → `built 3 tests (execution lands in H19-05c)` exit 1；
+  `test_pass`→0、`test_expect_false`→106 + 固定 stderr、未知→3、无参数→2；发行包内 `dc test`
+  同样可用。
+- 完整门禁与发行包冒烟全绿（见下）。
+
+### 实际运行命令与测试数量
+
+```bash
+cargo test -p dolphin-compiler --test m19_test_cmd                        # 6 passed
+cargo test -p dolphin-compiler --features llvm --test m19_test_cmd        # 6 passed
+cargo test --workspace --exclude dolphin-codegen-llvm                     # 349 passed (346→349)
+cargo test --workspace --features llvm                                    # 356 passed (353→356)
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples \
+  --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd
+                                                                          # 179 passed (176→179)
+cargo test -p dolphin-compiler --features llvm --test backend             # 4 passed
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features llvm \
+  -- -D warnings && git diff --check                                       # 全部通过
+# §5.3 / 发行包冒烟（本机 patchelf 隔离 venv）
+cargo build --release --bins
+./target/release/dc fmt --check examples crates/dolphin-std/src
+./target/release/dc run examples/m14|m15|m18                              # 固定输出、exit 0、stderr 空
+python3 scripts/package.py --target x86_64-unknown-linux-gnu --out-dir /tmp/opencode/h19-05b/dist
+# 解压归档后按 ci.yml 冒烟序列（m8/m14/m15/m18、打包 m15math、坐标消费、--locked --offline）
+                                                                          # SMOKE_SEQUENCE_OK
+# 发行包 dc test 冒烟：4 个测试、test_pass=0、test_fail=106 + 固定文本
+```
+
+日志与产物在 `/tmp/opencode/h19-05b/`；测试文件列表无新增（`m19_test_cmd` 已在 CI/README/
+installation 显式列表中）。
+
+### 未运行的检查及原因
+
+- macOS/Windows 本机未运行；`dolphin_test_fail` 的 Windows `ExitProcess` 路径由远端 CI 三平台
+  默认 lane（`cargo test --workspace` 含 `m19_test_cmd`）覆盖，本机不伪造。
+- 子进程执行/汇总/`--filter`/30s 超时/固定 `test <name> ...` 输出（H19-05c）未实现；因此
+  TEST-01..04、TEST-06 的端到端验收未运行，`dc test` 对 N>0 以 1 退出且不宣称通过。
+- 断言失败不执行 `defer`、不运行 Debug 收尾报告：由 `_Exit(106)` 继承 trap 语义，本批未单独
+  构造“失败前申请资源”的观测用例（属 ERR-01/ERR-04 范围）。
+- 测试之间的共享状态隔离、trap/超时分类未验证（c）。
+- tag/release 未触发。
+
+### 行为/兼容变化
+
+- 新增保留模块 `std.test`（`expect`/`fail`）；运行时新增 `dolphin_test_fail` 与退出码 `106`，
+  `101`–`104` 语义不变。
+- `dc test` 现在读取 `tests/` 并生成 harness；`dc build`/`run`/`check`/`package` 仍永不读取
+  `tests/`（H19-05a 回归继续覆盖）。`dc test` 对 N>0 个测试的临时输出/退出码见上，c 会替换为
+  运行与汇总。
+- `build_tests*`（H19-05a 公共 API）保持兼容；新增 `build_test_target*`、`discover_tests`、
+  `generate_test_harness`、`TestFunction`、`TestTarget`。
+
+### 剩余问题和下一批输入（H19-05c）
+
+1. H19-05c：对每个发现到的测试启动独立子进程
+   `<二进制> --dolphin-test <名称>`，30s 超时 kill 并继续；按退出码分类固定输出
+   `test <name> ... ok` / `FAILED (assertion)` / `FAILED (trap exit N)` / `FAILED (timeout after 30s)`；
+   `--filter <子串>` 与 `no tests matched filter`；固定汇总 `N passed; M failed; K filtered out`；
+   全部通过 0、任一失败 1、0 测试/无匹配 1、用法错误 2；子进程 stdout/stderr 继承。
+2. c 必须替换本批的临时 `built N tests ...` 输出，并保持 `dc test` 的发现/harness/可见性行为不变。
+3. `tests/m19_test_cmd.rs` 扩展时保持 TEST-01..06 计划测试名；本批已提供
+   `discover_tests`/`TestTarget.tests` 供 runner 复用，不需要重新解析测试文件。
+4. 无阻塞；H19-05 未关闭，本报告不把 M19 记为完成。

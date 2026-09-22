@@ -508,6 +508,228 @@ pub fn build_library_with_graph(
     })
 }
 
+/// 用户测试函数（M19/H19-05b）：定义在包根 `tests/` 直接子文件中的 `test_*`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestFunction {
+    /// 全限定名；测试都编译为包根模块文件，因此就是函数名。
+    pub name: String,
+    /// 定义所在文件（诊断与调试）。
+    pub path: PathBuf,
+}
+
+/// 测试目标：发现到的测试与构建产物（H19-05c 的 runner 消费同一列表）。
+#[derive(Debug)]
+pub struct TestTarget {
+    pub tests: Vec<TestFunction>,
+    pub artifact: BuildArtifact,
+}
+
+/// 发现包根 `tests/` 的**直接子文件** `*.do`（不递归）中的 `test_*` 函数，按全限定名排序。
+///
+/// 冻结校验（规格 §9.1）：测试文件不得声明 `pkg`、不得定义 `main`；`test_*` 必须无参数、
+/// 无类型参数、返回 Unit（无返回类型标注）且必须是带函数体的普通函数。其他函数允许作为
+/// helper。目录不存在或没有 `*.do` 时视为 0 测试；同名测试给出明确诊断（它们同属根模块）。
+pub fn discover_tests(manifest: &Manifest) -> Result<Vec<TestFunction>, Diagnostic> {
+    let paths = test_source_paths(manifest)?;
+    let mut tests = Vec::new();
+    for path in &paths {
+        let text = fs::read_to_string(path).map_err(|error| {
+            Diagnostic::plain(format!("could not read `{}`: {error}", path.display()))
+        })?;
+        let source = SourceFile::new(path.clone(), text);
+        let tokens = lexer::lex(&source)?;
+        let program = parser::parse(&source, tokens)?;
+        if let Some(package) = &program.package {
+            return Err(Diagnostic::at(
+                &source,
+                package.span,
+                "test files belong to the root module and must omit `pkg`",
+            ));
+        }
+        for function in &program.functions {
+            if function.name == "main" {
+                return Err(Diagnostic::at(
+                    &source,
+                    function.name_span,
+                    "test files must not define `main`; `dc test` generates the entry",
+                ));
+            }
+            if !function.name.starts_with("test_") {
+                continue;
+            }
+            if function.extern_c {
+                return Err(Diagnostic::at(
+                    &source,
+                    function.name_span,
+                    format!("test `{}` must be a function with a body", function.name),
+                ));
+            }
+            if !function.type_params.is_empty() {
+                return Err(Diagnostic::at(
+                    &source,
+                    function.name_span,
+                    format!("test `{}` must not declare type parameters", function.name),
+                ));
+            }
+            if !function.parameters.is_empty() {
+                return Err(Diagnostic::at(
+                    &source,
+                    function.name_span,
+                    format!("test `{}` must not take parameters", function.name),
+                ));
+            }
+            if function.return_type.is_some() {
+                return Err(Diagnostic::at(
+                    &source,
+                    function.name_span,
+                    format!(
+                        "test `{}` must return Unit (omit the return type)",
+                        function.name
+                    ),
+                ));
+            }
+            tests.push(TestFunction {
+                name: function.name.clone(),
+                path: path.clone(),
+            });
+        }
+    }
+    tests.sort_by(|left, right| left.name.cmp(&right.name));
+    for pair in tests.windows(2) {
+        if pair[0].name == pair[1].name {
+            return Err(Diagnostic::plain(format!(
+                "duplicate test `{}` defined in `{}` and `{}`",
+                pair[0].name,
+                pair[0].path.display(),
+                pair[1].path.display()
+            )));
+        }
+    }
+    Ok(tests)
+}
+
+/// 包根 `tests/` 的直接子文件 `*.do`（不递归），按路径排序；目录不存在视为空。
+///
+/// 只含 helper 的测试文件也要加载（与含测试的文件同属根模块），因此注入时用完整列表。
+fn test_source_paths(manifest: &Manifest) -> Result<Vec<PathBuf>, Diagnostic> {
+    let directory = manifest.root.join("tests");
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(&directory).map_err(|error| {
+        Diagnostic::plain(format!(
+            "could not read test directory `{}`: {error}",
+            directory.display()
+        ))
+    })?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| Diagnostic::plain(format!("could not read test entry: {error}")))?;
+        let file_type = entry.file_type().map_err(|error| {
+            Diagnostic::plain(format!(
+                "could not inspect `{}`: {error}",
+                entry.path().display()
+            ))
+        })?;
+        let path = entry.path();
+        if file_type.is_file() && path.extension().is_some_and(|extension| extension == "do") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// 生成测试入口（M19/H19-05b）：按内部参数 `--dolphin-test <名称>` 分发到发现的测试。
+///
+/// 无测试时生成不接收参数、成功退出的占位入口（`dc test` 仍会构建测试目标）。
+/// 未知名称返回 3、缺少/错误参数返回 2，均由 runner（H19-05c）识别；该接口不对外承诺。
+pub fn generate_test_harness(tests: &[TestFunction]) -> String {
+    if tests.is_empty() {
+        return "fn main(): i32 {\n    return 0;\n}\n".to_string();
+    }
+    let mut source = String::new();
+    source.push_str("// Generated by `dc test` (M19/H19-05b). Do not edit.\n");
+    source.push_str("use std.process.arg;\nuse std.process.arg_count;\n\n");
+    source.push_str("fn main(): i32 {\n");
+    source.push_str("    if arg_count() != 3_usize {\n        return 2;\n    }\n");
+    source.push_str("    val flag = arg(1_usize);\n");
+    source.push_str("    val name = arg(2_usize);\n");
+    source.push_str("    if flag.is_err() || name.is_err() {\n        return 2;\n    }\n");
+    source.push_str(
+        "    val flag_text = match flag {\n        Result.Ok(value) => value,\n        Result.Err(error) => \"\",\n    };\n",
+    );
+    source.push_str(
+        "    val name_text = match name {\n        Result.Ok(value) => value,\n        Result.Err(error) => \"\",\n    };\n",
+    );
+    source.push_str("    if flag_text != \"--dolphin-test\" {\n        return 2;\n    }\n");
+    for test in tests {
+        source.push_str(&format!(
+            "    if name_text == \"{}\" {{\n        {}();\n        return 0;\n    }}\n",
+            test.name, test.name
+        ));
+    }
+    source.push_str("    return 3;\n}\n");
+    source
+}
+
+/// 发现并构建测试目标（M19/H19-05b，仅路径依赖）。
+pub fn build_test_target(
+    manifest: &Manifest,
+    profile: BuildProfile,
+    settings: BuildSettings,
+) -> Result<TestTarget, Diagnostic> {
+    let graph = resolver::resolve_paths_only(manifest)?;
+    build_test_target_with_graph(manifest, profile, settings, &graph)
+}
+
+/// 用已解析的包图发现并构建测试目标（CLI 先解析完整包图后调用）。
+///
+/// 测试文件与生成入口都作为根模块源码注入：测试可访问根模块私有项与子模块 `pub` 项。
+pub fn build_test_target_with_graph(
+    manifest: &Manifest,
+    profile: BuildProfile,
+    settings: BuildSettings,
+    graph: &PackageGraph,
+) -> Result<TestTarget, Diagnostic> {
+    let tests = discover_tests(manifest)?;
+    let entry_source = generate_test_harness(&tests);
+    let entry = write_test_entry(manifest, &entry_source)?;
+    let mut extra = vec![modules::ExtraSource {
+        path: entry,
+        text: entry_source,
+    }];
+    // 注入 `tests/` 的全部直接子文件（含只定义 helper 的文件），按路径排序保持确定性。
+    for path in test_source_paths(manifest)? {
+        let text = fs::read_to_string(&path).map_err(|error| {
+            Diagnostic::plain(format!("could not read `{}`: {error}", path.display()))
+        })?;
+        extra.push(modules::ExtraSource { path, text });
+    }
+    let artifact = build_test_sources_with_graph(manifest, profile, settings, graph, extra)?;
+    Ok(TestTarget { tests, artifact })
+}
+
+/// 把生成的测试入口写入 `target/test/`（不写入用户 `src/`），返回其路径。
+fn write_test_entry(manifest: &Manifest, entry_source: &str) -> Result<PathBuf, Diagnostic> {
+    let directory = manifest.build.output.join("test");
+    fs::create_dir_all(&directory).map_err(|error| {
+        Diagnostic::plain(format!(
+            "could not create output directory `{}`: {error}",
+            directory.display()
+        ))
+    })?;
+    let entry = directory.join(format!("{}-tests.entry.do", manifest.package.name));
+    fs::write(&entry, entry_source).map_err(|error| {
+        Diagnostic::plain(format!(
+            "could not write generated test entry `{}`: {error}",
+            entry.display()
+        ))
+    })?;
+    Ok(entry)
+}
+
 /// 构建测试目标（M19/H19-05a，仅路径依赖；CLI 先解析完整包图后调用 `_with_graph`）。
 pub fn build_tests(
     manifest: &Manifest,
@@ -532,6 +754,27 @@ pub fn build_tests_with_graph(
     graph: &PackageGraph,
     entry_source: &str,
 ) -> Result<BuildArtifact, Diagnostic> {
+    let entry = write_test_entry(manifest, entry_source)?;
+    build_test_sources_with_graph(
+        manifest,
+        profile,
+        settings,
+        graph,
+        vec![modules::ExtraSource {
+            path: entry,
+            text: entry_source.to_string(),
+        }],
+    )
+}
+
+/// 测试目标构建的公共实现：注入的根模块源码 + 库源码 -> `target/test/<包名>-tests`。
+fn build_test_sources_with_graph(
+    manifest: &Manifest,
+    profile: BuildProfile,
+    settings: BuildSettings,
+    graph: &PackageGraph,
+    extra: Vec<modules::ExtraSource>,
+) -> Result<BuildArtifact, Diagnostic> {
     if manifest.lib.is_none() {
         return Err(Diagnostic::plain(format!(
             "`{}` does not declare a `[lib]` target; `dc test` requires a library target",
@@ -540,31 +783,10 @@ pub fn build_tests_with_graph(
     }
     let platform = platform::host()?;
     let directory = manifest.build.output.join("test");
-    fs::create_dir_all(&directory).map_err(|error| {
-        Diagnostic::plain(format!(
-            "could not create output directory `{}`: {error}",
-            directory.display()
-        ))
-    })?;
-    let entry = directory.join(format!("{}-tests.entry.do", manifest.package.name));
-    fs::write(&entry, entry_source).map_err(|error| {
-        Diagnostic::plain(format!(
-            "could not write generated test entry `{}`: {error}",
-            entry.display()
-        ))
-    })?;
-
     let base = directory.join(format!("{}-tests", manifest.package.name));
     let output = with_executable_suffix(&base, platform.as_ref());
     let exclude: HashSet<PathBuf> = manifest.bins.iter().map(|bin| bin.path.clone()).collect();
-    let loaded = load_graph_sources_with_extra(
-        graph,
-        exclude,
-        vec![modules::ExtraSource {
-            path: entry,
-            text: entry_source.to_string(),
-        }],
-    )?;
+    let loaded = load_graph_sources_with_extra(graph, exclude, extra)?;
     let program = lower::lower_sources(&loaded.sources, &loaded.program, &loaded.packages)?;
     let object = object_path(&base, platform.object_suffix());
     select_backend(settings.backend)?.emit_program(

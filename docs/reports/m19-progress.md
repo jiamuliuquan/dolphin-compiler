@@ -201,3 +201,128 @@ README 与 installation 的 LLVM 命令列表。
    本批已提供稳定 kind 编号与运行时常量。
 3. 新测试文件 `tests/m19_args.rs` 已进入 CI/文档显式列表；H19-02 新增文件同样要加入。
 4. 无阻塞；本报告不把 M19 记为完成。
+
+## H19-02 标准流与字节 I/O
+
+- 批次：H19-02
+- 状态：完成（Linux x86_64；Cranelift/LLVM × Dolphin Debug/Release 本机；macOS/Windows 由远端 CI lane 覆盖，待平台确认）
+- 前置批次及报告：H19-01，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`8c83e530642e0d2f68a7436c4a2a533123004e14`（`v0.3.0-M19-01`），工作区干净。
+- 本批修改：`crates/dolphin-std/src/{lib.rs,error.do,io.do,process.do}`、
+  `crates/dolphin-hir/src/monomorphize.rs`、`crates/dolphin-codegen-llvm/src/codegen.rs`、
+  `runtime/{unix_runtime.c,windows_runtime.cpp}`、`tests/{m19_io.rs,build.rs}`、
+  `.github/workflows/ci.yml`、`README.md`、`docs/installation.md`、`docs/implemented-features.md`，
+  以及规格/计划/本报告的状态同步。未 commit/push/tag。
+
+### 决策与阻塞处理
+
+- 规格原写 `Result<(), Error>`，但当前语言不能表达 Unit 值：`Result<(), E>` 不解析；
+  `Result<Unit, E>` 能通过类型检查，但 `Result.Ok(unit())` 在 Cranelift codegen 内部 panic
+  （`Unit has no runtime value`），LLVM 路径同样无法保证。经用户 2026-09-22 确认：
+  **unit-like 返回值改为 `Result<bool, Error>`（`true` 成功）**，并把该 ICE 在本批修成诊断。
+  规格第 4.1/16 节已同步记录，未新增语法。
+
+### 修改文件与关键实现
+
+- `crates/dolphin-std/src/error.do`（新单元 `std.error`）：`ErrorKind`（0..6 判别值与运行时一致）、
+  `Error::new/kind/code`、`from_last_error()`；`code` 保留 native errno/GetLastError。
+- `crates/dolphin-std/src/io.do`（新单元 `std.io`）：`Stream`、`stdin/stdout/stderr`、
+  `read/write/write_all/flush/close/close_abort/is_open/eprint`。标准流是借用句柄，`close` 返回
+  `Err(NotOwned)` 且不影响后续写入；`close_abort` 对借用/已关闭句柄无操作，失败写 stderr 固定前缀。
+  `release`/`from_raw` 与 `std.fs.open` 留到 H19-03。
+- `crates/dolphin-std/src/process.do`：改用 `std.error.from_last_error()` 与 `ErrorKind` 判断缺项，
+  去掉与 `std.error` 重复的 `dolphin_last_error_kind` extern 声明。
+- 运行时：新增 `dolphin_stream_stdin/stdout/stderr/read/write/flush/close/is_open` 与共享句柄状态
+  （open/owned/native；`close` 幂等、借用返回 `NotOwned`）；Unix 读写重试 `EINTR`、错误 errno 映射到
+  稳定 kind；Windows 用 `ReadFile`/`WriteFile`/`FlushFileBuffers`/`CloseHandle` 与 `GetLastError` 映射。
+- `crates/dolphin-hir/src/monomorphize.rs`：`instantiate_named_at` 新增 `validate_runtime_fields`，
+  `Unit` 不能作为 struct 字段或 enum payload（诊断而非 codegen panic）。
+- `crates/dolphin-codegen-llvm/src/codegen.rs`：`declare_user_functions` 按符号名复用已有声明，
+  修复多个模块声明同一 `extern "C"` 符号时被重命名为 `<symbol>.1` 导致的链接失败（Cranelift 原本正常）。
+- `tests/m19_io.rs`：IO-01..04；`tests/build.rs`：两个编译器缺陷回归。
+
+### 验收映射
+
+| 验收点 | 测试名 | 期望与结果 |
+| --- | --- | --- |
+| IO-01 | `m19_io.rs::io_01_redirect_stdio` | stdin 读 5 字节、stdout/stderr 重定向输出、`flush=true`；对借用 stdout `close` 返回 `closed=false` 且之后仍能写入；固定 stdout/stderr、exit 0；4 组合通过 |
+| IO-02 | `io_02_empty_and_chunked_read` | 空输入立即 `total=0 checksum=0`；100 KiB+37 字节多块读取 `total` 与校验和固定；4 组合通过 |
+| IO-03 | `io_03_partial_write_and_failure` | `write_all` 输出 262144 字节模式，长度与校验和固定；Linux 上将 stdout 指向 `/dev/full` 时 `write_all` 返回 Err（写 stderr 标记、exit 3），不是 trap；4 组合通过（`/dev/full` 子用例 Linux-only） |
+| IO-04 | `io_04_invalid_utf8_bytes_not_string` | 合法 UTF-8 → `utf8=ok`；非法字节经 `from_utf8` → `utf8=err`（可恢复）；`string.from_bytes` 保持 exit 104 + `invalid UTF-8`；4 组合通过 |
+| 编译器缺陷 1 | `build.rs::h19_02_unit_aggregate_payload_is_rejected` | 修复前 codegen panic；修复后 enum payload 与 struct 字段两种用例都在两后端 × Debug/Release 得到含 `Unit` 的诊断 |
+| 编译器缺陷 2 | `build.rs::h19_02_duplicate_extern_declarations_share_symbol` | 修复前 Cranelift 通过、LLVM 链接失败（`dolphin_last_error_code.1`）；修复后两后端 × Debug/Release 均 exit 0 |
+
+### 修复前复现结果
+
+1. `std.io` 新功能：临时 `git stash push` 撤下 H19-02 源码后
+   `cargo test -p dolphin-compiler --test m19_io` = `0 passed; 4 failed`，均为
+   `unknown import std.io.stdin/stdout`（日志 `/tmp/opencode/h19-02/pre-fix-io.log`）。
+2. Unit payload：`h19_02_unit_aggregate_payload_is_rejected` 修复前在
+   `crates/dolphin-codegen-cranelift/src/codegen.rs:2091` panic（`Unit has no runtime value`）。
+3. 重复 extern：`h19_02_duplicate_extern_declarations_share_symbol` 修复前 LLVM 链接报
+   `undefined symbol: dolphin_last_error_code.1`（Cranelift 通过）。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m19_io`：4 passed；`--features llvm` 同样 4 passed
+  （每例 Cranelift+LLVM × Debug/Release）。
+- 手工探针：`read`/`write_all`/`eprint` 正常；借用 `close` 返回 NotOwned 且后续写入成功；
+  `/dev/full` 失败可恢复；非法 UTF-8 经 `from_utf8` 返回错误、经 `from_bytes` trap 104。
+- 完整门禁与发行包冒烟全绿（见下）。
+
+### 实际运行命令与测试数量
+
+```bash
+cargo test -p dolphin-compiler --test m19_io                            # 4 passed
+cargo test -p dolphin-compiler --features llvm --test m19_io            # 4 passed
+cargo test -p dolphin-compiler --test build h19_02                      # 2 passed
+cargo test -p dolphin-compiler --features llvm --test build h19_02      # 2 passed
+cargo test --workspace --exclude dolphin-codegen-llvm                   # 333 passed (327→333)
+cargo test --workspace --features llvm                                  # 340 passed (334→340)
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples \
+  --test m19_args --test m19_io                                         # 163 passed (157→163)
+cargo test -p dolphin-compiler --features llvm --test backend           # 4 passed
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features llvm \
+  -- -D warnings && git diff --check                                     # 全部通过
+# §5.3 / 发行包冒烟（本机 patchelf 隔离 venv）
+cargo build --release --bins
+./target/release/dc fmt --check examples crates/dolphin-std/src
+./target/release/dc run examples/m14|m15|m18                            # 固定输出、exit 0、stderr 空
+# 解压归档后按 ci.yml 冒烟序列（m8/m14/m15/m18、打包 m15math、坐标消费、--locked --offline）
+                                                                        # SMOKE_SEQUENCE_OK
+```
+
+日志与产物在 `/tmp/opencode/h19-02/`；`--test m19_io` 已加入 `ci.yml` LLVM lane、README 与
+installation 的显式列表。
+
+### 未运行的检查及原因
+
+- macOS/Windows 本机未运行；流运行时与 Windows 句柄路径由远端 CI 三平台默认 lane
+  （`cargo test --workspace` 含 `m19_io`）覆盖，本机不伪造。
+- IO-03 的部分写入子用例只在 Linux 用 `/dev/full` 验证失败路径；其他平台由大段 `write_all`
+  与固定输出覆盖，未伪造跨平台受控短写。
+- `std.fs.open`、`release`/`from_raw`、文件句柄 Debug 未关闭报告属 H19-03；`dc test` 属 H19-05；
+  文本 builder/整数解析属 H19-04。
+- tag/release 未触发。
+
+### 行为/兼容变化
+
+- 新增保留模块 `std.error`、`std.io`；`std.process` 缺项判断改走 `std.error`（行为不变）。
+- `Unit` 作为 struct 字段/enum payload 现在在实例化时报诊断；此前该输入会在 codegen panic
+  （Cranelift）或链接/未定义行为（LLVM）。合法程序不受影响。
+- LLVM 后端对同一 `extern "C"` 符号的多次声明现在复用同一个导入声明；此前链接失败。
+- 成功类 I/O 返回值采用 `Result<bool, Error>`（用户确认的规格修订），未新增语法。
+
+### 剩余问题和下一批输入（H19-03）
+
+1. H19-03：`std.fs`（`open(path, OpenMode.Read/Write/Append)`）、`release`/`from_raw` 显式转交、
+   Debug 未关闭自有流报告；FS-01..06（含 `/dev/full` 类受控失败、Unicode 路径、截断/追加、
+   重绑定与转交状态机）。
+2. 运行时已有共享句柄状态与 errno→kind 映射，H19-03 只需增加 `dolphin_stream_open` 与自有句柄注册；
+   不要改动借用标准流语义。
+3. 新测试文件 `tests/m19_io.rs` 已进入显式列表；H19-03 新增文件同样要加入。
+4. 无阻塞；本报告不把 M19 记为完成。

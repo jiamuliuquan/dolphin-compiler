@@ -445,6 +445,138 @@ extern "C" int dolphin_last_error_code(void) {
     return dolphin_error_code;
 }
 
+/* ---------------------------------------------------------------------------
+ * 字节流（M19/H19-02）。
+ *
+ * 标准流是借用状态（owned=0），`close` 返回 NotOwned 且不关闭 OS 句柄；
+ * 句柄副本共享同一状态，`close` 幂等（H19-03 的文件流沿用同一状态机）。
+ * Windows 的 flush 使用 FlushFileBuffers；读写失败保留 GetLastError。
+ * ------------------------------------------------------------------------- */
+
+struct dolphin_stream_state {
+    int open;
+    int owned;
+    HANDLE native;
+};
+
+static struct dolphin_stream_state dolphin_stdin_state = {1, 0, NULL};
+static struct dolphin_stream_state dolphin_stdout_state = {1, 0, NULL};
+static struct dolphin_stream_state dolphin_stderr_state = {1, 0, NULL};
+
+extern "C" uintptr_t dolphin_stream_stdin(void) {
+    if (dolphin_stdin_state.native == NULL) {
+        dolphin_stdin_state.native = GetStdHandle(STD_INPUT_HANDLE);
+    }
+    return (uintptr_t)&dolphin_stdin_state;
+}
+
+extern "C" uintptr_t dolphin_stream_stdout(void) {
+    if (dolphin_stdout_state.native == NULL) {
+        dolphin_stdout_state.native = GetStdHandle(STD_OUTPUT_HANDLE);
+    }
+    return (uintptr_t)&dolphin_stdout_state;
+}
+
+extern "C" uintptr_t dolphin_stream_stderr(void) {
+    if (dolphin_stderr_state.native == NULL) {
+        dolphin_stderr_state.native = GetStdHandle(STD_ERROR_HANDLE);
+    }
+    return (uintptr_t)&dolphin_stderr_state;
+}
+
+static int dolphin_kind_from_win32(DWORD code) {
+    switch (code) {
+        case ERROR_FILE_NOT_FOUND:
+        case ERROR_PATH_NOT_FOUND:
+            return DOLPHIN_ERR_NOT_FOUND;
+        case ERROR_ACCESS_DENIED:
+        case ERROR_SHARING_VIOLATION:
+            return DOLPHIN_ERR_PERMISSION;
+        case ERROR_DIRECTORY:
+            return DOLPHIN_ERR_IS_DIR;
+        case ERROR_INVALID_NAME:
+        case ERROR_INVALID_PARAMETER:
+        case ERROR_INVALID_HANDLE:
+            return DOLPHIN_ERR_INVALID;
+        default:
+            return DOLPHIN_ERR_OTHER;
+    }
+}
+
+extern "C" int dolphin_stream_read(uintptr_t id, uint8_t *buffer, uintptr_t length,
+                                   uintptr_t *out_read) {
+    struct dolphin_stream_state *state = (struct dolphin_stream_state *)id;
+    if (state == NULL || !state->open) {
+        dolphin_set_error(DOLPHIN_ERR_CLOSED, 0);
+        return (int)ERROR_INVALID_HANDLE;
+    }
+    DWORD to_read = length > 0xFFFFFFFFu ? 0xFFFFFFFFu : (DWORD)length;
+    DWORD read_bytes = 0;
+    if (!ReadFile(state->native, buffer, to_read, &read_bytes, NULL)) {
+        DWORD code = GetLastError();
+        dolphin_set_error(dolphin_kind_from_win32(code), (int)code);
+        return (int)code;
+    }
+    *out_read = (uintptr_t)read_bytes;
+    return 0;
+}
+
+extern "C" int dolphin_stream_write(uintptr_t id, const uint8_t *bytes, uintptr_t length,
+                                    uintptr_t *out_written) {
+    struct dolphin_stream_state *state = (struct dolphin_stream_state *)id;
+    if (state == NULL || !state->open) {
+        dolphin_set_error(DOLPHIN_ERR_CLOSED, 0);
+        return (int)ERROR_INVALID_HANDLE;
+    }
+    DWORD to_write = length > 0xFFFFFFFFu ? 0xFFFFFFFFu : (DWORD)length;
+    DWORD written = 0;
+    if (!WriteFile(state->native, bytes, to_write, &written, NULL)) {
+        DWORD code = GetLastError();
+        dolphin_set_error(dolphin_kind_from_win32(code), (int)code);
+        return (int)code;
+    }
+    *out_written = (uintptr_t)written;
+    return 0;
+}
+
+extern "C" int dolphin_stream_flush(uintptr_t id) {
+    struct dolphin_stream_state *state = (struct dolphin_stream_state *)id;
+    if (state == NULL || !state->open) {
+        dolphin_set_error(DOLPHIN_ERR_CLOSED, 0);
+        return (int)ERROR_INVALID_HANDLE;
+    }
+    if (!FlushFileBuffers(state->native)) {
+        DWORD code = GetLastError();
+        dolphin_set_error(dolphin_kind_from_win32(code), (int)code);
+        return (int)code;
+    }
+    return 0;
+}
+
+extern "C" int dolphin_stream_close(uintptr_t id) {
+    struct dolphin_stream_state *state = (struct dolphin_stream_state *)id;
+    if (state == NULL || !state->open) {
+        return 0;
+    }
+    if (!state->owned) {
+        dolphin_set_error(DOLPHIN_ERR_NOT_OWNED, 0);
+        return (int)ERROR_ACCESS_DENIED;
+    }
+    if (!CloseHandle(state->native)) {
+        DWORD code = GetLastError();
+        state->open = 0;
+        dolphin_set_error(dolphin_kind_from_win32(code), (int)code);
+        return (int)code;
+    }
+    state->open = 0;
+    return 0;
+}
+
+extern "C" uint8_t dolphin_stream_is_open(uintptr_t id) {
+    struct dolphin_stream_state *state = (struct dolphin_stream_state *)id;
+    return (uint8_t)(state != NULL && state->open);
+}
+
 extern "C" void dolphin_print_string(const char *data, uintptr_t length) {
     dolphin_write_all(data, (size_t)length);
 }

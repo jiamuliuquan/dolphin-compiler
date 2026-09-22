@@ -842,6 +842,14 @@ dolphin_arg
 dolphin_env
 dolphin_last_error_kind
 dolphin_last_error_code
+dolphin_stream_stdin
+dolphin_stream_stdout
+dolphin_stream_stderr
+dolphin_stream_read
+dolphin_stream_write
+dolphin_stream_flush
+dolphin_stream_close
+dolphin_stream_is_open
 dolphin_runtime_finish
 ```
 
@@ -909,7 +917,7 @@ dolphin_runtime_finish
 - **模块与 API**：`std`（`Option`/`Result`/`Iterator`）、`std.collections`（`Vec<T>`、`SliceIter<T>`、
   `Range`）、`std.text`（`String`、`concat`/`trim`/`substring`/`starts_with`/`ends_with`/`contains`/
   `from_utf8`、`TextError`）、`std.ffi`（`CString`、`CStringError`）、`std.process`（进程参数与环境，
-  H19-01）。
+  H19-01）、`std.error` 与 `std.io`（错误类别与标准流字节 I/O，H19-02）。
 - **导入与 prelude**：`use std.mem;`、`use std.text;`、`use std.collections.Vec;` 与类型导入；
   `Option`/`Result`/`Iterator` 作为最小 prelude 自动可用，被本模块定义或显式导入时遮蔽。
 - **迭代器协议**：`for x in expr` 要求 `expr` 实现 `Iterator`；数组与切片经只读切片适配到
@@ -924,7 +932,21 @@ dolphin_runtime_finish
   `deinit`/写入；`ArgError` 区分 `OutOfRange` 与 `NotUtf8`；`EnvLookup` 三态区分 `Found`/`Missing`/
   `NotUtf8`。Unix 直接保存字节 argv 并校验 UTF-8；Windows 用宽字符 API 转 UTF-8（含未配对代理项
   的条目为 `NotUtf8`）。`main` 仍无参数，源码兼容不变。
+- **`std.error`（H19-02）**：`ErrorKind`（`Other`/`NotFound`/`PermissionDenied`/`IsADirectory`/
+  `InvalidArgument`/`NotOwned`/`Closed`，判别值 `0..6` 与运行时 ABI 一致）、
+  `Error::new(kind, code)`、`kind()`、`code()`、`from_last_error()`。错误是值类型，不拥有内存、
+  不需要释放；`code` 保留 native errno/GetLastError，纯 API 错误为 0。
+- **`std.io`（H19-02）**：`Stream`、`stdin()`/`stdout()`/`stderr()`、
+  `read(self, []u8): Result<usize, Error>`（短读正常，`Ok(0)`=EOF）、`write(...): Result<usize, Error>`、
+  `write_all(...): Result<bool, Error>`（循环写完整段；写入 0 或出错返回 Err）、
+  `flush`/`close`/`close_abort`/`is_open`、`eprint([]const u8)`；标准流是**借用句柄**，`close` 返回
+  `Err(NotOwned)` 且不影响后续写入，副本共享运行时状态、`close` 幂等。成功类返回值用 `bool`
+  （`true`）而非 Unit：当前语言无 Unit 值（`Result<Unit, E>` 会得到诊断）。异常 UTF-8 字节可读入
+  `[]u8`，但转 `string` 必须经 `std.text.from_utf8` 校验；`string.from_bytes` 保持 104 trap 语义。
+  `release`/`from_raw` 与 `std.fs.open` 一起在 H19-03 提供。
 - **所有权边界**：容器赋值/元素读取/Vec.clone 是浅复制；clear/deinit 不递归释放拥有型元素。`Vec<String>` 等需按 API 契约逐元素释放；view 不延长缓冲寿命，可写 deinit 的接收者应为 var。
+- **`Unit` 约束（H19-02）**：`Unit` 没有运行时值，不能作为 struct 字段或 enum payload 按值存储；
+  实例化时给出诊断，不再在 codegen 内部 panic。
 
 ## 17. lib 项目、包图与库包发布（M15-C…F，已完成）
 

@@ -575,8 +575,34 @@ impl MonoState {
 
         self.in_progress_types.pop();
         self.ensure_acyclic(id)?;
+        self.validate_runtime_fields(source, span, name, id)?;
         self.validate_aggregate_size(source, span, name, id)?;
         Ok(self.type_of(id))
+    }
+
+    /// `Unit` 没有运行时值，不能作为按值字段或 enum payload：否则 layout/codegen
+    /// 会在发射分量时触发内部错误。这里在实例化入口给出诊断。
+    fn validate_runtime_fields(
+        &self,
+        source: &SourceFile,
+        span: Span,
+        name: &str,
+        id: TypeId,
+    ) -> Result<(), Diagnostic> {
+        let has_unit = match &self.types[id.0] {
+            TypeDef::Struct { fields, .. } => fields.iter().any(|field| field.ty == Type::Unit),
+            TypeDef::Enum { variants } => variants
+                .iter()
+                .any(|variant| variant.fields.contains(&Type::Unit)),
+        };
+        if has_unit {
+            return Err(Diagnostic::at(
+                source,
+                span,
+                format!("type `{name}` cannot store `Unit` by value"),
+            ));
+        }
+        Ok(())
     }
 
     /// 拒绝超过聚合预算的类型，避免布局尺寸在 u32 中静默饱和成可分配大小。

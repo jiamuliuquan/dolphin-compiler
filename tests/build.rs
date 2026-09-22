@@ -2406,3 +2406,117 @@ fn h18_11_examples_m18_combination_regression() {
         }
     }
 }
+
+/// H19-02：`Unit` 不能按值作为 struct 字段或 enum payload。修复前该输入通过
+/// 类型检查后在 codegen 内部 panic（`Unit has no runtime value`），必须改为诊断。
+#[test]
+fn h19_02_unit_aggregate_payload_is_rejected() {
+    use dolphin_compiler::BuildSettings;
+    use support::backends;
+
+    let cases = [
+        (
+            "enum payload",
+            "fn unit(): Unit { return; }\nfn make(): Result<Unit, i32> { return Result.Ok(unit()); }\nfn main() { val value = make(); return; }",
+        ),
+        (
+            "struct field",
+            "struct Holder { value: Unit }\nfn unit(): Unit { return; }\nfn main() { val holder = Holder(unit()); return; }",
+        ),
+    ];
+    for (label, source) in cases {
+        for backend in backends() {
+            for profile in [BuildProfile::Debug, BuildProfile::Release] {
+                let unique = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system clock should be after Unix epoch")
+                    .as_nanos();
+                let project = std::env::temp_dir().join(format!(
+                    "dolphin-unit-field-test-{}-{unique}-{}",
+                    std::process::id(),
+                    NEXT_PROJECT_ID.fetch_add(1, Ordering::Relaxed)
+                ));
+                let path = project.join("src/main.do");
+                fs::create_dir_all(path.parent().unwrap()).expect("source dir");
+                fs::write(&path, source).expect("source file");
+                let error = build_with_profile(
+                    BuildOptions {
+                        input: project.clone(),
+                        output: None,
+                    },
+                    profile,
+                    BuildSettings::with_backend(backend),
+                )
+                .expect_err(&format!(
+                    "{label} must be rejected ({backend:?}/{profile:?})"
+                ));
+                assert!(
+                    error.to_string().contains("Unit"),
+                    "{label} diagnostic must mention Unit ({backend:?}/{profile:?}): {error}"
+                );
+                fs::remove_dir_all(&project).expect("temporary project should be removed");
+            }
+        }
+    }
+}
+
+/// H19-02：两个模块各自声明同一个 extern "C" 符号时，两后端都必须只生成一个
+/// 导入符号；修复前 LLVM 后端把第二次声明重命名为 `<symbol>.1`，链接失败。
+#[test]
+fn h19_02_duplicate_extern_declarations_share_symbol() {
+    use dolphin_compiler::BuildSettings;
+    use support::backends;
+
+    let files = [
+        (
+            "src/main.do",
+            "use a.x;\nuse b.y;\nfn main(): i32 { return x.one_code() + y.two_code(); }",
+        ),
+        (
+            "src/a/x.do",
+            "pkg a;\nextern \"C\" { pub fn dolphin_last_error_code(): i32; }\npub fn one_code(): i32 { return dolphin_last_error_code(); }",
+        ),
+        (
+            "src/b/y.do",
+            "pkg b;\nextern \"C\" { pub fn dolphin_last_error_code(): i32; }\npub fn two_code(): i32 { return dolphin_last_error_code(); }",
+        ),
+    ];
+    for backend in backends() {
+        for profile in [BuildProfile::Debug, BuildProfile::Release] {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after Unix epoch")
+                .as_nanos();
+            let project = std::env::temp_dir().join(format!(
+                "dolphin-extern-dedup-test-{}-{unique}-{}",
+                std::process::id(),
+                NEXT_PROJECT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            for (relative, source) in files {
+                let path = project.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).expect("source dir");
+                fs::write(&path, source).expect("source file");
+            }
+            let artifact = build_with_profile(
+                BuildOptions {
+                    input: project.clone(),
+                    output: None,
+                },
+                profile,
+                BuildSettings::with_backend(backend),
+            )
+            .unwrap_or_else(|error| {
+                panic!("duplicate extern declarations must link ({backend:?}/{profile:?}): {error}")
+            });
+            let output = Command::new(&artifact.executable)
+                .output()
+                .expect("generated executable should run");
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "backend={backend:?} profile={profile:?}"
+            );
+            fs::remove_dir_all(&project).expect("temporary project should be removed");
+        }
+    }
+}

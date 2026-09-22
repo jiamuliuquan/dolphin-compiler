@@ -5,6 +5,7 @@
 #include <string.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #define DOLPHIN_EXIT_TRAP 101
 #define DOLPHIN_EXIT_ALLOC 102
@@ -352,6 +353,132 @@ int dolphin_last_error_kind(void) {
 
 int dolphin_last_error_code(void) {
     return dolphin_error_code;
+}
+
+/* ---------------------------------------------------------------------------
+ * 字节流（M19/H19-02）。
+ *
+ * 标准流是借用状态（owned=0），`close` 返回 NotOwned 且不关闭 OS 句柄；
+ * 句柄副本共享同一状态，`close` 幂等（H19-03 的文件流沿用同一状态机）。
+ * 读写包装内部重试 EINTR，短读/短写原样返回给调用方。
+ * ------------------------------------------------------------------------- */
+
+struct dolphin_stream_state {
+    int open;
+    int owned;
+    int native;
+};
+
+static struct dolphin_stream_state dolphin_stdin_state = {1, 0, 0};
+static struct dolphin_stream_state dolphin_stdout_state = {1, 0, 1};
+static struct dolphin_stream_state dolphin_stderr_state = {1, 0, 2};
+
+uintptr_t dolphin_stream_stdin(void) {
+    return (uintptr_t)&dolphin_stdin_state;
+}
+
+uintptr_t dolphin_stream_stdout(void) {
+    return (uintptr_t)&dolphin_stdout_state;
+}
+
+uintptr_t dolphin_stream_stderr(void) {
+    return (uintptr_t)&dolphin_stderr_state;
+}
+
+static struct dolphin_stream_state *dolphin_stream_of(uintptr_t id) {
+    return (struct dolphin_stream_state *)id;
+}
+
+static int dolphin_kind_from_errno(int code) {
+    switch (code) {
+        case ENOENT:
+            return DOLPHIN_ERR_NOT_FOUND;
+        case EACCES:
+        case EPERM:
+            return DOLPHIN_ERR_PERMISSION;
+        case EISDIR:
+            return DOLPHIN_ERR_IS_DIR;
+        case EINVAL:
+        case ENAMETOOLONG:
+            return DOLPHIN_ERR_INVALID;
+        default:
+            return DOLPHIN_ERR_OTHER;
+    }
+}
+
+int dolphin_stream_read(uintptr_t id, uint8_t *buffer, uintptr_t length, uintptr_t *out_read) {
+    struct dolphin_stream_state *state = dolphin_stream_of(id);
+    if (state == NULL || !state->open) {
+        dolphin_set_error(DOLPHIN_ERR_CLOSED, 0);
+        return EBADF;
+    }
+    for (;;) {
+        ssize_t result = read(state->native, buffer, (size_t)length);
+        if (result >= 0) {
+            *out_read = (uintptr_t)result;
+            return 0;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        dolphin_set_error(dolphin_kind_from_errno(errno), errno);
+        return errno;
+    }
+}
+
+int dolphin_stream_write(uintptr_t id, const uint8_t *bytes, uintptr_t length,
+                         uintptr_t *out_written) {
+    struct dolphin_stream_state *state = dolphin_stream_of(id);
+    if (state == NULL || !state->open) {
+        dolphin_set_error(DOLPHIN_ERR_CLOSED, 0);
+        return EBADF;
+    }
+    for (;;) {
+        ssize_t result = write(state->native, bytes, (size_t)length);
+        if (result >= 0) {
+            *out_written = (uintptr_t)result;
+            return 0;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        dolphin_set_error(dolphin_kind_from_errno(errno), errno);
+        return errno;
+    }
+}
+
+int dolphin_stream_flush(uintptr_t id) {
+    struct dolphin_stream_state *state = dolphin_stream_of(id);
+    if (state == NULL || !state->open) {
+        dolphin_set_error(DOLPHIN_ERR_CLOSED, 0);
+        return EBADF;
+    }
+    /* Unix 的 write 直达内核，无用户态缓冲；fsync 不属于 M19。 */
+    return 0;
+}
+
+int dolphin_stream_close(uintptr_t id) {
+    struct dolphin_stream_state *state = dolphin_stream_of(id);
+    if (state == NULL || !state->open) {
+        return 0;
+    }
+    if (!state->owned) {
+        dolphin_set_error(DOLPHIN_ERR_NOT_OWNED, 0);
+        return EINVAL;
+    }
+    if (close(state->native) != 0) {
+        int code = errno;
+        state->open = 0;
+        dolphin_set_error(dolphin_kind_from_errno(code), code);
+        return code;
+    }
+    state->open = 0;
+    return 0;
+}
+
+uint8_t dolphin_stream_is_open(uintptr_t id) {
+    struct dolphin_stream_state *state = dolphin_stream_of(id);
+    return (uint8_t)(state != NULL && state->open);
 }
 
 void dolphin_print_string(const char *data, uintptr_t length) {

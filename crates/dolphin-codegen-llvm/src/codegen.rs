@@ -281,7 +281,13 @@ fn declare_user_functions<'ctx>(
                     sanitize_symbol_component(&function.name)
                 )
             };
-            module.add_function(&symbol, signature, Some(Linkage::External))
+            // 多个模块可以各自声明同一个 extern "C" 符号；按符号名复用已有声明，
+            // 否则 LLVM 会把后一个重命名为 `<symbol>.1`，链接时找不到。
+            if let Some(existing) = module.get_function(&symbol) {
+                existing
+            } else {
+                module.add_function(&symbol, signature, Some(Linkage::External))
+            }
         })
         .collect()
 }

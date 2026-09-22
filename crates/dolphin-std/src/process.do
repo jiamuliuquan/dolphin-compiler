@@ -10,6 +10,8 @@ pkg std.process;
 // 运行时错误类别编号与规格 `std.error.ErrorKind` 的稳定判别值一致；
 // `NotFound = 1` 用于区分环境缺项。
 
+use std.error.ErrorKind;
+use std.error.from_last_error;
 use std.mem;
 
 pub enum ArgError {
@@ -27,7 +29,6 @@ extern "C" {
     fn dolphin_arg_count(): usize;
     fn dolphin_arg(index: usize, out_len: *usize): *Unit;
     fn dolphin_env(name: *const u8, name_len: usize, out_len: *usize): *Unit;
-    fn dolphin_last_error_kind(): i32;
 }
 
 pub fn arg_count(): usize {
@@ -57,7 +58,12 @@ pub fn env(name: string): EnvLookup {
     var out_len = 0_usize;
     val pointer = dolphin_env(name_bytes.ptr, name_bytes.len, &out_len);
     if pointer == null {
-        if dolphin_last_error_kind() == 1 {
+        val error = from_last_error();
+        val missing = match error.kind() {
+            ErrorKind.NotFound => true,
+            _ => false,
+        };
+        if missing {
             return EnvLookup.Missing;
         }
         return EnvLookup.NotUtf8;

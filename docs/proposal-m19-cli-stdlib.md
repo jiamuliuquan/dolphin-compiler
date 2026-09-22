@@ -1,7 +1,8 @@
 # M19 规格：真实 CLI、标准库与用户测试（H19-00 冻结）
 
 > 状态：H19-00 设计冻结产物。**除 H19-01 已实现的 `std.process` 参数/环境与
-> `dc run -- <应用参数>` 转发外，本文其余 API 均未实现**；未实现的条目不能写进“已实现功能”。
+> `dc run -- <应用参数>` 转发、H19-02 已实现的 `std.error` 与 `std.io` 标准流字节 I/O 外，
+> 本文其余 API 均未实现**；未实现的条目不能写进“已实现功能”。
 > 实现顺序与验收编号见 [M18-M21 计划](plan-m18-plus.md) 第 5 节与本文“测试矩阵”。
 >
 > 前置：M18 已完成并通过阶段验收（[m18-progress](reports/m18-progress.md)）。
@@ -123,15 +124,21 @@ pub fn stderr(): Stream
 
 pub fn read(self: *const Stream, buffer: []u8): Result<usize, Error>
 pub fn write(self: *const Stream, bytes: []const u8): Result<usize, Error>
-pub fn write_all(self: *const Stream, bytes: []const u8): Result<(), Error>
-pub fn flush(self: *const Stream): Result<(), Error>
-pub fn close(self: *Self): Result<(), Error>
+pub fn write_all(self: *const Stream, bytes: []const u8): Result<bool, Error>
+pub fn flush(self: *const Stream): Result<bool, Error>
+pub fn close(self: *Self): Result<bool, Error>
 pub fn close_abort(self: *Self)
 pub fn is_open(self: *const Stream): bool
 pub fn release(self: *Self): usize
 pub fn from_raw(handle: usize): Stream
-pub fn eprint(bytes: []const u8): Result<(), Error>
+pub fn eprint(bytes: []const u8): Result<bool, Error>
 ```
+
+成功类返回值用 `Result<bool, Error>`（`true` = 成功）：当前语言不能表达 `Result<(), E>`（`()` 不是类型；
+`Result<Unit, E>` 构造会在 codegen 触发内部错误，H19-02 已改为实例化诊断），经用户 2026-09-22 确认
+采用 `bool`；不新增 Unit 值语法。实现批次：H19-02 已落地标准流子集（`std.error` + `std.io` 的
+`stdin/stdout/stderr/read/write/write_all/flush/close/close_abort/is_open/eprint`）；
+`release`/`from_raw` 与 `std.fs.open` 一起在 H19-03 落地。
 
 语义：
 
@@ -592,6 +599,9 @@ native code 是否存在，不绑定整段渲染文本。新测试文件必须�
 
 ## 16. 未决与阻塞
 
-- D1、D2、D3 已于 2026-09-22 由用户确认，无阻塞；H19-01 等待人工派发。
+- D1、D2、D3 已于 2026-09-22 由用户确认；H19-01、H19-02 已完成对应实现（见 [M19 报告](reports/m19-progress.md)）。
+- H19-02 经用户确认把 unit-like 返回值从 `Result<(), Error>` 改为 `Result<bool, Error>`（当前语言
+  无 Unit 值；`Result<Unit, E>` 会触发诊断），并修复了暴露的两个编译器缺陷（Unit payload 诊断、
+  LLVM 重复 extern 符号）。规格第 4.1 节已同步。
 - `dc test` 支持 `--release`/`--debug`（默认 Debug），已在 §9.1 冻结；不作为阻塞项。
 - 若 H19-06 证明必须新增语法，按第 10.2 节停止并重新冻结（不预先批准）。

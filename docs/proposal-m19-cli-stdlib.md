@@ -556,6 +556,13 @@ block/if 表达式、`?` 或异常。
 - 跨平台：三平台默认后端（Cranelift）与 Linux LLVM 均验证；路径含空格与 Unicode 的用例
   覆盖三平台。
 
+实现状态（H19-07）：`examples/m19/textstats` 与 `examples/m19/dtext` 已实现；用法、
+行规则、诊断、退出码与资源规则按本节冻结值落地（诊断文本见 [M19 报告](reports/m19-progress.md)
+H19-07 节）。`dtext` 声明 `[lib]`（应用逻辑 `src/app.do`）+ `[[bin]]`（入口 `src/main.do`），
+以满足 `dc test` 的 `[lib]` 要求；D1 冻结了 `dc build --lib` 的打包行为，声明 path 依赖的
+lib+bin 包因此用 `dc build --bin dtext` / `dc run --bin dtext` 构建运行（plain `dc build`
+仍按 D1 在打包库时拒绝 path 依赖）。两包各自有 `tests/*.do`，由 `dc test` 运行。
+
 ### 11.1 dtext 依赖的文本/数值 API（H19-04 实现，规格补充）
 
 H19-04 按上述目标程序补齐 `std.text` 的最小文本/数值能力；签名与拥有权在此冻结：

@@ -989,3 +989,125 @@ installation 的显式列表。
    重复运行无资源累积；标准库公开条目逐项记录拥有权/失效/错误规则；发布包可构建该项目。
 3. 失败路径写法沿用本批模式（先绑定错误/视图再使用）；`return match` 与链式方法调用的限制见上。
 4. 无阻塞；M19 未完成，本报告不把 M19 或 H19-07 记为完成。
+
+## H19-07 真实应用、文档与（Linux）验收
+
+- 批次：H19-07（M19 最后一个实施批次；macOS/Windows 验收由用户在后续会话中另行执行）
+- 状态：完成（Linux x86_64：Cranelift/LLVM × Dolphin Debug/Release 本机全绿；macOS/Windows 未运行，见“未运行的检查”）
+- 前置批次及报告：H19-06，见本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`9ed21b1`（`v0.3.0-M19-06`），工作区干净。
+- 本批修改：`examples/m19/**`（新：`textstats` lib + `dtext` lib+bin + 两包 `tests/*.do` +
+  `README.md`）、`tests/m19_app.rs`（新）、`.github/workflows/ci.yml`（显式列表 + 冒烟）、
+  `README.md`、`docs/installation.md`、`docs/implemented-features.md`、
+  `docs/proposal-m19-cli-stdlib.md`、`docs/plan-m18-plus.md`、`examples/README.md`、本报告。
+  **无编译器/运行时/标准库源码改动**。未 commit/push/tag。
+
+### 决策与阻塞处理
+
+- 规格 §11 写 `dtext` 是 `[[bin]]` 且两包各自有 `tests/*.do`，计划要求“应用有自己的 dc test”；
+  但 `dc test` 需要 `[lib]`，且 D1 下 lib+bin 且声明 path 依赖的包 plain `dc build` 会在打包库时
+  拒绝 path 依赖（已实测）。经用户 2026-09-22 确认采用 **lib+bin**：应用逻辑放 `src/app.do`，
+  `src/main.do` 只是入口；文档与冒烟用 `dc build --bin dtext` / `dc run --bin dtext`，
+  并在规格 §11、examples/m19/README 与 implemented-features 记录 D1 交互。
+
+### 修改文件与关键实现
+
+- `examples/m19/textstats`（`[lib]`）：`Stats`（私有字段 + `empty`/`lines`/`matched`/`bytes`）
+  与 `analyze(input: []const u8, filter: string): Result<Stats, TextError>`；复用 `std.text.lines`
+  的冻结行规则，空过滤匹配所有行，非法 UTF-8 返回 `TextError.InvalidUtf8`；纯函数零分配。
+- `examples/m19/dtext`：`src/app.do`（`[lib]`）实现 `parse_args_from`（纯函数，`dc test` 直接覆盖）、
+  `parse_process_args`（把 argv 复制为 `[]const string`）、`run()`（stdin/`-`/文件输入、Builder
+  累积整输入、`textstats.analyze`、固定三行输出、退出码 0/1/2）、诊断与数字格式化；
+  `src/main.do` 仅 `return run();`。
+- `examples/m19/*/tests/*.do`：textstats 5 个核心用例（行/CRLF/无末尾换行/过滤/字节数/非法 UTF-8）；
+  dtext 5 个用例（参数解析、通过 path 依赖调用 `textstats.analyze`、数字格式化）。
+- `tests/m19_app.rs`：把 `examples/m19` 复制到临时目录，用 `dc` 在可用后端 × Debug/Release 上
+  `dc build --bin dtext` 并实际调用命令行断言三路结果；同时运行两包 `dc test`。
+
+### 验收映射（链接 ARGS/IO/FS/TEXT/TEST/ERR）
+
+| 验收点 | 真实测试名 | 期望与结果 |
+| --- | --- | --- |
+| 布局/D1 + `--help` | `m19_app.rs::app_01_layout_build_and_help` | plain `dc build` exit 1 且 stderr 含 `path dependency`（D1 不变）；`--bin dtext` 构建成功；`--help` 输出固定用法 exit 0、stderr 空；4 组合通过 |
+| ARGS/IO/FS/TEXT 组合（stdin） | `app_02_stdin_and_line_rules` | 空输入 `lines=0 matched=0 bytes=0`；正常 UTF-8 `--filter et`→`3/1/17`；无末尾换行 `a\nb`→`2/2/3`；无匹配 `zzz`→`2/0/4`；CRLF→`2/1/6`；Unicode 过滤→`2/1/14`；`-`→`1/1/2`；全部 exit 0、stderr 空；4 组合通过 |
+| FS/TEXT 文件输入 + 重复运行 | `app_03_file_input_and_repeated_runs` | 空格/中文路径文件读取固定输出；同一 Debug 产物连续运行 5 次 stderr 全空（无泄漏、无未关闭句柄）；4 组合通过 |
+| ARGS（用法错误） | `app_04_usage_errors` | 未知选项/缺少 `--filter` 值/多余位置参数（含 `- -`）→ exit 2 + 固定 stderr、stdout 空；4 组合通过 |
+| FS/ERR（打开与编码错误） | `app_05_open_and_encoding_errors` | 缺失文件→`dtext: cannot open input (not-found)` exit 1；目录→Unix `(is-dir)`/Windows `(invalid)`；stdin 与文件的非法 UTF-8→`dtext: invalid UTF-8` exit 1；stdout 不输出统计；4 组合通过 |
+| IO（受控写失败） | `app_06_write_failure_not_trap`（Linux） | stdout 指向 `/dev/full`→exit 1 + `dtext: cannot write output (other)`，不 trap；4 组合通过 |
+| TEST（应用自测） | `app_07_dc_test_self_checks` | `dc test textstats` 与 `dc test dtext` 各 5 个用例全 `ok`、固定 `5 passed; 0 failed; 0 filtered out`、exit 0、stderr 空；4 组合通过 |
+| 既有回归 | `m19_args`/`m19_io`/`m19_fs`/`m19_text`/`m19_test_cmd`/`m19_errors` | ARGS-01..04、IO-01..04、FS-01..06、TEXT-01..04、TEST-01..06、ERR-01..04 全部继续通过（见下方命令） |
+
+固定诊断文本（`dtext`，均写 stderr 并带换行）：`dtext: unknown option`、
+`dtext: --filter requires a value`、`dtext: too many arguments`、`dtext: invalid UTF-8 argument`、
+`dtext: invalid UTF-8`、`dtext: cannot open input (<kind>)`、`dtext: cannot read input (<kind>)`、
+`dtext: cannot write output (<kind>)`；`<kind>` ∈ not-found/permission/is-dir/invalid/not-owned/closed/other。
+`--help` 固定 stdout 为 `usage: dtext [--help] [--filter <text>] [<path>]`。
+
+### 修复前复现结果
+
+- 本批不修生产代码；新示例与集成测试首次运行即通过（无“修复前失败”）。规格/D1 冲突与用户
+  决策见上节；`dc build --bin dtext` 与 plain `dc build` 的差异由 `app_01` 固定为回归。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m19_app`：7 passed；`--features llvm` 同样 7 passed。
+- 手工探针：`--help`、空/正常/无末尾换行/无匹配/CRLF/Unicode/`-`、用法错误、缺失文件/目录/
+  非法 UTF-8/受控写失败、重复运行均与固定期望一致。
+- 完整门禁与发行包冒烟全绿（含归档 `dc build --bin dtext` + 运行 + `dc test` 两包）。
+
+### 实际运行命令与测试数量
+
+```bash
+cargo test -p dolphin-compiler --test m19_app                            # 7 passed
+cargo test -p dolphin-compiler --features llvm --test m19_app            # 7 passed
+cargo test --workspace --exclude dolphin-codegen-llvm                     # 366 passed (359→366)
+cargo test --workspace --features llvm                                    # 373 passed (366→373)
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm \
+  --test build --test ffi --test cli --test manifest --test packages --test doc_examples \
+  --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd \
+  --test m19_errors --test m19_app                                        # 196 passed (189→196)
+cargo test -p dolphin-compiler --features llvm --test backend             # 4 passed
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features llvm \
+  -- -D warnings && git diff --check                                       # 全部通过
+# §5.3 / 发行包冒烟（本机 patchelf 隔离 venv）
+cargo build --release --bins
+./target/release/dc fmt --check examples crates/dolphin-std/src
+./target/release/dc run examples/m14|m15|m18                              # 固定输出、exit 0、stderr 空
+python3 scripts/package.py --target x86_64-unknown-linux-gnu --out-dir /tmp/opencode/h19-07/dist
+# 解压归档：m8/m14/m15/m18、m19 plain build 拒绝 path 依赖 + --bin 构建运行、打包 m15math、
+# 坐标消费、--locked --offline                                             # SMOKE_SEQUENCE_OK
+# 归档 dc test：textstats 5 passed、dtext 5 passed（隔离 DOLPHIN_HOME）
+```
+
+日志与产物在 `/tmp/opencode/h19-07/`；`--test m19_app` 已加入 `ci.yml` LLVM lane、README 与
+installation 的显式列表；`ci.yml` 冒烟新增 M19 构建/运行步骤。
+
+### 未运行的检查及原因
+
+- **macOS/Windows 本机未运行**：本机只有 Linux；用户已说明会在后续会话单独验证。三平台默认
+  后端（Cranelift）与路径含空格/Unicode、Windows 目录错误类别 `(invalid)` 等断言已写好但未
+  在真实平台执行，未伪造。
+- macOS/Windows 上的 LLVM 未运行（本机 Linux LLVM 已验证）。
+- 受控读失败没有可移植注入方式（同 FS-03 说明）：应用只在 open 成功后读，无法在普通文件上
+  稳定注入 EIO；open/write 失败与 FS-03 的模式不匹配读失败覆盖了错误路径代码。
+- `--system-linker` 与 `dc test` 组合未单独运行（选项与 build 共用）。
+- tag/release 未触发。
+
+### 行为/兼容变化
+
+- 无编译器/运行时/标准库行为变化；新增示例与集成测试、CI 显式列表与冒烟步骤、文档。
+- 规格 §11 补充实现状态：`dtext` 为 lib+bin 布局，plain `dc build` 在 D1 下仍拒绝 path 依赖，
+  应用用 `--bin` 构建；`examples/m19/README.md`、examples 索引与 implemented-features 已同步。
+- M19 验收：ARGS/IO/FS/TEXT/TEST/ERR 均有真实测试名与固定期望；H19-01..07 全部完成，
+  M19 待三平台验收后再由用户确认阶段完成。
+
+### 剩余问题和下一批输入
+
+1. 用户在 macOS/Windows 上按本报告命令复验 `tests/m19_app.rs`（三平台默认 Cranelift ×
+   Debug/Release）与 examples/m19 构建运行；重点确认：Windows 目录错误类别 `(invalid)`、
+   路径含空格/Unicode、`/dev/full` 用例在非 Linux 上按 `cfg(target_os = "linux")` 跳过。
+2. 三平台通过后 M19 阶段完成，下一阶段为 M20（先做 H20-00 设计冻结，不提前实现）。
+3. 本报告不把 M19 阶段记为完成；macOS/Windows 结果未出前保持“Linux 已验收”。

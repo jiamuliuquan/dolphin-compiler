@@ -1,6 +1,6 @@
 # 可运行示例
 
-该目录只保存当前编译器已经支持、能够真实编译和运行的示例。示例按实现里程碑划分，每个目录都是独立 Dolphin 项目，入口均为 `src/main.do`。
+该目录只保存当前编译器已经支持、能够真实编译和运行的示例。示例按实现里程碑划分，每个目录都是独立 Dolphin 项目，入口通常为 `src/main.do`（M19 是 lib+bin 两包，见其 README）。
 
 ## 准备编译器
 
@@ -29,6 +29,7 @@ cargo build --release
 | [M14](m14/README.md) | 手动内存（`std.mem`）、指针/切片、`defer`、字符串视图、`extern "C"` | 输出并退出码 `0`；`ffi/` 需预编译 C fixture |
 | [M15](m15/README.md) | 泛型函数/结构体/枚举、单态化、方法与泛型 `impl`、trait 静态分派、`Vec<T>` 与 `for` 迭代协议、prelude `Option`/`Result` | 输出 `42 22 true` |
 | [M18](m18/README.md) | 组合回归：泛型容器/枚举、聚合按值传参与指针别名写、`Vec`/`mem` + `defer` 清理 | 输出并退出码 `0`；Debug stderr 为空 |
+| [M19](m19/README.md) | `dtext` 文本统计/过滤 CLI：参数/环境、标准流与文件 I/O、文本处理、`dc test` 用户测试闭环 | 两包 `dc test` 全过；命令行输出固定三行并断言退出码 |
 
 ## 通用构建方式
 

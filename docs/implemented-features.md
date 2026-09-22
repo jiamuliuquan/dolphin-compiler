@@ -1017,6 +1017,8 @@ dolphin_runtime_finish
   `test <name> ... ok`、`... FAILED (assertion)`（退出码 106）、`... FAILED (trap exit N)`、
   `... FAILED (timeout after 30s)`，最后一行 `N passed; M failed; K filtered out`；全部通过 0、
   任一失败 1、0 测试 `no tests found` 1、过滤无匹配 `no tests matched filter` 1、用法错误 2。
+  `examples/m19` 的 `textstats`（lib）与 `dtext`（lib+bin，path 依赖）演示该闭环；因 D1
+  （`dc build --lib` 仍打包且 `.dlib` 拒绝 path 依赖），`dtext` 用 `dc build --bin dtext` 构建。
 
 ## 18. 优化后端与开发工具（M16、M17，已完成）
 

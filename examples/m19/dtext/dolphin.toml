@@ -1,0 +1,14 @@
+[package]
+group = "me.foxlab"
+name = "dtext"
+version = "0.1.0"
+
+[lib]
+path = "src/app.do"
+
+[[bin]]
+name = "dtext"
+path = "src/main.do"
+
+[dependencies]
+textstats = { path = "../textstats" }

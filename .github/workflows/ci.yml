@@ -114,6 +114,23 @@ jobs:
           test "$output" = "$expected"
           test ! -s m18.stderr
 
+          # M19 目标工具：lib+bin 应用 + path 依赖库；plain `dc build` 仍拒绝打包
+          # path 依赖（D1），应用用 `--bin` 构建。三路结果固定。
+          set +e
+          plain=$(smoke/dc build examples/m19/dtext 2>&1)
+          plain_code=$?
+          set -e
+          test "$plain_code" -eq 1
+          echo "$plain" | grep -q "path dependency"
+          smoke/dc build examples/m19/dtext --bin dtext
+          set +e
+          output=$(printf 'a\nb\n' | ./examples/m19/dtext/target/dtext --filter a 2>m19.stderr)
+          code=$?
+          set -e
+          test "$code" -eq 0
+          test "$output" = $'lines=2\nmatched=1\nbytes=4'
+          test ! -s m19.stderr
+
           # M15-C/D 库打包：发行包中的 dc 也能产出确定性 `.dlib` 与摘要。
           smoke/dc package examples/m15/mathlib
           test -f examples/m15/mathlib/target/package/m15math-1.0.0.dlib
@@ -214,7 +231,7 @@ jobs:
       - run: cargo build --bins --features llvm
       - run: cargo clippy --workspace --all-targets --features llvm -- -D warnings
       - run: DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm
-      - run: DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors
+      - run: DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app
       - run: cargo test -p dolphin-compiler --features llvm --test backend
 
   # 发布：仅在 tag 上触发，且必须等三平台质量门禁与 LLVM lane 全部成功。

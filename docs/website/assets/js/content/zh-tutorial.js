@@ -9,12 +9,12 @@ window.DolphinDocsContent["zh-CN"].groups.push({
       title: "安装与第一个程序",
       body: `
 <h1>安装与第一个程序</h1>
-<p>本章带你完成 Dolphin 工具链的安装，并编译运行第一个程序。Dolphin 以自包含发行包发布，解压即用，构建程序时不需要 C/C++ 工具链，也不需要 Rust。</p>
+<p>本章带你完成 Dolphin 工具链的安装，并编译运行第一个程序。Dolphin 以自包含发行包发布，解压即用，不需要 Rust 或编译器源码；链接仍会用到系统的 CRT/SDK，详见<a href="../install.html">安装说明</a>。</p>
 
 <h2>1. 安装编译器</h2>
 <p>发行包提供三个一级平台的归档：Linux x86_64、macOS ARM64 与 Windows x86_64。下载后解压到任意目录，并把该目录加入 <code>PATH</code>：</p>
 <pre><code>mkdir -p ~/.local/dolphin
-tar xzf dolphin-0.1.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
+tar xzf dolphin-0.3.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
 export PATH="$HOME/.local/dolphin:$PATH"</code></pre>
 <p>解压目录中的 <code>dc</code> 是编译器主命令，<code>rust-lld</code> 是随包分发的链接器，二者必须位于同一目录。完整的平台说明、校验和与卸载方式见 <a href="../install.html">安装指南</a>。</p>
 <p>验证安装：</p>
@@ -46,7 +46,7 @@ target/hello-project.o           Dolphin 程序目标文件
 target/hello-project.runtime.o   最小运行时目标文件</code></pre>
 
 <h2>3. 程序入口与退出码</h2>
-<p>可执行程序必须且只能定义一个 <code>main</code>。当前 <code>main</code> 不接受命令行参数，也可以返回 <code>i32</code> 作为进程退出码：</p>
+<p>可执行程序必须且只能定义一个 <code>main</code>。它不接受参数；应用参数通过 <code>std.process</code> 读取（见<a href="#/std/io">进程、流与文件</a>）。<code>main</code> 可以返回 <code>i32</code> 作为进程退出码：</p>
 <pre><code>fn main(): i32 {
     return 42;
 }</code></pre>
@@ -61,6 +61,7 @@ echo $?   # 42</code></pre>
     <tr><td><code>dc check &lt;项目&gt;</code></td><td>只做词法、语法、类型与名称检查，不生成产物</td></tr>
     <tr><td><code>dc build &lt;项目&gt;</code></td><td>编译并链接为可执行文件（默认 Debug）</td></tr>
     <tr><td><code>dc run &lt;项目&gt;</code></td><td>构建后立即运行，并透传程序退出码</td></tr>
+    <tr><td><code>dc test &lt;项目&gt;</code></td><td>运行项目的 <code>tests/*.do</code> 测试</td></tr>
     <tr><td><code>dc info &lt;项目&gt;</code></td><td>显示包坐标、目标、依赖与锁文件状态</td></tr>
     <tr><td><code>dc env</code></td><td>显示宿主/目标平台与工具链信息</td></tr>
   </tbody>
@@ -151,7 +152,7 @@ fn main() {
 <p>顶层声明默认仅在本模块内可见，添加 <code>pub</code> 后可以跨模块访问。详见<a href="#/tutorial/packages">模块、可见性与包管理</a>。</p>
 
 <h2>6. 当前边界</h2>
-<p>Dolphin 仍在演进中。以下能力尚未实现：嵌套数组与空数组字面量、资源 <code>try</code> 语法、借用检查、生命周期、闭包、动态分派、<code>?</code> 错误传播、文件/进程/网络标准库、C 头文件导入、交叉编译与 DWARF 调试信息。请在编写代码前确认对应能力是否可用。</p>
+<p>Dolphin 仍在演进中。以下能力尚未实现：嵌套数组与空数组字面量、资源 <code>try</code> 语法、借用检查、生命周期、闭包、动态分派、<code>?</code> 错误传播、网络标准库、C 头文件导入与交叉编译。DWARF 行表与函数信息由 LLVM 后端在 Unix Debug 构建中生成；Cranelift 与 Windows/PDB 暂无调试信息。</p>
 
 <h2>7. 继续学习</h2>
 <ul>
@@ -169,7 +170,7 @@ fn main() {
       title: "变量、类型与表达式",
       body: `
 <h1>变量、类型与表达式</h1>
-<p>本章介绍 Dolphin 的基础标量类型、变量绑定、类型转换与运算符。</p>
+<p>先看基础标量类型，再看 <code>val</code>/<code>var</code>、类型转换与运算符的实际行为。</p>
 
 <h2>1. 变量绑定</h2>
 <p>使用 <code>var</code> 定义可变变量，使用 <code>val</code> 定义不可变变量。所有变量必须在声明时初始化，类型可以由初始化表达式推断：</p>
@@ -282,7 +283,7 @@ println("{{}}");   // 输出 {}</code></pre>
       title: "控制流与函数",
       body: `
 <h1>控制流与函数</h1>
-<p>本章介绍条件、循环、函数定义与格式化输出，它们是组织程序逻辑的基础。</p>
+<p>条件、循环与函数；学完可以写一个小的计算器。</p>
 
 <h2>1. if / else</h2>
 <p>条件不强制添加括号，条件表达式必须是 <code>bool</code>：</p>
@@ -402,7 +403,7 @@ fn main() {
       title: "数组、结构体、枚举与 match",
       body: `
 <h1>数组、结构体、枚举与 match</h1>
-<p>本章介绍如何用数组、结构体和枚举表达复合数据，并用 <code>match</code> 对枚举做穷尽式分派。</p>
+<p>用数组、结构体和枚举表达数据，再用 <code>match</code> 对枚举做穷尽分派。</p>
 
 <h2>1. 定长数组</h2>
 <p>数组类型写作 <code>[元素类型; 长度]</code>，长度是类型的一部分：</p>
@@ -536,7 +537,7 @@ fn main() {
       title: "模块、可见性与包管理",
       body: `
 <h1>模块、可见性与包管理</h1>
-<p>本章介绍项目的源码组织、模块导入与可见性规则，以及 <code>dolphin.toml</code> 清单、依赖与库包发布。</p>
+<p><code>src/</code> 如何映射到模块、<code>use</code> 与 <code>pub</code> 的规则，以及 <code>dolphin.toml</code> 如何描述依赖与库。</p>
 
 <h2>1. 源码根目录与 pkg</h2>
 <p>每个项目以 <code>src/</code> 作为源码根目录。<code>src</code> 只用于组织项目，不属于模块名。直接位于 <code>src/</code> 下的 <code>.do</code> 文件组成根模块，可以省略 <code>pkg</code>：</p>
@@ -624,14 +625,17 @@ dc publish my-project --repository default</code></pre>
 
 <h2>5. 命令行参考</h2>
 <pre><code>dc check &lt;项目目录或main.do&gt; [--locked] [--offline] [--color auto|always|never]
-dc build &lt;项目目录或main.do&gt; [--bin &lt;名称&gt;] [--lib] [-o &lt;输出文件&gt;] [--debug|--release] [--system-linker] [--locked] [--offline]
-dc run   &lt;项目目录或main.do&gt; [--bin &lt;名称&gt;] [--debug|--release]
+dc build &lt;项目目录或main.do&gt; [--bin &lt;名称&gt;] [--lib] [-o &lt;输出文件&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc run   &lt;项目目录或main.do&gt; [--bin &lt;名称&gt;] [-o &lt;输出文件&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- &lt;应用参数&gt;...]
+dc test  &lt;项目目录&gt; [--filter &lt;子串&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc package &lt;项目目录&gt; [--locked] [--offline]
 dc fetch   &lt;项目目录&gt; [--locked] [--offline]
-dc publish &lt;项目目录&gt; [--repository &lt;id&gt;]
+dc publish &lt;项目目录&gt; [--repository &lt;id&gt;] [--locked] [--offline]
 dc info &lt;项目目录&gt;
-dc env</code></pre>
-<p>使用 <code>dc &lt;子命令&gt; --help</code> 查看子命令参数。<code>--color</code> 是全局选项，可放在子命令前后。<code>dc info</code> 只接受项目目录，<code>dc env</code> 显示宿主/目标平台、ABI、所选链接器与缓存根。</p>
+dc env
+dc fmt &lt;文件或目录...&gt; [--check]
+dc lsp</code></pre>
+<p>使用 <code>dc &lt;子命令&gt; --help</code> 查看子命令参数。<code>--color</code> 是全局选项，可放在子命令前后。<code>dc run</code> 中 <code>--</code> 之后的参数原样转发给程序，不经过 shell。<code>dc test</code> 为每个测试启动独立进程，见<a href="#/tutorial/testing">测试代码</a>。<code>dc info</code> 只接受项目目录，<code>dc env</code> 显示宿主/目标平台、ABI、所选链接器与缓存根。</p>
 
 <h2>6. 一个多目标项目</h2>
 <pre><code>[package]
@@ -650,8 +654,9 @@ path = "src/cli.do"
 name = "server"
 path = "src/server.do"</code></pre>
 <pre><code>dc build tools            # 构建 lib 与全部 bin
-dc build tools --lib      # 只构建库
+dc build tools --lib      # 构建库并打包为 .dlib
 dc run tools --bin cli    # 运行指定可执行目标</code></pre>
+<p><code>--lib</code> 还会产出 <code>target/package/&lt;名称&gt;-&lt;版本&gt;.dlib</code>，而 <code>.dlib</code> 打包拒绝 path 依赖。因此声明 path 依赖的 lib+bin 包用 <code>--bin</code> 构建，或直接用 <code>dc test</code> 开发。</p>
 
 <h2>练习</h2>
 <ol>
@@ -667,7 +672,7 @@ dc run tools --bin cli    # 运行指定可执行目标</code></pre>
       title: "泛型、trait 与标准库",
       body: `
 <h1>泛型、trait 与标准库</h1>
-<p>本章介绍泛型函数与泛型类型、方法与 trait 的静态分派，以及随编译器分发的源码标准库。</p>
+<p>泛型函数与泛型类型、方法与 trait 静态分派，以及随编译器分发的源码标准库。</p>
 
 <h2>1. 泛型函数</h2>
 <p>泛型参数写在函数名后的尖括号中，调用时可以显式给出类型实参，也可以由参数推断：</p>
@@ -927,6 +932,55 @@ extern "C" {
 `
     },
 
+
+    {
+      id: "tutorial/testing",
+      title: "测试代码",
+      body: `
+<h1>测试代码</h1>
+<p>M19 新增 <code>dc test</code>：发现项目 <code>tests/</code> 目录中的测试函数，并让每个测试在独立子进程中运行。它面向用户项目；编译器自身的回归测试仍由 <code>cargo test</code> 负责。</p>
+
+<h2>1. 编写测试</h2>
+<p>测试文件是 <code>tests/</code> 的直接子文件（不递归子目录），并且不得声明 <code>pkg</code>，因为它们按包根模块编译。函数名以 <code>test_</code> 开头、无参数且无返回值，就是一个测试：</p>
+<pre><code>// tests/math.do
+use std.test.expect;
+
+fn test_addition() {
+    expect(2 + 2 == 4);
+}
+
+fn test_division() {
+    expect(10 / 2 == 5);
+}</code></pre>
+<p>同一文件中的其他函数是 helper，不会作为测试运行。测试文件不得定义 <code>main</code>；入口由 <code>dc test</code> 生成。测试与 <code>src/*.do</code> 同属包根模块，因此可以访问根模块私有项与子模块的 <code>pub</code> 项。</p>
+
+<h2>2. 断言</h2>
+<pre><code>use std.test.expect;
+use std.test.fail;
+
+fn test_assertions() {
+    expect(1 + 1 == 2);
+    if 1 + 1 != 2 {
+        fail();
+    }
+}</code></pre>
+<p><code>expect(false)</code> 与 <code>fail()</code> 会向 stderr 写 <code>Dolphin test assertion failed</code> 并以退出码 <code>106</code> 结束。与运行时 trap 一样，断言失败不会执行 <code>defer</code> 清理。</p>
+
+<h2>3. 运行测试</h2>
+<pre><code>dc test .                  # discover and run every test (Debug by default)
+dc test . --release        # build an optimized test binary
+dc test . --filter math    # only tests whose name contains "math"</code></pre>
+<p>每个测试使用独立进程，并有固定的 30 秒超时；超时会 kill 该测试并继续运行其余测试。输出为每个测试一行加一行汇总：</p>
+<pre><code>test test_addition ... ok
+test test_division ... ok
+2 passed; 0 failed; 0 filtered out</code></pre>
+<p>失败分为 <code>FAILED (assertion)</code>、<code>FAILED (trap exit 101)</code> 或 <code>FAILED (timeout after 30s)</code>。选中的测试全部通过时退出码为 <code>0</code>，否则为 <code>1</code>。没有测试时输出 <code>no tests found</code>，<code>--filter</code> 无匹配时输出 <code>no tests matched filter</code>，两者都以 <code>1</code> 退出。测试二进制写入 <code>target/test/&lt;包名&gt;-tests</code>。</p>
+
+<h2>4. 库项目与 path 依赖</h2>
+<p><code>dc test</code> 需要包声明 <code>[lib]</code> 目标。测试构建不产出 <code>.dlib</code>、不要求可发布性，因此 path 依赖可以正常解析；这是库开发推荐的循环。仓库中的 <code>examples/m19</code> 用它测试两个包。</p>
+`
+    },
+
     {
       id: "tutorial/tour",
       title: "综合实战：从入门到精通",
@@ -1054,8 +1108,8 @@ echo $?</code></pre>
 <h2>6. 继续深入</h2>
 <ul>
   <li>阅读<a href="#/std/overview">标准库参考</a>，掌握 <code>Vec</code>、<code>String</code>、<code>Option</code>、<code>Result</code> 的完整 API。</li>
-  <li>阅读<a href="#/std/mem">std.mem</a>，理解内存布局与视图构造。</li>
-  <li>为统计模块添加单元测试风格的校验函数，用返回值表示成功或失败。</li>
+  <li>阅读<a href="#/std/mem">std.mem</a> 理解内存布局与视图构造，阅读<a href="#/std/io">进程、流与文件</a>了解 M19 的 I/O 模块。</li>
+  <li>用<a href="#/tutorial/testing">dc test</a> 与 <code>std.test</code> 为统计模块补上测试。</li>
   <li>尝试把统计逻辑抽成通用库，通过 <code>dolphin.toml</code> 的 <code>[lib]</code> 与 path 依赖复用。</li>
 </ul>
 

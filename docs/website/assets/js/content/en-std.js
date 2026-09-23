@@ -18,7 +18,12 @@ window.DolphinDocsContent["en-US"].groups.push({
     <tr><td><code>std</code></td><td>Automatic prelude</td><td><code>Option&lt;T&gt;</code>, <code>Result&lt;T, E&gt;</code>, <code>Iterator</code></td></tr>
     <tr><td><code>std.mem</code></td><td><code>use std.mem;</code></td><td>Allocation, free, copy, layout queries, views and pointer casts (built-in)</td></tr>
     <tr><td><code>std.collections</code></td><td><code>use std.collections.Vec;</code></td><td><code>Vec&lt;T&gt;</code>, <code>SliceIter&lt;T&gt;</code>, <code>Range</code></td></tr>
-    <tr><td><code>std.text</code></td><td><code>use std.text;</code></td><td><code>String</code>, <code>concat</code>, <code>trim</code>, <code>substring</code>, <code>from_utf8</code>, <code>starts_with</code> and more</td></tr>
+    <tr><td><code>std.text</code></td><td><code>use std.text;</code></td><td><code>String</code>, <code>lines</code>, <code>Builder</code>, <code>parse_i64</code>/<code>parse_u64</code>, <code>concat</code>, <code>trim</code>, <code>substring</code>, <code>from_utf8</code> and more</td></tr>
+    <tr><td><code>std.process</code></td><td><code>use std.process.arg;</code></td><td>Process arguments and environment</td></tr>
+    <tr><td><code>std.error</code></td><td><code>use std.error.Error;</code></td><td><code>Error</code>, <code>ErrorKind</code></td></tr>
+    <tr><td><code>std.io</code></td><td><code>use std.io.Stream;</code></td><td><code>Stream</code>, standard streams, byte reads/writes, <code>eprint</code></td></tr>
+    <tr><td><code>std.fs</code></td><td><code>use std.fs.open;</code></td><td><code>open</code>, <code>OpenMode</code></td></tr>
+    <tr><td><code>std.test</code></td><td><code>use std.test.expect;</code></td><td><code>expect</code>, <code>fail</code> for <code>dc test</code></td></tr>
     <tr><td><code>std.ffi</code></td><td><code>use std.ffi.CString;</code></td><td><code>CString</code>, <code>CStringError</code></td></tr>
   </tbody>
 </table>
@@ -74,10 +79,11 @@ fn main() {
 <ul>
   <li><code>std.do</code>: <code>Option</code>, <code>Result</code>, <code>Iterator</code>.</li>
   <li><code>collections.do</code>: <code>Vec</code>, <code>SliceIter</code>, <code>Range</code>.</li>
-  <li><code>text.do</code>: <code>String</code> and text utilities.</li>
+  <li><code>text.do</code>: <code>String</code>, <code>lines</code>, <code>Builder</code> and parsers.</li>
+  <li><code>process.do</code>, <code>error.do</code>, <code>io.do</code>, <code>fs.do</code>, <code>test.do</code>: arguments/environment, errors, streams, files and test assertions.</li>
   <li><code>ffi.do</code>: <code>CString</code>.</li>
 </ul>
-<p>These files are parsed together with user sources on every build under the reserved identity <code>PackageId::STD</code>, so the implementation is yours to read.</p>
+<p>These files are parsed together with user sources on every build under the reserved identity <code>PackageId::STD</code>.</p>
 
 <h2>6. Related chapters</h2>
 <ul>
@@ -85,7 +91,9 @@ fn main() {
   <li><a href="#/std/mem">std.mem memory API</a></li>
   <li><a href="#/std/collections">std.collections containers</a></li>
   <li><a href="#/std/text">std.text text processing</a></li>
+  <li><a href="#/std/io">Process, streams and files</a></li>
   <li><a href="#/std/ffi">std.ffi C strings</a></li>
+  <li><a href="#/tutorial/testing">Testing your code</a></li>
 </ul>
 `
     },
@@ -209,7 +217,7 @@ fn main() {
       title: "std.mem memory API",
       body: `
 <h1>std.mem memory API</h1>
-<p><code>std.mem</code> is a compiler built-in with no on-disk library. It provides explicit allocation, free, copy, layout queries and view/pointer casts. Every API requires an explicit type argument, for example <code>mem.alloc&lt;i32&gt;(n)</code>.</p>
+<p><code>std.mem</code> is a compiler built-in with no on-disk library. It provides explicit allocation, free, copy, layout queries and view/pointer casts. Generic APIs take an explicit type argument, for example <code>mem.alloc&lt;i32&gt;(n)</code>.</p>
 
 <h2>1. Allocation and free</h2>
 <table>
@@ -292,12 +300,13 @@ println("middle len = {}", middle.len);</code></pre>
     <tr><td><code>102</code></td><td>Allocation failure / allocation size overflow</td></tr>
     <tr><td><code>103</code></td><td>Invalid free (checked in Debug; not guaranteed in Release)</td></tr>
     <tr><td><code>104</code></td><td>UTF-8 validation failure</td></tr>
+    <tr><td><code>106</code></td><td>Test assertion failure from <code>std.test.expect(false)</code> or <code>fail()</code></td></tr>
   </tbody>
 </table>
 <p>Debug builds link an instrumented runtime with a live-allocation registry and report leaks on stderr at a normal exit while preserving the exit code.</p>
 
 <h2>7. Relationship to source modules</h2>
-<p><code>std.mem</code> provides only the foundation. Owned containers such as <code>Vec&lt;T&gt;</code>, <code>String</code> and <code>CString</code> are implemented in Dolphin source on top of it and call <code>mem.alloc</code> / <code>mem.free</code> explicitly. Reading their sources is a good way to learn how to build safe abstractions.</p>
+<p><code>std.mem</code> provides only the foundation. Owned containers such as <code>Vec&lt;T&gt;</code>, <code>String</code> and <code>CString</code> are implemented in Dolphin source on top of it and call <code>mem.alloc</code> / <code>mem.free</code> explicitly.</p>
 `
     },
 
@@ -433,7 +442,7 @@ fn main() {
       title: "std.text text processing",
       body: `
 <h1>std.text text processing</h1>
-<p><code>std.text</code> provides the owned UTF-8 string <code>String</code> and a set of zero-allocation text utilities. The built-in <code>string</code> is a read-only view; <code>String</code> is a releasable owning buffer.</p>
+<p><code>std.text</code> provides the owned UTF-8 string <code>String</code>, zero-allocation view utilities, the growing <code>Builder</code> and integer parsers. The built-in <code>string</code> is a read-only view; <code>String</code> and <code>Builder</code> are releasable owning buffers.</p>
 <pre><code>use std.text;</code></pre>
 
 <h2>1. Error type</h2>
@@ -441,6 +450,12 @@ fn main() {
     InvalidUtf8,
     InvalidBoundary,
     OutOfBounds,
+}
+
+pub enum NumberError {
+    Empty,
+    InvalidDigit,
+    Overflow,
 }</code></pre>
 
 <h2>2. String</h2>
@@ -506,13 +521,189 @@ fn main() {
   <p><strong>Bytes vs. characters:</strong> both <code>length</code> and range arguments are in UTF-8 bytes. <code>substring</code> checks that boundaries fall on code-point starts so it can never produce invalid UTF-8.</p>
 </div>
 
-<h2>4. Interop with byte views</h2>
+<h2>4. Lines, builders and numbers</h2>
+<table>
+  <thead><tr><th>Signature</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>lines(bytes: []const u8): Lines</code></td><td>Iterates byte-slice lines split on <code>\n</code>; one <code>\r</code> before <code>\n</code> is removed, a trailing segment without <code>\n</code> counts when non-empty. Views, no allocation.</td></tr>
+    <tr><td><code>Builder</code></td><td>Growing byte buffer: <code>init</code>/<code>with_capacity</code>/<code>append</code>/<code>append_bytes</code>/<code>len</code>/<code>is_empty</code>/<code>view</code>/<code>consume</code>/<code>clear</code>/<code>deinit</code>. <code>view()</code> is invalidated by the next mutation.</td></tr>
+    <tr><td><code>parse_i64(s: string): Result&lt;i64, NumberError&gt;</code></td><td>Optional <code>-</code>/<code>+</code> plus ASCII digits; overflow returns <code>Overflow</code> instead of trapping</td></tr>
+    <tr><td><code>parse_u64(s: string): Result&lt;u64, NumberError&gt;</code></td><td>Optional <code>+</code> plus ASCII digits; <code>-</code> is an invalid digit</td></tr>
+  </tbody>
+</table>
+<pre><code>use std.text;
+use std.text.Builder;
+use std.text.lines;
+
+fn scan(input: string): usize {
+    var total = 0_usize;
+    for line in lines(input.bytes()) {
+        total += line.len;
+    }
+
+    var buffer = Builder::init();
+    defer buffer.deinit();
+    buffer.append("scan:");
+    buffer.append_bytes(input.bytes());
+    return total + buffer.len();
+}</code></pre>
+<pre><code>val parsed = text.parse_i64("-42");
+val label = match parsed {
+    Result.Ok(value) =&gt; "ok",
+    Result.Err(error) =&gt; "invalid",
+};</code></pre>
+<div class="callout">
+  <p><strong>Views and owners:</strong> <code>lines</code> yields borrowed views over the source bytes. A <code>Builder.view()</code> is also borrowed and stops being valid after the next <code>append</code>, <code>consume</code>, <code>clear</code> or <code>deinit</code>; copy or validate with <code>from_utf8</code> while it is live.</p>
+</div>
+
+<h2>5. Interop with byte views</h2>
 <pre><code>val text_bytes = "ok".bytes();              // []const u8
 val parsed = text.from_utf8(text_bytes);
 val is_ok = match parsed {
     Result.Ok(value) =&gt; true,
     Result.Err(error) =&gt; false,
 };</code></pre>
+`
+    },
+
+
+    {
+      id: "std/io",
+      title: "Process, streams and files",
+      body: `
+<h1>Process, streams and files</h1>
+<p>M19 adds the process, byte-stream, file and error modules. They report failures through <code>Result</code> values instead of trapping, and they do not close anything implicitly: an owned file handle is closed explicitly or through <code>defer</code>.</p>
+
+<h2>1. Arguments and environment</h2>
+<table>
+  <thead><tr><th>API</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>std.process.arg_count(): usize</code></td><td>Number of process arguments, including the program name at index 0</td></tr>
+    <tr><td><code>std.process.arg(index: usize): Result&lt;string, ArgError&gt;</code></td><td>Borrowed argument view; <code>OutOfRange</code> or <code>NotUtf8</code> on failure</td></tr>
+    <tr><td><code>std.process.program_name(): Result&lt;string, ArgError&gt;</code></td><td>Equivalent to <code>arg(0)</code></td></tr>
+    <tr><td><code>std.process.env(name: string): EnvLookup</code></td><td><code>Found(value)</code>, <code>Missing</code> or <code>NotUtf8</code></td></tr>
+  </tbody>
+</table>
+<pre><code>use std.process.arg;
+use std.process.arg_count;
+use std.process.env;
+use std.process.EnvLookup;
+
+fn show_arguments() {
+    var index = 1_usize;
+    while index &lt; arg_count() {
+        val item = arg(index);
+        if item.is_ok() {
+            val text = match item {
+                Result.Ok(value) =&gt; value,
+                Result.Err(error) =&gt; "",
+            };
+            println("arg {} = {}", index, text);
+        }
+        index += 1_usize;
+    }
+
+    val home = env("HOME");
+    val label = match home {
+        EnvLookup.Found(value) =&gt; value,
+        EnvLookup.Missing =&gt; "missing",
+        EnvLookup.NotUtf8 =&gt; "not utf8",
+    };
+    println("HOME = {}", label);
+}</code></pre>
+<p>All returned strings are borrowed views valid until the process exits; do not free or write them. <code>main</code> still takes no parameters, so pass application arguments with <code>dc run . -- &lt;args&gt;</code> or run the executable directly.</p>
+
+<h2>2. Errors</h2>
+<pre><code>pub enum ErrorKind {
+    Other,
+    NotFound,
+    PermissionDenied,
+    IsADirectory,
+    InvalidArgument,
+    NotOwned,
+    Closed,
+}
+
+pub struct Error { kind: ErrorKind, code: i32 }</code></pre>
+<p><code>Error::new</code>, <code>kind()</code>, <code>code()</code> and <code>from_last_error()</code> are available, and <code>code</code> keeps the native errno/GetLastError value. Errors are plain values and need no cleanup.</p>
+
+<h2>3. Streams</h2>
+<table>
+  <thead><tr><th>API</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>stdin()</code>, <code>stdout()</code>, <code>stderr()</code></td><td>Borrowed standard-stream handles; <code>close</code> returns <code>Err(NotOwned)</code></td></tr>
+    <tr><td><code>read(buffer: []u8): Result&lt;usize, Error&gt;</code></td><td>At most <code>buffer.len</code> bytes; <code>Ok(0)</code> means EOF, short reads are normal</td></tr>
+    <tr><td><code>write(bytes): Result&lt;usize, Error&gt;</code></td><td>Returns the number of bytes written</td></tr>
+    <tr><td><code>write_all(bytes): Result&lt;bool, Error&gt;</code></td><td>Loops until everything is written; <code>Err</code> may have written a prefix</td></tr>
+    <tr><td><code>flush</code>, <code>is_open</code>, <code>close</code>, <code>close_abort</code></td><td><code>close</code> is idempotent; <code>close_abort</code> is the <code>defer</code> entry point</td></tr>
+    <tr><td><code>release()</code>, <code>from_raw(id)</code></td><td>Hand an owned handle to another <code>Stream</code> without closing it</td></tr>
+    <tr><td><code>eprint(bytes)</code></td><td>Writes bytes to stderr</td></tr>
+  </tbody>
+</table>
+<pre><code>use std.io.stdin;
+use std.io.stdout;
+use std.mem;
+use std.test.expect;
+
+fn copy_one_chunk() {
+    val input = stdin();
+    val output = stdout();
+    val buffer = mem.alloc&lt;u8&gt;(4096_usize);
+    defer mem.free&lt;u8&gt;(buffer);
+
+    val read = input.read(buffer);
+    if read.is_err() {
+        return;
+    }
+    val count = match read {
+        Result.Ok(value) =&gt; value,
+        Result.Err(error) =&gt; 0_usize,
+    };
+    if count &gt; 0_usize {
+        val chunk = buffer.slice(0_usize, count);
+        val written = output.write_all(chunk);
+        expect(written.is_ok());
+    }
+}</code></pre>
+<p>Standard handles are borrowed, so they are never closed by the application. The runtime retries <code>EINTR</code> internally; <code>Interrupted</code> is not exposed as an error kind.</p>
+
+<h2>4. Files</h2>
+<p><code>std.fs.open(path, mode)</code> takes <code>OpenMode.Read</code>, <code>OpenMode.Write</code> (create or truncate) or <code>OpenMode.Append</code> (create or append). It returns an owned <code>Stream</code>; paths with an interior NUL are rejected before the OS call, and a missing file yields <code>NotFound</code>.</p>
+<pre><code>use std.fs.open;
+use std.fs.OpenMode;
+use std.io.stdin;
+use std.mem;
+
+fn first_byte(path: string): i32 {
+    val opened = open(path, OpenMode.Read);
+    if opened.is_err() {
+        return -1_i32;
+    }
+    var stream = match opened {
+        Result.Ok(value) =&gt; value,
+        Result.Err(error) =&gt; stdin(),
+    };
+    defer stream.close_abort();
+
+    val buffer = mem.alloc&lt;u8&gt;(1_usize);
+    defer mem.free&lt;u8&gt;(buffer);
+    val result = stream.read(buffer);
+    if result.is_err() {
+        return -2_i32;
+    }
+    val count = match result {
+        Result.Ok(value) =&gt; value,
+        Result.Err(error) =&gt; 0_usize,
+    };
+    if count == 0_usize {
+        return 0_i32;
+    }
+    return buffer[0] as i32;
+}</code></pre>
+<p>Owned handles are a single-owner resource: a shallow copy shares the same runtime state, so only one copy should be closed. Before rebinding a variable that holds an owned handle, close it or call <code>release()</code>; Debug builds report handles that are still open at exit.</p>
+
+<h2>5. Testing</h2>
+<p><code>std.test.expect(condition)</code> and <code>std.test.fail()</code> back <code>dc test</code>; see <a href="#/tutorial/testing">testing your code</a> for the full workflow.</p>
 `
     },
 
@@ -625,14 +816,14 @@ println("first = {}", samples[0]);</code></pre>
 println("bytes = {}", length(greeting));
 val again = string.from_bytes(greeting.bytes());
 println("{}", again == greeting);</code></pre>
-<p>Strings compare by byte content with <code>==</code> / <code>!=</code>. There is currently no string concatenation or character indexing.</p>
+<p>Strings compare by byte content with <code>==</code> / <code>!=</code>. The built-in <code>string</code> supports neither <code>+</code> nor indexing; use <code>std.text.concat</code> or <code>std.text.Builder</code> to build new strings.</p>
 
 <h2>4. Operators and conversions</h2>
 <table>
   <thead><tr><th>Category</th><th>Operators</th></tr></thead>
   <tbody>
     <tr><td>Arithmetic</td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> <code>%</code> (<code>%</code> integers only)</td></tr>
-    <tr><td>Comparison</td><td><code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code> (currently <code>i32</code> only)</td></tr>
+    <tr><td>Comparison</td><td><code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code> (all integer types, floats and <code>char</code>)</td></tr>
     <tr><td>Equality</td><td><code>==</code> <code>!=</code> (<code>i32</code>, <code>bool</code>, <code>string</code> and more)</td></tr>
     <tr><td>Logic</td><td><code>!</code> <code>&amp;&amp;</code> <code>||</code> (short-circuiting)</td></tr>
     <tr><td>Conversion</td><td><code>as</code> (narrowing keeps low bits, widening sign/zero-extends, float-to-int saturates)</td></tr>
@@ -649,6 +840,7 @@ println("{}", again == greeting);</code></pre>
     <tr><td><code>102</code></td><td>Allocation failure or allocation size overflow</td></tr>
     <tr><td><code>103</code></td><td>Invalid free (checked in Debug)</td></tr>
     <tr><td><code>104</code></td><td>UTF-8 validation failure</td></tr>
+    <tr><td><code>106</code></td><td>Test assertion failure from <code>std.test.expect(false)</code> or <code>fail()</code></td></tr>
   </tbody>
 </table>
 <p>Compile diagnostics carry stable categories <code>E0000</code> / <code>E0001</code>, file paths, Unicode character columns and multi-line source markers. The CLI supports <code>--color auto|always|never</code>. The compiler currently stops at the first error.</p>

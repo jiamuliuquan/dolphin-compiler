@@ -69,8 +69,8 @@
           <span class="eyebrow" data-i18n="hero.eyebrow">静态类型 · 编译为本机代码</span>
           <h1 data-i18n="hero.title">一门可以亲手写编译器的语言</h1>
           <p class="lead" data-i18n="hero.lead">
-            Dolphin 是一门面向学习与实践的静态类型语言，语法参考 Rust、Kotlin、Java 和 C，由 Rust
-            编写的编译器通过 Cranelift 直接生成可在系统上运行的本机可执行文件。
+            Dolphin 是一门面向学习与实践的静态类型语言，语法参考 Rust、Kotlin、Java 和 C。编译器用 Rust
+            写成，默认通过 Cranelift 生成本机可执行文件，也可选用 LLVM 后端。
           </p>
           <div class="hero-cta">
             <a class="btn btn-primary" href="install.html" data-i18n="hero.cta.install">开始安装</a>
@@ -104,7 +104,7 @@
           <span class="eyebrow" data-i18n="why.eyebrow">为什么选择 Dolphin</span>
           <h2 data-i18n="why.title">为理解编译器而设计</h2>
           <p data-i18n="why.lead">
-            从词法分析到本机代码生成的完整链路都保持清晰可读，让你在学习语言本身的同时，也能看懂编译器如何工作。
+            从词法分析到本机代码生成的每个阶段都拆成独立 crate，源码标准库也用 Dolphin 写成，读语言和读实现可以同步进行。
           </p>
         </div>
         <div class="cards">
@@ -126,7 +126,7 @@
             <div class="card-icon">⬡</div>
             <h3 data-i18n="why.card3.title">自包含工具链</h3>
             <p data-i18n="why.card3.body">
-              发行包内置运行时与 rust-lld 链接器，解压即用，构建 Dolphin 程序不再需要 C/C++ 工具链。
+              发行包内置预编译运行时与 rust-lld 链接器，解压即可构建；链接仍使用系统自带的 CRT/SDK。
             </p>
           </article>
           <article class="card">
@@ -148,7 +148,7 @@
             <div class="card-icon">✦</div>
             <h3 data-i18n="why.card6.title">面向学习</h3>
             <p data-i18n="why.card6.body">
-              每项特性都有可运行示例与明确的实现边界文档，方便按里程碑循序渐进地阅读和扩展。
+              仓库按里程碑提供可运行示例，并如实记录尚未实现的能力，方便按顺序阅读和扩展。
             </p>
           </article>
         </div>
@@ -161,7 +161,7 @@
           <span class="eyebrow" data-i18n="preview.eyebrow">语言预览</span>
           <h2 data-i18n="preview.title">简洁、明确的语法</h2>
           <p data-i18n="preview.lead">
-            熟悉的函数、变量、控制流与模式匹配语法，让你几分钟内就能写出第一个可运行程序。
+            函数、变量、控制流与模式匹配的写法接近 Rust 与 Kotlin，下面是一个完整的面积计算程序。
           </p>
           <ul class="feature-list">
             <li data-i18n="preview.list.1">val 与 var 区分不可变与可变绑定，支持局部类型推断。</li>
@@ -207,7 +207,7 @@ fn main() {
           <div class="panel">
             <h3 data-i18n="quickstart.step1.title">1. 获取编译器</h3>
             <p data-i18n="quickstart.step1.body">从发行页下载对应平台的归档，解压到任意目录。</p>
-            <pre><code>tar xzf dolphin-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+            <pre><code>tar xzf dolphin-0.3.0-x86_64-unknown-linux-gnu.tar.gz \
   -C ~/.local/dolphin</code></pre>
           </div>
           <div class="panel">
@@ -218,10 +218,10 @@ dc --version && dc env</code></pre>
           </div>
           <div class="panel">
             <h3 data-i18n="quickstart.step3.title">3. 构建并运行</h3>
-            <p data-i18n="quickstart.step3.body">在项目目录执行 dc build，产物会写入项目的 target/ 目录。</p>
-            <pre><code>dc check examples/m15
-dc build examples/m15 --release
-./examples/m15/target/m15</code></pre>
+            <p data-i18n="quickstart.step3.body">dc test 运行库测试，dc build 构建应用；产物写入项目的 target/ 目录。</p>
+            <pre><code>dc test examples/m19/textstats
+dc build examples/m19/dtext --bin dtext
+printf 'alpha\nbeta\n' | ./examples/m19/dtext/target/dtext --filter beta</code></pre>
           </div>
           <div class="panel">
             <h3 data-i18n="install.package.title">发行包内容</h3>
@@ -238,7 +238,7 @@ dc build examples/m15 --release
       <div class="container">
         <h2 data-i18n="cta.title">现在就开始使用 Dolphin</h2>
         <p data-i18n="cta.lead">
-          无论你是想学习编译器实现，还是想找一门语法清晰的系统级语言，Dolphin 都提供了完整而透明的工具链。
+          语言、标准库与工具链的源码都在仓库里，可以边用边读。
         </p>
         <div class="hero-cta">
           <a class="btn btn-ghost" href="install.html" data-i18n="cta.install">安装 Dolphin</a>
@@ -281,7 +281,7 @@ dc build examples/m15 --release
             <li><a href="docs/index.html#/tutorial/intro" data-i18n="footer.language">语言设计</a></li>
             <li><a href="docs/index.html#/std/mem" data-i18n="nav.stdlib">标准库</a></li>
             <li><a href="docs/index.html#/tutorial/packages" data-i18n="footer.cli">命令行参考</a></li>
-            <li><a href="docs/index.html#/tutorial/memory" data-i18n="footer.examples">可运行示例</a></li>
+            <li><a href="https://github.com/foxlab/dolphin-compiler/tree/main/examples" data-i18n="footer.examples">可运行示例</a></li>
           </ul>
         </div>
         <div>
@@ -289,7 +289,7 @@ dc build examples/m15 --release
           <ul>
             <li><a href="install.html#offline" data-i18n="install.offline.title">离线使用</a></li>
             <li><a href="install.html#upgrade" data-i18n="install.upgrade.title">升级与卸载</a></li>
-            <li><a href="https://github.com/" rel="noopener" data-i18n="footer.issues">问题反馈</a></li>
+            <li><a href="https://github.com/foxlab/dolphin-compiler/issues" rel="noopener" data-i18n="footer.issues">问题反馈</a></li>
             <li><a href="https://www.gnu.org/licenses/gpl-3.0.html" rel="noopener" data-i18n="footer.license">GPL-3.0 许可证</a></li>
           </ul>
         </div>

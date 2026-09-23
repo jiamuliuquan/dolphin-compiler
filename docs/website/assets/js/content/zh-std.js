@@ -18,7 +18,12 @@ window.DolphinDocsContent["zh-CN"].groups.push({
     <tr><td><code>std</code></td><td>自动 prelude</td><td><code>Option&lt;T&gt;</code>、<code>Result&lt;T, E&gt;</code>、<code>Iterator</code></td></tr>
     <tr><td><code>std.mem</code></td><td><code>use std.mem;</code></td><td>分配、释放、复制、布局查询、视图与指针转换（内建）</td></tr>
     <tr><td><code>std.collections</code></td><td><code>use std.collections.Vec;</code></td><td><code>Vec&lt;T&gt;</code>、<code>SliceIter&lt;T&gt;</code>、<code>Range</code></td></tr>
-    <tr><td><code>std.text</code></td><td><code>use std.text;</code></td><td><code>String</code>、<code>concat</code>、<code>trim</code>、<code>substring</code>、<code>from_utf8</code>、<code>starts_with</code> 等</td></tr>
+    <tr><td><code>std.text</code></td><td><code>use std.text;</code></td><td><code>String</code>、<code>lines</code>、<code>Builder</code>、<code>parse_i64</code>/<code>parse_u64</code>、<code>concat</code>、<code>trim</code>、<code>substring</code>、<code>from_utf8</code> 等</td></tr>
+    <tr><td><code>std.process</code></td><td><code>use std.process.arg;</code></td><td>进程参数与环境</td></tr>
+    <tr><td><code>std.error</code></td><td><code>use std.error.Error;</code></td><td><code>Error</code>、<code>ErrorKind</code></td></tr>
+    <tr><td><code>std.io</code></td><td><code>use std.io.Stream;</code></td><td><code>Stream</code>、标准流、字节读写、<code>eprint</code></td></tr>
+    <tr><td><code>std.fs</code></td><td><code>use std.fs.open;</code></td><td><code>open</code>、<code>OpenMode</code></td></tr>
+    <tr><td><code>std.test</code></td><td><code>use std.test.expect;</code></td><td><code>expect</code>、<code>fail</code>（供 <code>dc test</code>）</td></tr>
     <tr><td><code>std.ffi</code></td><td><code>use std.ffi.CString;</code></td><td><code>CString</code>、<code>CStringError</code></td></tr>
   </tbody>
 </table>
@@ -75,10 +80,11 @@ fn main() {
 <ul>
   <li><code>std.do</code>：<code>Option</code>、<code>Result</code>、<code>Iterator</code>。</li>
   <li><code>collections.do</code>：<code>Vec</code>、<code>SliceIter</code>、<code>Range</code>。</li>
-  <li><code>text.do</code>：<code>String</code> 与文本工具。</li>
+  <li><code>text.do</code>：<code>String</code>、<code>lines</code>、<code>Builder</code> 与解析器。</li>
+  <li><code>process.do</code>、<code>error.do</code>、<code>io.do</code>、<code>fs.do</code>、<code>test.do</code>：参数/环境、错误、流、文件与测试断言。</li>
   <li><code>ffi.do</code>：<code>CString</code>。</li>
 </ul>
-<p>这些文件在每次构建时与用户源码一起解析，携带保留身份 <code>PackageId::STD</code>，因此你可以直接阅读实现细节。</p>
+<p>这些文件在每次构建时与用户源码一起解析，携带保留身份 <code>PackageId::STD</code>。</p>
 
 <h2>6. 相关章节</h2>
 <ul>
@@ -86,7 +92,9 @@ fn main() {
   <li><a href="#/std/mem">std.mem 内存 API</a></li>
   <li><a href="#/std/collections">std.collections 容器</a></li>
   <li><a href="#/std/text">std.text 文本处理</a></li>
+  <li><a href="#/std/io">进程、流与文件</a></li>
   <li><a href="#/std/ffi">std.ffi C 字符串</a></li>
+  <li><a href="#/tutorial/testing">测试代码</a></li>
 </ul>
 `
     },
@@ -212,7 +220,7 @@ fn main() {
       title: "std.mem 内存 API",
       body: `
 <h1>std.mem 内存 API</h1>
-<p><code>std.mem</code> 是编译器内建入口，无需磁盘标准库。它提供显式分配、释放、复制、布局查询与视图/指针转换。所有 API 都要求显式类型实参，例如 <code>mem.alloc&lt;i32&gt;(n)</code>。</p>
+<p><code>std.mem</code> 是编译器内建入口，无需磁盘标准库。它提供显式分配、释放、复制、布局查询与视图/指针转换。泛型 API 需要显式类型实参，例如 <code>mem.alloc&lt;i32&gt;(n)</code>。</p>
 
 <h2>1. 分配与释放</h2>
 <table>
@@ -295,6 +303,7 @@ println("middle len = {}", middle.len);</code></pre>
     <tr><td><code>102</code></td><td>分配失败 / 分配尺寸溢出</td></tr>
     <tr><td><code>103</code></td><td>无效释放（Debug 检测；Release 不保证）</td></tr>
     <tr><td><code>104</code></td><td>UTF-8 校验失败</td></tr>
+    <tr><td><code>106</code></td><td><code>std.test.expect(false)</code> 或 <code>fail()</code> 的测试断言失败</td></tr>
   </tbody>
 </table>
 <p>Debug 构建会链接带存活分配登记表的检测版运行时，正常退出时若存在泄漏会在 stderr 报告，但保留程序退出码。</p>
@@ -436,7 +445,7 @@ fn main() {
       title: "std.text 文本处理",
       body: `
 <h1>std.text 文本处理</h1>
-<p><code>std.text</code> 提供拥有型 UTF-8 字符串 <code>String</code>，以及一组零分配的文本工具。内建的 <code>string</code> 是只读视图，<code>String</code> 则是可释放的拥有型缓冲。</p>
+<p><code>std.text</code> 提供拥有型 UTF-8 字符串 <code>String</code>、零分配视图工具、增长式 <code>Builder</code> 与整数解析。内建的 <code>string</code> 是只读视图，<code>String</code> 与 <code>Builder</code> 是可释放的拥有型缓冲。</p>
 <pre><code>use std.text;</code></pre>
 
 <h2>1. 错误类型</h2>
@@ -444,6 +453,12 @@ fn main() {
     InvalidUtf8,
     InvalidBoundary,
     OutOfBounds,
+}
+
+pub enum NumberError {
+    Empty,
+    InvalidDigit,
+    Overflow,
 }</code></pre>
 
 <h2>2. String</h2>
@@ -509,13 +524,189 @@ fn main() {
   <p><strong>字节与字符：</strong><code>length</code> 与区间参数都以 UTF-8 字节为单位。<code>substring</code> 会检查边界是否落在码点起始处，避免产生无效 UTF-8。</p>
 </div>
 
-<h2>4. 与字节视图互操作</h2>
+<h2>4. 行、Builder 与数值</h2>
+<table>
+  <thead><tr><th>签名</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>lines(bytes: []const u8): Lines</code></td><td>按 <code>\n</code> 切分字节行；紧邻 <code>\n</code> 前的一个 <code>\r</code> 会被去掉，无 <code>\n</code> 的非空尾段算一行。产出视图，零分配。</td></tr>
+    <tr><td><code>Builder</code></td><td>增长式字节缓冲：<code>init</code>/<code>with_capacity</code>/<code>append</code>/<code>append_bytes</code>/<code>len</code>/<code>is_empty</code>/<code>view</code>/<code>consume</code>/<code>clear</code>/<code>deinit</code>。<code>view()</code> 在下一次修改后失效。</td></tr>
+    <tr><td><code>parse_i64(s: string): Result&lt;i64, NumberError&gt;</code></td><td>可选 <code>-</code>/<code>+</code> 加 ASCII 数字；溢出返回 <code>Overflow</code>，不触发 trap</td></tr>
+    <tr><td><code>parse_u64(s: string): Result&lt;u64, NumberError&gt;</code></td><td>可选 <code>+</code> 加 ASCII 数字；<code>-</code> 视为非法字符</td></tr>
+  </tbody>
+</table>
+<pre><code>use std.text;
+use std.text.Builder;
+use std.text.lines;
+
+fn scan(input: string): usize {
+    var total = 0_usize;
+    for line in lines(input.bytes()) {
+        total += line.len;
+    }
+
+    var buffer = Builder::init();
+    defer buffer.deinit();
+    buffer.append("scan:");
+    buffer.append_bytes(input.bytes());
+    return total + buffer.len();
+}</code></pre>
+<pre><code>val parsed = text.parse_i64("-42");
+val label = match parsed {
+    Result.Ok(value) =&gt; "ok",
+    Result.Err(error) =&gt; "invalid",
+};</code></pre>
+<div class="callout">
+  <p><strong>视图与拥有者：</strong><code>lines</code> 产出源字节上的借用视图；<code>Builder.view()</code> 同样是借用视图，在下一次 <code>append</code>、<code>consume</code>、<code>clear</code> 或 <code>deinit</code> 后失效，使用期内应复制或用 <code>from_utf8</code> 校验。</p>
+</div>
+
+<h2>5. 与字节视图互操作</h2>
 <pre><code>val text_bytes = "ok".bytes();              // []const u8
 val parsed = text.from_utf8(text_bytes);
 val is_ok = match parsed {
     Result.Ok(value) =&gt; true,
     Result.Err(error) =&gt; false,
 };</code></pre>
+`
+    },
+
+
+    {
+      id: "std/io",
+      title: "进程、流与文件",
+      body: `
+<h1>进程、流与文件</h1>
+<p>M19 新增进程、字节流、文件与错误模块。它们用 <code>Result</code> 报告失败而不是 trap，也不会隐式关闭任何资源：自有文件句柄必须显式关闭或通过 <code>defer</code> 关闭。</p>
+
+<h2>1. 参数与环境</h2>
+<table>
+  <thead><tr><th>API</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>std.process.arg_count(): usize</code></td><td>进程参数个数，包含下标 0 的程序名</td></tr>
+    <tr><td><code>std.process.arg(index: usize): Result&lt;string, ArgError&gt;</code></td><td>借用参数视图；失败返回 <code>OutOfRange</code> 或 <code>NotUtf8</code></td></tr>
+    <tr><td><code>std.process.program_name(): Result&lt;string, ArgError&gt;</code></td><td>等价于 <code>arg(0)</code></td></tr>
+    <tr><td><code>std.process.env(name: string): EnvLookup</code></td><td><code>Found(value)</code>、<code>Missing</code> 或 <code>NotUtf8</code></td></tr>
+  </tbody>
+</table>
+<pre><code>use std.process.arg;
+use std.process.arg_count;
+use std.process.env;
+use std.process.EnvLookup;
+
+fn show_arguments() {
+    var index = 1_usize;
+    while index &lt; arg_count() {
+        val item = arg(index);
+        if item.is_ok() {
+            val text = match item {
+                Result.Ok(value) =&gt; value,
+                Result.Err(error) =&gt; "",
+            };
+            println("arg {} = {}", index, text);
+        }
+        index += 1_usize;
+    }
+
+    val home = env("HOME");
+    val label = match home {
+        EnvLookup.Found(value) =&gt; value,
+        EnvLookup.Missing =&gt; "missing",
+        EnvLookup.NotUtf8 =&gt; "not utf8",
+    };
+    println("HOME = {}", label);
+}</code></pre>
+<p>返回的字符串都是借用视图，有效到进程结束；不要释放或写入。入口 <code>main</code> 仍不接受参数，应用参数用 <code>dc run . -- &lt;参数&gt;</code> 传入，或直接运行可执行文件。</p>
+
+<h2>2. 错误</h2>
+<pre><code>pub enum ErrorKind {
+    Other,
+    NotFound,
+    PermissionDenied,
+    IsADirectory,
+    InvalidArgument,
+    NotOwned,
+    Closed,
+}
+
+pub struct Error { kind: ErrorKind, code: i32 }</code></pre>
+<p>可用 <code>Error::new</code>、<code>kind()</code>、<code>code()</code> 与 <code>from_last_error()</code>；<code>code</code> 保留原生 errno/GetLastError。错误是普通值，不需要释放。</p>
+
+<h2>3. 流</h2>
+<table>
+  <thead><tr><th>API</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>stdin()</code>、<code>stdout()</code>、<code>stderr()</code></td><td>借用标准流句柄；<code>close</code> 返回 <code>Err(NotOwned)</code></td></tr>
+    <tr><td><code>read(buffer: []u8): Result&lt;usize, Error&gt;</code></td><td>至多读 <code>buffer.len</code> 字节；<code>Ok(0)</code> 表示 EOF，短读是正常结果</td></tr>
+    <tr><td><code>write(bytes): Result&lt;usize, Error&gt;</code></td><td>返回实际写入字节数</td></tr>
+    <tr><td><code>write_all(bytes): Result&lt;bool, Error&gt;</code></td><td>循环写完全部字节；返回 <code>Err</code> 时可能已写入前缀</td></tr>
+    <tr><td><code>flush</code>、<code>is_open</code>、<code>close</code>、<code>close_abort</code></td><td><code>close</code> 幂等；<code>close_abort</code> 是 <code>defer</code> 清理入口</td></tr>
+    <tr><td><code>release()</code>、<code>from_raw(id)</code></td><td>把自有句柄转交给另一个 <code>Stream</code>，不触发关闭</td></tr>
+    <tr><td><code>eprint(bytes)</code></td><td>把字节写到 stderr</td></tr>
+  </tbody>
+</table>
+<pre><code>use std.io.stdin;
+use std.io.stdout;
+use std.mem;
+use std.test.expect;
+
+fn copy_one_chunk() {
+    val input = stdin();
+    val output = stdout();
+    val buffer = mem.alloc&lt;u8&gt;(4096_usize);
+    defer mem.free&lt;u8&gt;(buffer);
+
+    val read = input.read(buffer);
+    if read.is_err() {
+        return;
+    }
+    val count = match read {
+        Result.Ok(value) =&gt; value,
+        Result.Err(error) =&gt; 0_usize,
+    };
+    if count &gt; 0_usize {
+        val chunk = buffer.slice(0_usize, count);
+        val written = output.write_all(chunk);
+        expect(written.is_ok());
+    }
+}</code></pre>
+<p>标准句柄是借用资源，应用不应关闭它们。运行时会内部重试 <code>EINTR</code>，不把 <code>Interrupted</code> 暴露为错误类别。</p>
+
+<h2>4. 文件</h2>
+<p><code>std.fs.open(path, mode)</code> 支持 <code>OpenMode.Read</code>、<code>OpenMode.Write</code>（创建或截断）与 <code>OpenMode.Append</code>（创建或追加），返回自有 <code>Stream</code>。含内部 NUL 的路径在调用系统接口前被拒绝，文件不存在返回 <code>NotFound</code>。</p>
+<pre><code>use std.fs.open;
+use std.fs.OpenMode;
+use std.io.stdin;
+use std.mem;
+
+fn first_byte(path: string): i32 {
+    val opened = open(path, OpenMode.Read);
+    if opened.is_err() {
+        return -1_i32;
+    }
+    var stream = match opened {
+        Result.Ok(value) =&gt; value,
+        Result.Err(error) =&gt; stdin(),
+    };
+    defer stream.close_abort();
+
+    val buffer = mem.alloc&lt;u8&gt;(1_usize);
+    defer mem.free&lt;u8&gt;(buffer);
+    val result = stream.read(buffer);
+    if result.is_err() {
+        return -2_i32;
+    }
+    val count = match result {
+        Result.Ok(value) =&gt; value,
+        Result.Err(error) =&gt; 0_usize,
+    };
+    if count == 0_usize {
+        return 0_i32;
+    }
+    return buffer[0] as i32;
+}</code></pre>
+<p>自有句柄是单所有者资源：浅复制共享同一运行时状态，只应关闭其中一份。重绑定持有自有句柄的变量前，先 <code>close</code> 或 <code>release</code>；Debug 构建会在退出时报告仍未关闭的句柄。</p>
+
+<h2>5. 测试</h2>
+<p><code>std.test.expect(condition)</code> 与 <code>std.test.fail()</code> 支撑 <code>dc test</code>；完整流程见<a href="#/tutorial/testing">测试代码</a>。</p>
 `
     },
 
@@ -628,14 +819,14 @@ println("first = {}", samples[0]);</code></pre>
 println("bytes = {}", length(greeting));
 val again = string.from_bytes(greeting.bytes());
 println("{}", again == greeting);</code></pre>
-<p>字符串使用 <code>==</code> / <code>!=</code> 按字节内容比较；当前没有字符串拼接与按字符索引。</p>
+<p>字符串使用 <code>==</code> / <code>!=</code> 按字节内容比较；内建 <code>string</code> 不支持 <code>+</code> 与下标，拼接新字符串请用 <code>std.text.concat</code> 或 <code>std.text.Builder</code>。</p>
 
 <h2>4. 运算符与转换</h2>
 <table>
   <thead><tr><th>类别</th><th>运算符</th></tr></thead>
   <tbody>
     <tr><td>算术</td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> <code>%</code>（<code>%</code> 仅整数）</td></tr>
-    <tr><td>比较</td><td><code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>（当前仅 <code>i32</code>）</td></tr>
+    <tr><td>比较</td><td><code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>（全部整数、浮点与 <code>char</code>）</td></tr>
     <tr><td>相等</td><td><code>==</code> <code>!=</code>（<code>i32</code>、<code>bool</code>、<code>string</code> 等）</td></tr>
     <tr><td>逻辑</td><td><code>!</code> <code>&amp;&amp;</code> <code>||</code>（短路求值）</td></tr>
     <tr><td>转换</td><td><code>as</code>（窄化保留低位，扩展按符号/零扩展，浮点转整数饱和）</td></tr>
@@ -652,6 +843,7 @@ println("{}", again == greeting);</code></pre>
     <tr><td><code>102</code></td><td>分配失败或分配尺寸溢出</td></tr>
     <tr><td><code>103</code></td><td>无效释放（Debug 检测）</td></tr>
     <tr><td><code>104</code></td><td>UTF-8 校验失败</td></tr>
+    <tr><td><code>106</code></td><td><code>std.test.expect(false)</code> 或 <code>fail()</code> 的测试断言失败</td></tr>
   </tbody>
 </table>
 <p>编译诊断包含稳定类别 <code>E0000</code> / <code>E0001</code>、文件路径、Unicode 字符列号与多行源码标记。CLI 支持 <code>--color auto|always|never</code>。当前编译器通常在第一个错误处停止。</p>

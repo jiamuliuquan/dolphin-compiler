@@ -2,9 +2,9 @@
 
 Dolphin 是一个用于学习和实践编译器实现的静态类型编程语言，语法参考 Rust、Kotlin、Java 和 C。编译器使用 Rust 编写，通过默认 Cranelift 或可选 LLVM 后端生成目标代码，并链接为当前操作系统可直接运行的本机可执行文件。
 
-项目已经完成 M0-M17，支持多文件项目、完整基础标量、函数、控制流、字符串、定长数组、模块系统、结构体/枚举与 `match`、手动内存管理与 C 互操作、用户泛型与方法/trait、源码标准库容器、基于 `.dlib` 的库包发布/消费、可选 LLVM 和最小开发工具。
+项目已完成 M0-M19：语言核心覆盖标量、函数、控制流、字符串、定长数组、模块、结构体/枚举与 `match`、手动内存与 C 互操作、泛型与方法/trait；工具链覆盖源码标准库、`.dlib` 库包、可选 LLVM 与格式化器/LSP。M19 补齐了真实 CLI 所需的参数/环境、标准流与文件 I/O、文本处理、用户测试命令 `dc test`，并附带 `examples/m19` 的 `dtext` 文本统计工具。
 
-下一阶段按“正确性收敛、真实 CLI、项目级工具、规模与交付”推进。逐批执行见 [M18-M21 交接指南](docs/plan-m18-plus.md)和 [M18 详细合同](docs/plan-m18-correctness.md)。这些任务尚未实施；现有语义缺口见[当前已知问题](docs/implemented-features.md#11-当前已知问题与验证边界)。
+下一步是 M20（项目级诊断与开发工具），逐批规划见 [M18-M21 交接指南](docs/plan-m18-plus.md)。当前能力、明确限制与已知问题以[已实现功能参考](docs/implemented-features.md)为准。
 
 ## 当前能力
 
@@ -18,11 +18,11 @@ Dolphin 是一个用于学习和实践编译器实现的静态类型编程语言
 | 控制流 | `if/else`、`loop`、`while`、`for`、范围、`break`、`continue`、`return`、`match` |
 | 函数与方法 | 参数、返回类型、前向调用、递归、数组/聚合参数和返回值、方法接收者自动取址 |
 | 内存 | `defer`、`std.mem` 类型化分配/释放、按值布局环检测、Debug 泄漏检测、`extern "C"` 与 C 原生链接 |
-| 集合与标准库 | 源码标准库 `std.collections.Vec<T>`、`std.text.String`、`std.ffi.CString`、`Option`/`Result`/`Iterator`、切片/范围 `for` 协议 |
-| 字符串 | UTF-8 字符串、内容相等、`length` 字节长度、`bytes`/`from_bytes`、格式化输出 |
+| 集合与标准库 | `std.collections.Vec<T>`、`std.text.String`/`lines`/`Builder`/`parse_i64`/`parse_u64`、`std.ffi.CString`、`std.process` 参数与环境、`std.io` 标准流与字节 I/O、`std.fs` 文件、`std.error`、`std.test` 断言、prelude `Option`/`Result`/`Iterator`、切片/范围 `for` 协议 |
+| 字符串 | UTF-8 字符串、内容相等、`length` 字节长度、`bytes`/`from_bytes`/`from_utf8`、格式化输出 |
 | 模块 | 递归扫描 `src/`、`pkg`、模块/成员 `use`、`pub` 可见性 |
 | 包管理 | `dolphin.toml` 的 `[lib]`/`[[bin]]`、本地 path 依赖、Maven 风格坐标与仓库、确定性 `.dlib`、内容寻址缓存、`dolphin.lock`、`--locked`/`--offline`、条件 PUT 发布 |
-| 工具 | Clap CLI、`check/build/run/package/fetch/publish/info/env/fmt/lsp`、Debug/Release、颜色、帮助和版本 |
+| 工具 | `check/build/run/test/package/fetch/publish/info/env/fmt/lsp`、`dc run -- <应用参数>` 原样转发、`dc test`（发现 `tests/*.do` 的 `test_*`、独立子进程执行、`--filter`、固定汇总）、Debug/Release、颜色、帮助和版本 |
 | 开发工具 | `dc fmt` 保守空白格式化、`dc lsp` 单文件最小诊断/符号/悬停/跳转、LLVM Debug 下的 Unix DWARF 行表与函数调试信息 |
 | 后端 | 类型化 CFG IR、后端无关 `CodegenBackend` 接口、Cranelift（默认）与可选 LLVM 后端、本机目标文件、内嵌最小 C 运行时和 `rust-lld` 链接器 |
 
@@ -59,6 +59,21 @@ cargo build --release --bins
 ```
 
 `run` 会返回 Dolphin 程序的退出码，因此 M8 示例正常结束时命令退出码为 `64`。
+
+### 运行 M19 目标工具
+
+`examples/m19` 是一个 lib + bin 项目：`textstats` 提供统计核心，`dtext` 通过 path 依赖消费它，两个包都有 `tests/*.do` 自测。
+
+```bash
+./target/release/dc test examples/m19/textstats
+./target/release/dc build examples/m19/dtext --bin dtext
+printf 'alpha\nbeta\n' | ./examples/m19/dtext/target/dtext --filter beta
+# lines=2
+# matched=1
+# bytes=11
+```
+
+`dc build --lib`（以及默认 `dc build` 对 lib 目标）会产出 `.dlib` 包，而 `.dlib` 不接受 path 依赖；lib+bin 且声明 path 依赖的项目用 `--bin` 构建，细节见 [examples/m19/README](examples/m19/README.md)。
 
 ### 可选 LLVM 后端（M16）
 
@@ -107,7 +122,8 @@ Cranelift 后端暂不生成调试信息，Windows/PDB 也未覆盖。当前 LSP
 ```text
 dc check <项目目录或main.do> [--locked] [--offline] [--color auto|always|never]
 dc build <项目目录或main.do> [--bin <名称>] [--lib] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
-dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- <应用参数>...]
+dc test  <项目目录> [--filter <子串>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc package <项目目录> [--locked] [--offline]
 dc fetch   <项目目录> [--locked] [--offline]
 dc publish <项目目录> [--repository <id>] [--locked] [--offline]
@@ -117,9 +133,9 @@ dc fmt   <文件或目录...> [--check]
 dc lsp
 ```
 
-使用 `dc <子命令> --help` 查看子命令参数。`--debug` 与 `--release` 互斥，默认使用 Debug 配置。`--color` 是全局选项，可放在子命令前后。`-o`（`--output`）与 `--bin` 仅对 `build`/`run` 生效；`--bin` 需要 `dolphin.toml` 清单，`-o` 仅在单文件模式下生效。`dc info` 只接受项目目录（不接受 `.do` 文件），`dc env` 显示宿主/目标平台、ABI、所选链接器与缓存根。
+使用 `dc <子命令> --help` 查看子命令参数。`--debug` 与 `--release` 互斥，默认使用 Debug 配置。`--color` 是全局选项，可放在子命令前后。`-o`（`--output`）与 `--bin` 仅对 `build`/`run` 生效；`--bin` 需要 `dolphin.toml` 清单，`-o` 仅在单文件模式下生效。`dc run ... -- <应用参数>` 把 `--` 之后的参数原样传给程序，不经过 shell（空参数、空格、Unicode、前导 `-` 都保留）。`dc test` 需要 `[lib]` 目标，测试二进制写到 `target/test/<包名>-tests`，每个测试在独立子进程中运行并有固定 30 秒超时；`--filter` 按测试名子串选择，汇总格式为 `N passed; M failed; K filtered out`。`dc info` 只接受项目目录（不接受 `.do` 文件），`dc env` 显示宿主/目标平台、ABI、所选链接器与缓存根。
 
-当目录中存在 `dolphin.toml` 时，`check`/`build`/`run` 会从给定目录（或当前目录）向上查找清单并按清单驱动构建，先解析 `[dependencies]`（本地 path 与 Maven 风格坐标）再编译。清单可声明 `[lib]` 库目标与一个或多个 `[[bin]]` 可执行目标；`dc build --lib`（或 `dc package`）只编译库并产出 `target/package/<name>-<version>.dlib` 与 `.dlib.sha256`，`dc build` 会同时构建库与全部 bin。多目标项目运行需用 `--bin` 选择目标，纯库项目 `run` 会明确拒绝，`dc info` 显示完整坐标、目标、依赖与锁状态。
+当目录中存在 `dolphin.toml` 时，`check`/`build`/`run` 会从给定目录（或当前目录）向上查找清单并按清单驱动构建，先解析 `[dependencies]`（本地 path 与 Maven 风格坐标）再编译。清单可声明 `[lib]` 库目标与一个或多个 `[[bin]]` 可执行目标；`dc build --lib`（或 `dc package`）只编译库并产出 `target/package/<name>-<version>.dlib` 与 `.dlib.sha256`，`dc build` 会同时构建库与全部 bin。多目标项目运行需用 `--bin` 选择目标，纯库项目 `run` 会明确拒绝，`dc info` 显示完整坐标、目标、依赖与锁状态。`dc test` 不产出 `.dlib`、不要求可发布性，因此可以解析 path 依赖。
 
 仓库通过根清单的 `[repositories]` 配置，依赖坐标形如 `org.example:mathlib:1.0.0`。解析结果写入根目录 `dolphin.lock`（提交到版本管理）；`--locked` 要求锁与清单一致且不重写，`--offline` 不访问 HTTP(S)。`dc fetch` 只解析/下载整个闭包并写锁，`dc publish` 用 `If-None-Match: *` 条件 PUT 上传当前库（`file://` 仓库为不覆盖的原子发布），token 由 `DOLPHIN_REPOSITORY_<ID>_TOKEN` 提供。
 
@@ -132,6 +148,9 @@ target/<项目名>.runtime.o             内嵌最小运行时目标文件（落
 target/lib/<库名>.o                   库验证目标文件（build --lib / package）
 target/package/<库名>-<版本>.dlib     确定性源码型库包
 target/package/<库名>-<版本>.dlib.sha256  包摘要（64 位小写十六进制加换行）
+target/test/<包名>-tests[.exe]        dc test 的测试二进制
+target/test/<包名>-tests.o            测试目标文件
+target/test/<包名>-tests.entry.do     生成的测试入口（不写入 src/）
 ```
 
 默认使用 Rust 工具链自带的 `rust-lld` 链接器；`--system-linker` 可回退到系统链接器（`cc`/`link`）以便诊断。
@@ -256,7 +275,9 @@ UTF-8 源文件
 │   ├── installation.md    安装、升级、卸载、兼容政策与许可证
 │   ├── roadmap.md
 │   ├── plan-m18-plus.md    M18-M21 后续批次与人工交接提示词
-│   └── plan-m18-correctness.md  M18 复现、修复合同与验收矩阵
+│   ├── proposal-m19-cli-stdlib.md  M19 API/目标程序冻结规格
+│   ├── reports/            各阶段进度报告与平台复验证据
+│   └── website/            官网与教程内容
 └── examples/
     ├── README.md
     ├── m1/ ... m6/
@@ -266,7 +287,9 @@ UTF-8 源文件
     ├── m13/              结构体、枚举、match 与跨模块类型示例
     ├── m14/              手动内存、指针/切片、defer 与 C 互操作示例
     ├── m15/              泛型/标准库示例，含 path 依赖库 `mathlib/`
-    └── m16/              后端基准示例（Cranelift 与 LLVM 对比）
+    ├── m16/              后端基准示例（Cranelift 与 LLVM 对比）
+    ├── m18/              组合语义回归示例
+    └── m19/              dtext 文本统计工具（lib + bin + path 依赖 + dc test）
 ```
 
 ## 实现进度
@@ -298,16 +321,15 @@ UTF-8 源文件
 ## 文档和示例
 
 - [语言设计说明](docs/language-design.md)：语法、类型、模块和运行时规则。
-- [编译器实现指南](docs/compiler-implementation.md)：历史架构建议、阶段拆分和测试策略，不是当前待办。
 - [已实现功能参考](docs/implemented-features.md)：当前编译器的准确行为与限制。
 - [安装与发行](docs/installation.md)：发行包获取、安装、升级、卸载、兼容政策与许可证。
-- [实现路线图](docs/roadmap.md)：M0-M17 完成记录与 M18-M21 后续方向。
-- [M18-M21 人工交接指南](docs/plan-m18-plus.md)：逐批任务、前置决策、验收要求和可复制执行提示词。
-- [M18 正确性执行合同](docs/plan-m18-correctness.md)：12 个批次、已复现缺口、固定语义、源码入口和测试矩阵。
-- [M14 实现规格](docs/proposal-m14-memory-model.md)：从 M13 新增手动内存、指针/视图、defer、C ABI 及验收矩阵。
-- [M15 实现规格](docs/proposal-m15-generics-stdlib.md)：在新 M14 基础上实现泛型、容器、lib/`.dlib`、仓库和锁文件。
-- [M14/M15 分步实施指南](docs/plan-m14-m15-rework.md)：已归档的 R00-R21 批次，不能据此从 M13 重做当前项目。
-- [M1-M8 可运行示例](examples/README.md)：每个里程碑的源码、命令和预期结果。
+- [实现路线图](docs/roadmap.md)：M0-M19 完成记录与 M20-M21 后续方向。
+- [M18-M21 交接指南](docs/plan-m18-plus.md)：逐批任务、验收要求和交接提示词。
+- [M19 规格](docs/proposal-m19-cli-stdlib.md)：M19 API/目标程序/测试矩阵冻结记录。
+- [M18 正确性合同](docs/plan-m18-correctness.md)：已完成的 M18 批次与验收矩阵（历史证据）。
+- [M14](docs/proposal-m14-memory-model.md)、[M15](docs/proposal-m15-generics-stdlib.md) 实现规格与[分步实施指南](docs/plan-m14-m15-rework.md)：历史设计记录，不能据此重做当前项目。
+- [编译器实现指南](docs/compiler-implementation.md)：历史架构建议，不是当前待办。
+- [可运行示例](examples/README.md)：M1-M19 各里程碑的源码、命令和预期结果。
 
 ## 开发验证
 
@@ -324,4 +346,4 @@ DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build
 cargo test -p dolphin-compiler --features llvm --test backend
 ```
 
-分支/PR CI 在 Linux x86_64、macOS ARM64 和 Windows x86_64 上执行格式检查、Clippy、测试、格式化器规范和 Release 构建，并解压发行包运行冒烟测试。当前默认 CI 不安装 LLVM，tag 发布任务也尚未依赖同提交的质量门禁；H18-09 负责补齐。现有冒烟运行在开发 runner 上，不是无 CRT/SDK 的干净机器证明。新测试文件须加入显式 `--test` 命令，feature 开启不等于所有 fixture 自动使用 LLVM。
+分支/PR CI 在 Linux x86_64、macOS ARM64 和 Windows x86_64 上执行格式检查、Clippy、测试、格式化器规范和 Release 构建，并解压发行包运行冒烟测试；tag 发布任务依赖同提交的三平台质量门禁与 Linux LLVM lane，发布只消费已通过冒烟的那份归档。默认 CI 不安装 LLVM，LLVM lane 在 Ubuntu 上单独安装 LLVM 22。现有冒烟运行在开发 runner 上，不是无 CRT/SDK 的干净机器证明。新测试文件须加入显式 `--test` 命令，feature 开启不等于所有 fixture 自动使用 LLVM。

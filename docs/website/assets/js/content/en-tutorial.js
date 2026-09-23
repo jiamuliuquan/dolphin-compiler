@@ -9,12 +9,12 @@ window.DolphinDocsContent["en-US"].groups.push({
       title: "Installation and your first program",
       body: `
 <h1>Installation and your first program</h1>
-<p>This chapter gets the Dolphin toolchain installed and compiles your first program. Dolphin ships as a self-contained archive: unpack it and go. Building Dolphin programs needs neither a C/C++ toolchain nor Rust.</p>
+<p>This chapter gets the Dolphin toolchain installed and compiles your first program. Dolphin ships as a self-contained archive: unpack it and go, with no Rust toolchain or compiler checkout. Linking still uses the platform's CRT/SDK, as described in the <a href="../install.html">installation guide</a>.</p>
 
 <h2>1. Install the compiler</h2>
 <p>Releases cover three tier-1 platforms: Linux x86_64, macOS ARM64 and Windows x86_64. Download the archive, unpack it anywhere, and add the directory to <code>PATH</code>:</p>
 <pre><code>mkdir -p ~/.local/dolphin
-tar xzf dolphin-0.1.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
+tar xzf dolphin-0.3.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
 export PATH="$HOME/.local/dolphin:$PATH"</code></pre>
 <p>Inside the archive, <code>dc</code> is the compiler command and <code>rust-lld</code> is the bundled linker; they must stay in the same directory. See the <a href="../install.html">installation guide</a> for checksums and uninstall steps.</p>
 <p>Verify the installation:</p>
@@ -46,7 +46,7 @@ target/hello-project.o           Dolphin program object
 target/hello-project.runtime.o   minimal runtime object</code></pre>
 
 <h2>3. Entry point and exit codes</h2>
-<p>An executable must define exactly one <code>main</code>. It takes no arguments today, and may return an <code>i32</code> process exit code:</p>
+<p>An executable must define exactly one <code>main</code>. It takes no parameters; application arguments are read through <code>std.process</code> (see <a href="#/std/io">process, streams and files</a>). It may return an <code>i32</code> process exit code:</p>
 <pre><code>fn main(): i32 {
     return 42;
 }</code></pre>
@@ -61,6 +61,7 @@ echo $?   # 42</code></pre>
     <tr><td><code>dc check &lt;project&gt;</code></td><td>Lexing, parsing, name and type checks only; no artifacts</td></tr>
     <tr><td><code>dc build &lt;project&gt;</code></td><td>Compile and link an executable (Debug by default)</td></tr>
     <tr><td><code>dc run &lt;project&gt;</code></td><td>Build then run, propagating the program's exit code</td></tr>
+    <tr><td><code>dc test &lt;project&gt;</code></td><td>Run the project's <code>tests/*.do</code> suite</td></tr>
     <tr><td><code>dc info &lt;project&gt;</code></td><td>Show package coordinates, targets, dependencies and lock status</td></tr>
     <tr><td><code>dc env</code></td><td>Show host/target platform and toolchain details</td></tr>
   </tbody>
@@ -151,7 +152,7 @@ fn main() {
 <p>Top-level declarations are private to their module by default; adding <code>pub</code> makes them accessible across modules. See <a href="#/tutorial/packages">modules, visibility and packages</a>.</p>
 
 <h2>6. Current boundaries</h2>
-<p>Dolphin is still evolving. Not yet implemented: nested and empty array literals, resource <code>try</code> syntax, borrow checking, lifetimes, closures, dynamic dispatch, the <code>?</code> operator, file/process/network standard libraries, C header import, cross-compilation and DWARF debug info. Check availability before relying on them.</p>
+<p>Dolphin is still evolving. Not yet implemented: nested and empty array literals, resource <code>try</code> syntax, borrow checking, lifetimes, closures, dynamic dispatch, the <code>?</code> operator, network standard libraries, C header import and cross-compilation. DWARF line and function info is emitted by the LLVM backend in Debug builds on Unix; Cranelift and Windows/PDB have no debug info yet.</p>
 
 <h2>7. Keep learning</h2>
 <ul>
@@ -169,7 +170,7 @@ fn main() {
       title: "Variables, types and expressions",
       body: `
 <h1>Variables, types and expressions</h1>
-<p>This chapter covers Dolphin's scalar types, bindings, conversions and operators.</p>
+<p>Start with the scalar types, then see how <code>val</code>/<code>var</code>, conversions and operators behave in practice.</p>
 
 <h2>1. Bindings</h2>
 <p>Use <code>var</code> for mutable variables and <code>val</code> for immutable ones. Every variable must be initialized at its declaration; the type can be inferred from the initializer:</p>
@@ -282,7 +283,7 @@ println("{{}}");   // prints {}</code></pre>
       title: "Control flow and functions",
       body: `
 <h1>Control flow and functions</h1>
-<p>This chapter covers conditions, loops, function definitions and formatted output — the building blocks of program logic.</p>
+<p>Conditions, loops and functions; by the end you can write a small calculator.</p>
 
 <h2>1. if / else</h2>
 <p>Parentheses are not required around conditions, and conditions must be <code>bool</code>:</p>
@@ -402,7 +403,7 @@ fn main() {
       title: "Arrays, structs, enums and match",
       body: `
 <h1>Arrays, structs, enums and match</h1>
-<p>This chapter shows how to model composite data with arrays, structs and enums, and how to dispatch exhaustively over enums with <code>match</code>.</p>
+<p>Model data with arrays, structs and enums, then dispatch over enums with <code>match</code>.</p>
 
 <h2>1. Fixed-size arrays</h2>
 <p>An array type is written <code>[ElementType; length]</code>, and the length is part of the type:</p>
@@ -536,7 +537,7 @@ fn main() {
       title: "Modules, visibility and packages",
       body: `
 <h1>Modules, visibility and packages</h1>
-<p>This chapter covers source layout, imports and visibility, plus the <code>dolphin.toml</code> manifest, dependencies and library publishing.</p>
+<p>How <code>src/</code> maps to modules, how <code>use</code> and <code>pub</code> work, and how <code>dolphin.toml</code> describes dependencies and libraries.</p>
 
 <h2>1. Source root and pkg</h2>
 <p>Every project uses <code>src/</code> as its source root; <code>src</code> only organizes the project and is not part of any module name. Files directly under <code>src</code> form the root module and may omit <code>pkg</code>:</p>
@@ -624,14 +625,17 @@ dc publish my-project --repository default</code></pre>
 
 <h2>5. Command-line reference</h2>
 <pre><code>dc check &lt;dir-or-main.do&gt; [--locked] [--offline] [--color auto|always|never]
-dc build &lt;dir-or-main.do&gt; [--bin &lt;name&gt;] [--lib] [-o &lt;file&gt;] [--debug|--release] [--system-linker] [--locked] [--offline]
-dc run   &lt;dir-or-main.do&gt; [--bin &lt;name&gt;] [--debug|--release]
+dc build &lt;dir-or-main.do&gt; [--bin &lt;name&gt;] [--lib] [-o &lt;file&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc run   &lt;dir-or-main.do&gt; [--bin &lt;name&gt;] [-o &lt;file&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- &lt;app args&gt;...]
+dc test  &lt;dir&gt; [--filter &lt;text&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc package &lt;dir&gt; [--locked] [--offline]
 dc fetch   &lt;dir&gt; [--locked] [--offline]
-dc publish &lt;dir&gt; [--repository &lt;id&gt;]
+dc publish &lt;dir&gt; [--repository &lt;id&gt;] [--locked] [--offline]
 dc info &lt;dir&gt;
-dc env</code></pre>
-<p>Use <code>dc &lt;subcommand&gt; --help</code> for subcommand options. <code>--color</code> is global and may appear before or after the subcommand. <code>dc info</code> accepts only a project directory; <code>dc env</code> shows the host/target platform, ABI, selected linker and cache root.</p>
+dc env
+dc fmt &lt;file-or-dir...&gt; [--check]
+dc lsp</code></pre>
+<p>Use <code>dc &lt;subcommand&gt; --help</code> for subcommand options. <code>--color</code> is global and may appear before or after the subcommand. Arguments after <code>--</code> in <code>dc run</code> are forwarded to the program unchanged, without shell processing. <code>dc test</code> runs each test in its own process; see <a href="#/tutorial/testing">testing your code</a>. <code>dc info</code> accepts only a project directory; <code>dc env</code> shows the host/target platform, ABI, selected linker and cache root.</p>
 
 <h2>6. A multi-target project</h2>
 <pre><code>[package]
@@ -650,8 +654,9 @@ path = "src/cli.do"
 name = "server"
 path = "src/server.do"</code></pre>
 <pre><code>dc build tools            # build the lib and every bin
-dc build tools --lib      # build only the library
+dc build tools --lib      # build the library and package it as a .dlib
 dc run tools --bin cli    # run a specific executable target</code></pre>
+<p><code>--lib</code> also produces <code>target/package/&lt;name&gt;-&lt;version&gt;.dlib</code>, and <code>.dlib</code> packaging rejects path dependencies. A lib+bin package that declares one therefore builds with <code>--bin</code>, or develops through <code>dc test</code>.</p>
 
 <h2>Exercises</h2>
 <ol>
@@ -667,7 +672,7 @@ dc run tools --bin cli    # run a specific executable target</code></pre>
       title: "Generics, traits and the standard library",
       body: `
 <h1>Generics, traits and the standard library</h1>
-<p>This chapter covers generic functions and types, methods and static trait dispatch, and the source standard library that ships with the compiler.</p>
+<p>Generic functions and types, methods with static trait dispatch, and the source standard library that ships with the compiler.</p>
 
 <h2>1. Generic functions</h2>
 <p>Generic parameters appear in angle brackets after the function name. Call sites may supply type arguments explicitly, or rely on inference from the arguments:</p>
@@ -927,6 +932,55 @@ extern "C" {
 `
     },
 
+
+    {
+      id: "tutorial/testing",
+      title: "Testing your code",
+      body: `
+<h1>Testing your code</h1>
+<p>M19 adds <code>dc test</code>: it discovers functions in the project's <code>tests/</code> directory and runs each one in its own child process. It serves user projects; the compiler's own regression suite still runs through <code>cargo test</code>.</p>
+
+<h2>1. Writing a test</h2>
+<p>Test files are the direct children of <code>tests/</code> (subdirectories are ignored) and must omit <code>pkg</code>, because they compile as part of the package root module. A test is any function whose name starts with <code>test_</code>, takes no parameters and returns nothing:</p>
+<pre><code>// tests/math.do
+use std.test.expect;
+
+fn test_addition() {
+    expect(2 + 2 == 4);
+}
+
+fn test_division() {
+    expect(10 / 2 == 5);
+}</code></pre>
+<p>Other functions in the same file are helpers and are not run as tests. Test files must not define <code>main</code>; <code>dc test</code> generates the entry point. Tests share the package root module, so they can call private functions from <code>src/*.do</code> and <code>pub</code> items from submodules.</p>
+
+<h2>2. Assertions</h2>
+<pre><code>use std.test.expect;
+use std.test.fail;
+
+fn test_assertions() {
+    expect(1 + 1 == 2);
+    if 1 + 1 != 2 {
+        fail();
+    }
+}</code></pre>
+<p><code>expect(false)</code> and <code>fail()</code> write <code>Dolphin test assertion failed</code> to stderr and exit with code <code>106</code>. Like runtime traps, an assertion failure does not run <code>defer</code> cleanup.</p>
+
+<h2>3. Running tests</h2>
+<pre><code>dc test .                  # discover and run every test (Debug by default)
+dc test . --release        # build an optimized test binary
+dc test . --filter math    # only tests whose name contains "math"</code></pre>
+<p>Every test gets a fresh process and a fixed 30-second timeout; on timeout it is killed and the remaining tests still run. Output is one line per test plus a summary:</p>
+<pre><code>test test_addition ... ok
+test test_division ... ok
+2 passed; 0 failed; 0 filtered out</code></pre>
+<p>Failures are classified as <code>FAILED (assertion)</code>, <code>FAILED (trap exit 101)</code> or <code>FAILED (timeout after 30s)</code>. The command exits <code>0</code> when all selected tests pass and <code>1</code> otherwise. With no tests it prints <code>no tests found</code>, and when <code>--filter</code> matches nothing it prints <code>no tests matched filter</code>; both exit <code>1</code>. The test binary is written to <code>target/test/&lt;package&gt;-tests</code>.</p>
+
+<h2>4. Library projects and path dependencies</h2>
+<p>A package needs a <code>[lib]</code> target for <code>dc test</code>. The test build does not produce a <code>.dlib</code> and does not require publishability, so path dependencies resolve normally; this is the recommended development loop for a library. The <code>examples/m19</code> project in the repository uses it for both packages.</p>
+`
+    },
+
     {
       id: "tutorial/tour",
       title: "Putting it together: from beginner to mastery",
@@ -1054,8 +1108,8 @@ echo $?</code></pre>
 <h2>6. Going deeper</h2>
 <ul>
   <li>Read the <a href="#/std/overview">standard library reference</a> for the complete <code>Vec</code>, <code>String</code>, <code>Option</code> and <code>Result</code> APIs.</li>
-  <li>Read <a href="#/std/mem">std.mem</a> to understand layout and view construction.</li>
-  <li>Add validation functions to the stats module that signal success or failure through the return value.</li>
+  <li>Read <a href="#/std/mem">std.mem</a> to understand layout and view construction, and <a href="#/std/io">process, streams and files</a> for the M19 I/O modules.</li>
+  <li>Add tests for the stats module with <a href="#/tutorial/testing">dc test</a> and <code>std.test</code>.</li>
   <li>Extract the statistics logic into a reusable library and depend on it through <code>[lib]</code> and a path dependency.</li>
 </ul>
 

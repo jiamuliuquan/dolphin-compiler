@@ -1,12 +1,12 @@
 # 已实现功能参考
 
-> 对应实现记录：M0-M17；M18 正确性收敛（H18-00..11）与 M19 真实 CLI/用户测试（H19-00..07）
-> 已完成（证据见 [M18](reports/m18-progress.md)、[M19](reports/m19-progress.md) 进度报告）
+> 对应实现记录：M0-M19 已完成；批次与平台证据见 [M18](reports/m18-progress.md)、
+> [M19](reports/m19-progress.md) 进度报告
 >
 > 编译器目录：[`仓库根目录`](../)  
 > 可运行示例：[`examples`](../examples/)
 
-当前源码已实现到 M19。本文记录已有能力、明确限制和已知缺陷，不把历史里程碑完成标记当作无缺陷证明。后续任务见 [M18-M21 交接指南](plan-m18-plus.md)；M20/M21 待实施，[M18 执行合同](plan-m18-correctness.md)与 M14/M15 旧实施指南已经归档，不是当前待办。
+本文记录当前能力、明确限制与已知缺陷；完成标记不等于所有组合都无缺陷。后续任务见 [M18-M21 交接指南](plan-m18-plus.md)（M20/M21 待实施），历史合同与旧实施指南仅作证据保留。
 
 ## 1. 功能状态
 
@@ -31,17 +31,15 @@
 | M16 | 已完成 | 后端无关 IR、可选 LLVM、双后端对照与基准 |
 | M17 | 最小版本已完成 | LLVM Unix DWARF、保守格式化器、单文件最小 LSP |
 | M18 | 已完成 | 组合语义正确性、泛型约束、IR 校验、项目/包回归、LLVM CI 与发布门禁 |
-| M19 | 已完成 | 真实 CLI 与用户测试：`std.process`/`std.io`/`std.fs`/`std.text`/`std.test`、`dc run --` 转发、`dc test` 发现/执行/汇总、`examples/m19` `dtext`（三平台默认后端 + Linux LLVM 验收） |
+| M19 | 已完成 | 真实 CLI 与用户测试：`std.process`/`std.error`/`std.io`/`std.fs`/`std.text`/`std.test`、`dc run --` 转发、`dc test` 发现/执行/汇总、`examples/m19` `dtext`（三平台默认后端 + Linux LLVM 验收） |
 
 ### 1.1 当前已知问题与验证边界
 
-2026-09-17 对 `a72db41` 的本机审计发现下列问题；修复进度见“后续批次”列与第 1.2 节。后续执行者应重新复现未修复项，修复后将本表条目转入 1.2 节并链接测试。
-
-当前审计发现的入口问题已全部修复；H18-05 之后新增的审查项见后续批次报告。
+M18 审计发现的入口问题已全部修复（见 1.2 节），当前没有遗留的审计缺陷；M19 的三平台复验与平台缺陷修复见 [M19 进度报告](reports/m19-progress.md)。测试全绿只代表已覆盖路径，不代表所有组合都无缺陷。
 
 ### 1.2 已修复缺陷（M18）
 
-修复项从 1.1 节移入，并保留固定期望与回归测试引用。
+下表保留 M18 审计缺陷的固定期望与回归测试引用。
 
 | 缺陷 | 修复批次 | 回归测试 |
 | --- | --- | --- |
@@ -55,7 +53,7 @@
 | trait/impl 方法的 `source_id` 未赋值（停留解析器默认 0），方法内诊断与 IR Location 被误归属到第一个源文件；stdlib 方法在多字节注释处会命中非字符边界触发编译器 panic | H18-09 | `tests/manifest.rs::h18_09_method_diagnostics_use_defining_file` |
 | 子模块（`pkg`）内用裸名构造本模块枚举项（`Enum.Variant(...)` 与 `Enum.Variant`）被误报 `unknown function`：类型表以「模块.类型」为键，而构造目标判定只查未限定名 | H18-10 | `tests/build.rs::h18_10_enum_construction_in_submodule`；文档示例由 `tests/doc_examples.rs` 覆盖 |
 
-最小源码、期望、验证环境见 [M18 合同](plan-m18-correctness.md)。现有测试全绿不覆盖上述所有组合；H18-09 起 CI 增加固定 LLVM 22 的 Linux lane，tag 发布依赖同提交的三平台质量门禁与已冒烟归档（见 [README 开发验证](../README.md#开发验证)）。M17 的项目级 LSP、真实调试器流程和更完整格式化验收另见第 18 节及 M20 计划。
+最小源码、期望与验证环境见 [M18 合同](plan-m18-correctness.md)；CI 现状与验证边界见 [README 开发验证](../README.md#开发验证)。M17 的项目级 LSP、真实调试器流程和更完整格式化验收另见第 18 节及 M20 计划。
 
 ## 2. 构建和使用
 
@@ -169,7 +167,7 @@ examples/m5/target/m5.o           Dolphin 程序目标文件
 examples/m5/target/m5.runtime.o   最小运行时目标文件
 ```
 
-当前只生成运行编译器所在平台的本机程序，不支持交叉编译。
+项目模式还会生成 `target/lib/<库名>.o` 与 `target/package/<库名>-<版本>.dlib`（`build --lib`/`package`），以及 `target/test/<包名>-tests[.exe]` 等测试产物（`dc test`）。当前只生成运行编译器所在平台的本机程序，不支持交叉编译。
 
 ## 3. 源文件和词法规则
 
@@ -857,6 +855,7 @@ dolphin_stream_is_open
 dolphin_stream_open
 dolphin_stream_release
 dolphin_stream_from_raw
+dolphin_test_fail
 dolphin_runtime_finish
 ```
 
@@ -1032,7 +1031,7 @@ dolphin_runtime_finish
 - 默认 Cranelift；`--backend llvm` 或 `DOLPHIN_BACKEND=llvm` 切换；未编译所选后端时返回
   诊断，不静默回退。`dc env` 显示默认后端。
 - 两后端共用 `dolphin-ir` 的布局并以一致的陷阱/ABI 行为为目标；`tests/backend.rs` 目前对一份组合源码比较两
-  后端的退出码与标准输出，尚不足以排除第 1.1 节中的语义差异。基准见 `examples/m16` 与 `scripts/bench.py`。
+  后端的退出码与标准输出，覆盖范围有限。基准见 `examples/m16` 与 `scripts/bench.py`。
 
 ### 18.2 调试信息（M17）
 
@@ -1086,4 +1085,4 @@ dolphin_runtime_finish
 - 闭源二进制 Dolphin 库包、稳定二进制 ABI、增量编译、交叉编译。
 - Cranelift 后端的调试信息、Windows/PDB 调试信息，以及多错误恢复。
 
-实现顺序见[路线图](roadmap.md)，逐批交接与验收见 [M18-M21 计划](plan-m18-plus.md)。未来任务未通过验收前，不得移动到已实现列表。
+实现顺序见[路线图](roadmap.md)，逐批交接与验收见 [M18-M21 计划](plan-m18-plus.md)。

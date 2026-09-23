@@ -19,20 +19,16 @@
       "hero.eyebrow": "静态类型 · 编译为本机代码",
       "hero.title": "一门可以亲手写编译器的语言",
       "hero.lead":
-        "Dolphin 是一门面向学习与实践的静态类型语言，语法参考 Rust、Kotlin、Java 和 C，由 Rust 编写的编译器通过 Cranelift 直接生成可在系统上运行的本机可执行文件。",
+        "Dolphin 是一门面向学习与实践的静态类型语言，语法参考 Rust、Kotlin、Java 和 C。编译器用 Rust 写成，默认通过 Cranelift 生成本机可执行文件，也可选用 LLVM 后端。",
       "hero.cta.install": "开始安装",
       "hero.cta.docs": "阅读文档",
       "hero.termtitle": "terminal",
 
-      "stats.milestones": "已实现里程碑",
-      "stats.platforms": "一级支持平台",
-      "stats.deps": "构建产物外部依赖",
-      "stats.deps.value": "0 个 C 工具链",
 
       "why.eyebrow": "为什么选择 Dolphin",
       "why.title": "为理解编译器而设计",
       "why.lead":
-        "从词法分析到本机代码生成的完整链路都保持清晰可读，让你在学习语言本身的同时，也能看懂编译器如何工作。",
+        "从词法分析到本机代码生成的每个阶段都拆成独立 crate，源码标准库也用 Dolphin 写成，读语言和读实现可以同步进行。",
       "why.card1.title": "静态类型，错误前置",
       "why.card1.body":
         "完整的类型检查、控制流检查与返回路径检查，尽量在编译期发现错误，运行时只保留明确的陷阱。",
@@ -41,7 +37,7 @@
         "Zig 式手动内存模型：没有 GC、RC 与隐式析构，分配与释放显式可见，defer 是唯一的作用域清理语法。",
       "why.card3.title": "自包含工具链",
       "why.card3.body":
-        "发行包内置运行时与 rust-lld 链接器，解压即用，构建 Dolphin 程序不再需要 C/C++ 工具链。",
+        "发行包内置预编译运行时与 rust-lld 链接器，解压即可构建；链接仍使用系统自带的 CRT/SDK。",
       "why.card4.title": "泛型与 trait",
       "why.card4.body":
         "用户泛型经工作队列单态化，trait 提供静态分派，标准库的 Vec、String、Option、Result 全部由 Dolphin 源码写成。",
@@ -50,12 +46,12 @@
         "多文件项目、pkg/use/pub 可见性，以及 dolphin.toml 清单、path/坐标依赖、确定性 .dlib 包与锁文件。",
       "why.card6.title": "面向学习",
       "why.card6.body":
-        "每项特性都有可运行示例与明确的实现边界文档，方便按里程碑循序渐进地阅读和扩展。",
+        "仓库按里程碑提供可运行示例，并如实记录尚未实现的能力，方便按顺序阅读和扩展。",
 
       "preview.eyebrow": "语言预览",
       "preview.title": "简洁、明确的语法",
       "preview.lead":
-        "熟悉的函数、变量、控制流与模式匹配语法，让你几分钟内就能写出第一个可运行程序。",
+        "函数、变量、控制流与模式匹配的写法接近 Rust 与 Kotlin，下面是一个完整的面积计算程序。",
       "preview.list.1": "val 与 var 区分不可变与可变绑定，支持局部类型推断。",
       "preview.list.2": "定长数组、切片、原始指针与显式内存分配。",
       "preview.list.3": "结构体、携带数据的枚举与穷尽式 match。",
@@ -70,29 +66,26 @@
       "quickstart.step1.body": "从发行页下载对应平台的归档，解压到任意目录。",
       "quickstart.step2.title": "2. 加入 PATH",
       "quickstart.step2.body": "把解压目录加入 PATH，确保 dc 与 rust-lld 位于同一目录。",
-      "quickstart.step3.title": "3. 构建并运行",
-      "quickstart.step3.body": "在项目目录执行 dc build，产物会写入项目的 target/ 目录。",
+      "quickstart.step3.title": "3. 测试并运行",
+      "quickstart.step3.body": "dc test 运行库测试，dc build 构建应用；产物写入项目的 target/ 目录。",
       "quickstart.link": "阅读安装指南",
 
       "cta.title": "现在就开始使用 Dolphin",
       "cta.lead":
-        "无论你是想学习编译器实现，还是想找一门语法清晰的系统级语言，Dolphin 都提供了完整而透明的工具链。",
+        "语言、标准库与工具链的源码都在仓库里，可以边用边读。",
       "cta.install": "安装 Dolphin",
       "cta.docs": "进入文档",
 
       "footer.product": "产品",
       "footer.docs": "文档",
       "footer.resources": "资源",
-      "footer.about": "关于",
       "footer.download": "下载与安装",
       "footer.quickstart": "快速开始",
-      "footer.changelog": "版本与里程碑",
       "footer.tutorial": "入门到精通",
       "footer.stdlib": "标准库参考",
       "footer.language": "语言设计",
       "footer.cli": "命令行参考",
       "footer.examples": "可运行示例",
-      "footer.roadmap": "路线图",
       "footer.issues": "问题反馈",
       "footer.license": "GPL-3.0 许可证",
       "footer.disclaimer": "Dolphin 是用于学习与实践的编程语言项目。",
@@ -101,7 +94,7 @@
       "install.eyebrow": "安装",
       "install.title": "安装 Dolphin",
       "install.lead":
-        "Dolphin 以自包含发行包发布：解压后即可使用，无需安装 C/C++ 工具链，也无需 Rust。",
+        "Dolphin 以自包含发行包发布：解压后即可使用，不需要 Rust 或编译器源码；链接仍使用系统自带的 CRT/SDK。",
       "install.tabs.linux": "Linux",
       "install.tabs.macos": "macOS",
       "install.tabs.windows": "Windows",
@@ -117,11 +110,10 @@
         "dc 与 rust-lld 必须位于同一目录；macOS 与 Linux 包还携带 rust-lld 依赖的 LLVM 动态库，请勿拆分。",
       "install.offline.title": "离线使用",
       "install.offline.body":
-        "在不声明远程依赖时，dc check/build/run 不会访问网络。运行时目标文件内嵌于 dc，链接器为同目录的 rust-lld。使用 Maven 风格依赖时，dc 会通过 HTTPS 下载 .dlib 到内容寻址缓存（DOLPHIN_HOME，默认 ~/.dolphin），并写入 dolphin.lock。",
+        "在不声明远程依赖时，dc check/build/run/test 不会访问网络。运行时目标文件内嵌于 dc，链接器为同目录的 rust-lld。使用 Maven 风格依赖时，dc 会通过 HTTPS 下载 .dlib 到内容寻址缓存（DOLPHIN_HOME，默认 ~/.dolphin），并写入 dolphin.lock。",
       "install.upgrade.title": "升级与卸载",
       "install.upgrade.body":
         "升级：用新版本覆盖旧目录，或解压到新目录后替换 PATH。卸载：删除发行目录并从 PATH 移除对应条目即可，Dolphin 不写注册表、不创建系统服务。",
-      "install.verify.caption": "校验和",
       "install.notes.title": "说明",
       "install.notes.1": "构建程序时仍会动态链接操作系统自带组件（Linux glibc、macOS libSystem、Windows UCRT）。",
       "install.notes.2": "从源码构建编译器自身才需要 Rust 与本机 C 编译器。",
@@ -153,20 +145,16 @@
       "hero.eyebrow": "Statically typed · Compiles to native code",
       "hero.title": "A language you can build a compiler for",
       "hero.lead":
-        "Dolphin is a statically typed language for learning and practice. Its syntax draws on Rust, Kotlin, Java and C, and its Rust-based compiler emits native executables through Cranelift.",
+        "Dolphin is a statically typed language for learning and practice, with syntax that draws on Rust, Kotlin, Java and C. Its Rust-based compiler emits native executables through Cranelift by default, with an optional LLVM backend.",
       "hero.cta.install": "Get started",
       "hero.cta.docs": "Read the docs",
       "hero.termtitle": "terminal",
 
-      "stats.milestones": "Completed milestones",
-      "stats.platforms": "Tier-1 platforms",
-      "stats.deps": "External build dependencies",
-      "stats.deps.value": "0 C toolchains",
 
       "why.eyebrow": "Why Dolphin",
       "why.title": "Designed for understanding compilers",
       "why.lead":
-        "The whole path from lexing to native code generation stays readable, so you can learn the language and see how a compiler works at the same time.",
+        "Every stage from lexing to native code generation lives in its own crate, and the standard library is written in Dolphin itself, so you can read the language and the implementation together.",
       "why.card1.title": "Static types, early errors",
       "why.card1.body":
         "Type checking, control-flow checking and return-path analysis catch mistakes at compile time, leaving only explicit traps at runtime.",
@@ -175,7 +163,7 @@
         "A Zig-style manual memory model: no GC, RC or implicit destruction. Allocation is visible, and defer is the only scope cleanup syntax.",
       "why.card3.title": "Self-contained toolchain",
       "why.card3.body":
-        "Release archives bundle the runtime and the rust-lld linker. Unpack and go — building Dolphin programs needs no C/C++ toolchain.",
+        "Release archives bundle a precompiled runtime and the rust-lld linker, so you can build right after unpacking. Linking still uses the system CRT/SDK.",
       "why.card4.title": "Generics and traits",
       "why.card4.body":
         "User generics are monomorphized with a work queue, traits give static dispatch, and Vec, String, Option and Result are all written in Dolphin.",
@@ -184,12 +172,12 @@
         "Multi-file projects, pkg/use/pub visibility, plus a dolphin.toml manifest, path/coordinate dependencies, deterministic .dlib packages and lock files.",
       "why.card6.title": "Built for learning",
       "why.card6.body":
-        "Every feature has runnable examples and clearly documented boundaries, so you can read and extend it milestone by milestone.",
+        "The repository ships a runnable example per milestone and documents what is not implemented yet, so you can read and extend it in order.",
 
       "preview.eyebrow": "Language preview",
       "preview.title": "Concise, predictable syntax",
       "preview.lead":
-        "Familiar functions, variables, control flow and pattern matching let you write your first runnable program in minutes.",
+        "Functions, variables, control flow and pattern matching follow Rust and Kotlin closely; the sample below is a complete program.",
       "preview.list.1": "val and var distinguish immutable from mutable bindings, with local type inference.",
       "preview.list.2": "Fixed-size arrays, slices, raw pointers and explicit allocation.",
       "preview.list.3": "Structs, data-carrying enums and exhaustive match.",
@@ -204,29 +192,26 @@
       "quickstart.step1.body": "Download the archive for your platform from the releases page and unpack it anywhere.",
       "quickstart.step2.title": "2. Add it to PATH",
       "quickstart.step2.body": "Add the unpacked directory to PATH, keeping dc and rust-lld in the same folder.",
-      "quickstart.step3.title": "3. Build and run",
-      "quickstart.step3.body": "Run dc build in the project directory; artifacts land in that project's target/ folder.",
+      "quickstart.step3.title": "3. Test and run",
+      "quickstart.step3.body": "dc test runs the library tests and dc build compiles the app; artifacts land in that project's target/ folder.",
       "quickstart.link": "Read the installation guide",
 
       "cta.title": "Start using Dolphin today",
       "cta.lead":
-        "Whether you want to study compiler construction or need a clear, systems-oriented language, Dolphin ships a complete and transparent toolchain.",
+        "The language, standard library and toolchain all live in one repository, ready to use and to read.",
       "cta.install": "Install Dolphin",
       "cta.docs": "Go to the docs",
 
       "footer.product": "Product",
       "footer.docs": "Documentation",
       "footer.resources": "Resources",
-      "footer.about": "About",
       "footer.download": "Download & install",
       "footer.quickstart": "Quickstart",
-      "footer.changelog": "Versions & milestones",
       "footer.tutorial": "Learn Dolphin",
       "footer.stdlib": "Standard library",
       "footer.language": "Language design",
       "footer.cli": "Command line",
       "footer.examples": "Examples",
-      "footer.roadmap": "Roadmap",
       "footer.issues": "Report an issue",
       "footer.license": "GPL-3.0 License",
       "footer.disclaimer": "Dolphin is a programming language project for learning and practice.",
@@ -235,7 +220,7 @@
       "install.eyebrow": "Install",
       "install.title": "Install Dolphin",
       "install.lead":
-        "Dolphin ships as a self-contained archive: unpack it and go. No C/C++ toolchain and no Rust installation required.",
+        "Dolphin ships as a self-contained archive: unpack it and go, with no Rust toolchain or compiler checkout. Linking still uses the platform CRT/SDK.",
       "install.tabs.linux": "Linux",
       "install.tabs.macos": "macOS",
       "install.tabs.windows": "Windows",
@@ -251,11 +236,10 @@
         "dc and rust-lld must stay in the same directory; macOS and Linux archives also ship the LLVM shared library that rust-lld needs, so keep them together.",
       "install.offline.title": "Offline use",
       "install.offline.body":
-        "dc check/build/run never touch the network unless you declare remote dependencies. The runtime object is embedded in dc and the linker is the rust-lld beside it. With Maven-style dependencies, dc downloads .dlib files over HTTPS into a content-addressed cache (DOLPHIN_HOME, ~/.dolphin by default) and writes dolphin.lock.",
+        "dc check/build/run/test never touch the network unless you declare remote dependencies. The runtime object is embedded in dc and the linker is the rust-lld beside it. With Maven-style dependencies, dc downloads .dlib files over HTTPS into a content-addressed cache (DOLPHIN_HOME, ~/.dolphin by default) and writes dolphin.lock.",
       "install.upgrade.title": "Upgrade and uninstall",
       "install.upgrade.body":
         "To upgrade, overwrite the old directory with a new release, or unpack elsewhere and repoint PATH. To uninstall, delete the archive directory and remove its PATH entry — Dolphin writes no registry keys and creates no services.",
-      "install.verify.caption": "Checksum",
       "install.notes.title": "Notes",
       "install.notes.1": "Built programs still link OS-provided components dynamically (glibc on Linux, libSystem on macOS, UCRT on Windows).",
       "install.notes.2": "Only building the compiler from source requires Rust and a native C compiler.",

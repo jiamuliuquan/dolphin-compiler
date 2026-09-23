@@ -18,10 +18,10 @@ Dolphin 编译器以携带预编译 Dolphin 运行时与 LLD 的发行包发布�
 
 ```bash
 # Linux / macOS
-sha256sum -c dolphin-0.1.0-x86_64-unknown-linux-gnu.sha256
+sha256sum -c dolphin-0.3.0-x86_64-unknown-linux-gnu.sha256
 
 # Windows（PowerShell）
-Get-FileHash dolphin-0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-FileHash dolphin-0.3.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 ```
 
 ## 2. 发行包内容
@@ -36,7 +36,7 @@ LICENSE                GPL-3.0 许可证
 README.md              说明文档
 ```
 
-`dc` 构建 Dolphin 程序时会优先在**自身所在目录**查找 `rust-lld`，因此上述文件应保持在同一目录。macOS / Linux 发行包额外携带 LLVM 动态库（`libLLVM.dylib` / `libLLVM.so.*`），它与 `rust-lld` 同目录，`rust-lld` 通过 `@loader_path` / `$ORIGIN` rpath 定位到它，因此这些文件必须放在同一目录，不可拆分。
+`dc` 构建 Dolphin 程序时会优先在自身所在目录查找 `rust-lld`。macOS / Linux 发行包还携带 LLVM 动态库（`libLLVM.dylib` / `libLLVM.so.*`），`rust-lld` 通过 `@loader_path` / `$ORIGIN` rpath 定位它，因此发行目录中的文件不要拆分移动。
 
 官方默认 feature 只启用 Cranelift codegen，不启用 LLVM codegen；这与 **Unix 发行包的 LLD 链接器仍依赖并携带 `libLLVM`** 是两回事。打包行为见 [`scripts/package.py`](../scripts/package.py) 的 `bundle_rust_lld_with_libllvm`，不能因未启用 `llvm` feature 就删除这些动态库。
 
@@ -47,13 +47,13 @@ README.md              说明文档
 ```bash
 # Linux / macOS
 mkdir -p ~/.local/dolphin
-tar xzf dolphin-0.1.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
+tar xzf dolphin-0.3.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
 export PATH="$HOME/.local/dolphin:$PATH"   # 建议写入 ~/.bashrc 或 ~/.zshrc
 ```
 
 ```powershell
 # Windows（PowerShell）
-Expand-Archive dolphin-0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath "$env:USERPROFILE\dolphin"
+Expand-Archive dolphin-0.3.0-x86_64-pc-windows-msvc.zip -DestinationPath "$env:USERPROFILE\dolphin"
 $env:Path = "$env:USERPROFILE\dolphin;$env:Path"   # 建议用系统环境变量持久化
 ```
 
@@ -72,7 +72,7 @@ dc env
 
 ## 5. 离线使用
 
-在所需本地系统链接依赖齐备时，发行包可离线使用：`dc check/build/run` 在不声明远程依赖时不访问网络。Dolphin 运行时目标文件内嵌于 `dc`，链接器为同目录的 `rust-lld`；离线不代表缺少 CRT/SDK 时也能完成链接。
+在所需本地系统链接依赖齐备时，发行包可离线使用：`dc check/build/run/test` 在不声明远程依赖时不访问网络。Dolphin 运行时目标文件内嵌于 `dc`，链接器为同目录的 `rust-lld`；离线不代表缺少 CRT/SDK 时也能完成链接。
 
 使用 Maven 风格依赖时，`dc` 通过 HTTPS 下载 `.dlib` 到内容寻址缓存（`DOLPHIN_HOME`，默认 `~/.dolphin`），并写入根目录 `dolphin.lock`。构建后可用 `dc build --locked --offline` 在断网时复现；`file://` 仓库与本地 path 依赖始终可用。`dc env` 会显示当前缓存根。
 
@@ -106,7 +106,7 @@ export NO_PROXY=127.0.0.1,localhost,.internal.example
 | macOS ARM64 | 运行时通过 `xcrun --show-sdk-path` / `--show-sdk-version` 探测 SDK，失败后回退编译期 `-syslibroot` / 平台版本。发行包未携带完整 macOS SDK；构建机 Xcode/CLT 路径在目标机可能不存在，仅有 libSystem 不足以证明无 SDK 可链接。 |
 | Windows x86_64 | 默认调用 `rust-lld -flavor link`，仍需解析预编译 runtime 的 CRT/系统库依赖。当前平台封装未自行提供完整 MSVC/Windows SDK 库发现与打包，应确保所需库及搜索环境（如 `LIB`）可用；系统提供 UCRT DLL 不等于提供全部链接用库。CI 激活了 MSVC 开发环境，不能据此声称无 Visual Studio/SDK 的干净机器已通过。 |
 
-编译期常量回退只提供参数，不会复制缺失的 CRT/SDK，也不保证跨机器路径有效。`--system-linker` 是需要本机工具链的显式回退，不是无 SDK 问题的通用解决办法。第三方 C 源码仍由库作者使用 C 工具链预编译；消费程序需要清单声明的原生链接文件与运行时附件。
+`--system-linker` 是需要本机工具链的显式回退，不是无 SDK 问题的通用解决办法。第三方 C 源码仍由库作者使用 C 工具链预编译；消费程序需要清单声明的原生链接文件与运行时附件。
 
 构建**编译器自身**（从源码 `cargo build`）需要 Rust 和本机 C/C++ 编译工具链及对应平台链接依赖。可选 LLVM 后端（`cargo build --features llvm`）还要求本机安装 LLVM 开发库（`llvm-config` 可被 `llvm-sys` 定位，当前对接 LLVM 22）。默认 Cranelift codegen 不需要 LLVM 开发库，但 Unix 发行包的 LLD 仍携带 `libLLVM`。以 `--features llvm` 自行构建的 `dc` 若动态链接 LLVM，运行环境需具备匹配的库；以实际产物的依赖检查为准，不能假定发行包中供 Rust LLD 使用的那份 `libLLVM` 可替代 codegen 所需版本。
 
@@ -143,20 +143,15 @@ cargo test -p dolphin-compiler --features llvm --test backend
 指向其前缀即可。
 
 
-### 后续干净环境验收
+### 干净环境验收状态
 
-现有 [CI](../.github/workflows/ci.yml) 在装有开发工具的 runner 上构建并冒烟测试发行包，未隔离构建机 SDK、CRT 与环境变量。M18+ 交接见 [后续计划](plan-m18-plus.md)与 [正确性计划](plan-m18-correctness.md)；在完成以下验证前，不扩大“无需工具链”的承诺：
-
-1. 为三个官方目标分别使用独立干净 VM/容器（适用平台），记录操作系统版本、系统运行库与额外安装项；仅转入发行包和测试源码，不复用构建目录、Rust sysroot 或开发环境。
-2. 审计 `dc`、`rust-lld` 与随附动态库的实际加载依赖及路径，验证搬移发行目录后仍可启动；从环境和文件系统两方面隔离开发工具/SDK，不能仅删除 `PATH` 条目。
-3. 分别验证 `dc --version`、`dc env`、`check`、Debug/Release `build/run`，再验证源码标准库、预编译 C 附件和已缓存依赖的 `--locked --offline` 构建；记录 stdout/stderr、退出码和实际链接命令/依赖路径。
-4. 对缺 CRT/SDK、路径失效、动态库缺失分别记录可复现失败与诊断；逐项确定需随包携带或由用户安装的依赖及许可证边界。只有附上各平台证据后，才可更新最低系统要求和无工具链安装承诺。
+现有 [CI](../.github/workflows/ci.yml) 在装有开发工具的 runner 上构建并冒烟测试发行包，未隔离构建机 SDK、CRT 与环境变量；发行目录搬移、缺 CRT/SDK 诊断、升级/卸载与离线重建的完整验收安排在 M21（见[路线图](roadmap.md)）。在拿到三平台干净环境证据前，最低系统要求与“无需工具链”的承诺保持现状。
 
 ## 7. 命令行兼容政策
 
 - `dc` 是正式命令名，`dolphin-compiler` 是等价的兼容名称，二者行为完全一致。
-- 子命令（`check`/`build`/`run`/`package`/`fetch`/`publish`/`info`/`env`/`fmt`/`lsp`）及稳定选项在 1.0 之前保持兼容，不做破坏性移除。
-- `--color`、`--debug`/`--release`、`--bin`、`--lib`、`--output`、`--system-linker`、`--backend`、`--locked`、`--offline`、`--repository` 为稳定选项。
+- 子命令（`check`/`build`/`run`/`test`/`package`/`fetch`/`publish`/`info`/`env`/`fmt`/`lsp`）及稳定选项在 1.0 之前保持兼容，不做破坏性移除。
+- `--color`、`--debug`/`--release`、`--bin`、`--lib`、`--output`、`--system-linker`、`--backend`、`--locked`、`--offline`、`--repository`、`--filter` 为稳定选项；`dc run` 的 `-- <应用参数>` 原样转发语义同样稳定。
 - `.dlib` 格式版本固定为 `format-version = 1`，消费端要求 `compiler-version` 与当前 `dc` 完全一致；放宽兼容范围时会提升格式/版本策略。
 - 诊断错误类别（`E0000`/`E0001`）一经公开保持含义稳定。
 
@@ -168,9 +163,7 @@ cargo test -p dolphin-compiler --features llvm --test backend
 | macOS ARM64 | 一级（完整支持） | CI 测试、构建、端到端运行 |
 | Windows x86_64 | 一级（完整支持） | CI 测试、构建、端到端运行 |
 
-其他目标（如 Windows ARM64、Linux ARM64）当前不支持，编译器会给出诊断而非静默失败。交叉编译不在当前范围内。
-
-“一级”表示当前开发/CI 环境的目标支持范围，不等于已完成无 CRT/SDK 开发文件的干净机器安装验收。
+其他目标（如 Windows ARM64、Linux ARM64）当前不支持，编译器会给出诊断而非静默失败。交叉编译不在当前范围内。“一级”表示开发/CI 环境的支持范围，干净机器的安装验收状态见第 6 节。
 
 ## 9. 版本规则
 

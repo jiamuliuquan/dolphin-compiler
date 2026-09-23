@@ -1,16 +1,13 @@
 # M19 规格：真实 CLI、标准库与用户测试（H19-00 冻结）
 
-> 状态：H19-00 设计冻结产物。**除 H19-01 已实现的 `std.process` 参数/环境与
-> `dc run -- <应用参数>` 转发、H19-02 已实现的 `std.error` 与 `std.io` 标准流字节 I/O、
-> H19-03 已实现的 `std.fs` 文件打开与 `release`/`from_raw` 句柄转交、H19-04 已实现的
-> `std.text.lines`/`Builder`/`parse_i64`/`parse_u64` 外，本文其余 API 均未实现**；
-> 未实现的条目不能写进“已实现功能”。
+> 状态：H19-00 设计冻结产物；**H19-01..H19-07 已完成实现并通过三平台（Linux/Windows/macOS）
+> 默认后端与 Linux LLVM 验收**（证据见 [M19 进度报告](reports/m19-progress.md)）。本文冻结的
+> API/语义/退出码/资源规则均已落地，未新增语言语法（D3）。未实现条目不得写入“已实现功能”。
 > 实现顺序与验收编号见 [M18-M21 计划](plan-m18-plus.md) 第 5 节与本文“测试矩阵”。
 >
 > 前置：M18 已完成并通过阶段验收（[m18-progress](reports/m18-progress.md)）。
 >
-> 决策请求：D1–D3 已由用户于 2026-09-22 确认（见第 12 节）。H19-01..H19-04 已完成；
-> H19-05 及之后等待人工派发。
+> 决策请求：D1–D3 已由用户于 2026-09-22 确认（见第 12 节）。
 
 ## 1. 范围与非目标
 
@@ -680,7 +677,10 @@ native code 是否存在，不绑定整段渲染文本。新测试文件必须�
   子进程执行/超时/分类/过滤/汇总），TEST-01..06 均有真实测试。H19-06 以组合回归完成：
   ERR-01..04（`tests/m19_errors.rs`）证明既有 `Result`/`match`/helper/`defer` 足以写完失败路径，
   **未新增任何语法**；两处组合限制（字段后直接方法调用、`return match` 的 Err 构造臂推断）
-  用局部绑定绕过，详见 [M19 报告](reports/m19-progress.md) H19-06 节。H19-07 未实施，M19 未完成。
+  用局部绑定绕过，详见 [M19 报告](reports/m19-progress.md) H19-06 节。H19-07 已完成：
+  `examples/m19/textstats`（lib）与 `examples/m19/dtext`（lib+bin，path 依赖）落地本节冻结的
+  用法/行规则/诊断/退出码/资源规则；Linux/Windows/macOS 默认后端与 Linux LLVM 通过，远端 CI 通过。
+  M19 阶段完成，下一阶段 M20 先做 H20-00 设计冻结。
 - H19-02 经用户确认把 unit-like 返回值从 `Result<(), Error>` 改为 `Result<bool, Error>`（当前语言
   无 Unit 值；`Result<Unit, E>` 会触发诊断），并修复了暴露的两个编译器缺陷（Unit payload 诊断、
   LLVM 重复 extern 符号）。规格第 4.1 节已同步。

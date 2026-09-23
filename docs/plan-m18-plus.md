@@ -12,8 +12,8 @@
 
 | 里程碑 | 交付目标 | 用户可观察的验收结果 | 状态 |
 | --- | --- | --- | --- |
-| M18 | 已有语义正确、结果可信 | 组合语义反例修复，双后端回归和发布门禁持续执行 | 待实施，详细合同已给出 |
-| M19 | 能编写、测试真实 CLI | 一个纯 Dolphin 文件处理工具能接收输入、报告错误、自测 | 待设计冻结，然后实施 |
+| M18 | 已有语义正确、结果可信 | 组合语义反例修复，双后端回归和发布门禁持续执行 | 完成（H18-00..11，见 [M18 报告](reports/m18-progress.md)） |
+| M19 | 能编写、测试真实 CLI | 一个纯 Dolphin 文件处理工具能接收输入、报告错误、自测 | 完成（H19-00..07；`examples/m19` + `dc test`；三平台与 CI 通过，见 [M19 报告](reports/m19-progress.md)） |
 | M20 | 项目级开发体验 | 使用 stdlib/依赖的未保存代码有正确诊断和跨文件导航 | 待设计冻结，然后实施 |
 | M21 | 规模与可靠交付 | 有性能证据、工具链兼容规则和干净环境交付验收 | 条件规划，不提前实施 |
 
@@ -116,6 +116,11 @@ M18 完成之前不启动 M19 的语言/runtime 改动；可以记录设计问�
 
 统计定义必须精确：字节数还是字符数、最后一行无换行如何计数、CRLF 如何处理、空文件行数、过滤是字节子串还是 Unicode 文本规则。M19 默认选择 UTF-8 文本 + 明确的逐行/子串规则，不加入正则引擎、JSON 或网络。
 
+**实现状态（2026-09-23）**：H19-00..07 全部完成。交付物为 `examples/m19/textstats`（lib）与
+`examples/m19/dtext`（lib+bin，path 依赖 `textstats`），由两包 `dc test`、`tests/m19_app.rs` 与
+发行包冒烟验收；Linux/Windows/macOS 默认后端与 Linux LLVM 通过（macOS/Windows 平台缺陷修复记录
+见 M19 报告 H19-07-W/H19-07-M 节）。
+
 ### 5.2 决策批次 H19-00
 
 前置：M18 完成。规格已产出：[M19 规格](proposal-m19-cli-stdlib.md)与 [M19 进度报告](reports/m19-progress.md)；
@@ -144,14 +149,14 @@ D1–D3 已确认（规格第 12 节），后续代码批次从 H19-01 起逐批
 
 | 编号 | 工作 | 前置 | 状态 |
 | --- | --- | --- | --- |
-| H19-00 | API/目标程序/兼容决策冻结 | M18 | 完成（规格与 D1–D3 已确认；H19-01 待派发，见 [规格](proposal-m19-cli-stdlib.md)、[报告](reports/m19-progress.md)） |
+| H19-00 | API/目标程序/兼容决策冻结 | M18 | 完成（规格与 D1–D3 已确认，见 [规格](proposal-m19-cli-stdlib.md)、[报告](reports/m19-progress.md)） |
 | H19-01 | 应用参数、环境、dc run 转发 | H19-00 | 完成（`std.process` + `dc run --`，见 [报告](reports/m19-progress.md)） |
 | H19-02 | 标准流与字节 I/O | H19-01 | 完成（`std.error`/`std.io` 标准流，见 [报告](reports/m19-progress.md)） |
 | H19-03 | 文件操作与资源错误路径 | H19-02 | 完成（`std.fs` + `release`/`from_raw`，见 [报告](reports/m19-progress.md)） |
 | H19-04 | 必要文本/数字处理 | H19-03 | 完成（`std.text.lines`/`Builder`/`parse_i64`/`parse_u64`，见 [报告](reports/m19-progress.md)） |
 | H19-05 | 最小 dc test 与库开发闭环 | H19-04 | 完成（H19-05a/b/c：构建 + `tests/` 发现/harness/`std.test` + 子进程执行/超时/过滤/汇总，见 [报告](reports/m19-progress.md)） |
 | H19-06 | Result/defer 组合与有限语法补齐 | H19-05 | 完成（组合回归 ERR-01..04；未新增语法，见 [报告](reports/m19-progress.md)） |
-| H19-07 | 真实应用、文档、三平台验收 | H19-06 | 完成（Linux：`examples/m19` + `tests/m19_app.rs`；Windows 复验：本机默认 lane 全绿，发现并修复 4 个构建/运行时与 2 个测试/门禁缺陷；macOS 复验：默认 lane、LLVM 22 lane、发行包归档冒烟全绿，未发现产品缺陷，新增 2 个受控读写失败用例，见 [报告](reports/m19-progress.md)） |
+| H19-07 | 真实应用、文档、三平台验收 | H19-06 | 完成（Linux：`examples/m19` + `tests/m19_app.rs`；Windows 复验：本机默认 lane 全绿，发现并修复 4 个构建/运行时与 2 个测试/门禁缺陷；macOS 复验：默认 lane、LLVM 22 lane、发行包归档冒烟全绿，未发现产品缺陷，新增 2 个受控读写失败用例；三平台默认 lane 与远端 CI 已通过，见 [报告](reports/m19-progress.md)） |
 
 **H19-01：参数和环境。** 保留当前无参数 main 的源码兼容，推荐通过 std API 读取进程上下文；底层 argc/argv 已存在不代表语言能直接访问。`dc run <项目> [编译选项] -- <应用参数>` 必须原样传递空参数、空格、Unicode 和以 `-` 开头的参数，不经过 shell 拼接。env 缺项和编码失败按规格返回不同结果。验收 ARGS-01：直接运行与 dc run 参数一致；ARGS-02：参数转义/Unicode；ARGS-03：无环境项与非法输入；ARGS-04：main/exit 的历史行为不变。
 

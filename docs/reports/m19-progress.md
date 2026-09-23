@@ -1407,3 +1407,55 @@ python3 scripts/package.py --target aarch64-apple-darwin --out-dir /tmp/opencode
 3. macOS 本机开发若不带 `DYLD_FALLBACK_LIBRARY_PATH`，`dc` 链接仍会失败（M18 已记录、CI 已处理）；
    发行包不受影响。该环境项不是 M19 的产品缺陷，未在本批改产品代码。
 4. 本报告不把 M19 阶段记为完成；macOS 结果已出，等待用户确认。
+
+## M19 阶段验收与收尾（2026-09-23）
+
+- 范围：H19-00..07 全部批次 + H19-07-W（Windows 复验/修复）+ H19-07-M（macOS 复验）
+- 状态：**M19 完成**。代码实现、自动化验收、真实示例/工具流程、当前文档四种证据同时成立；
+  三平台（Linux/Windows/macOS）默认后端与 Linux LLVM 已由用户本机复验，远端 GitHub CI 由用户确认通过。
+- 收尾时 HEAD：`195e5b6`（`update gitignore`）；平台提交：`77c5717`（M19-07）、
+  `36f0042`（M19-07-win）、`e28e8d6`（M19-07-mac）。本收尾只更新状态/文档，未 commit/push/tag。
+
+### 阶段证据（四种）
+
+| 证据 | 内容 |
+| --- | --- |
+| 代码实现 | `std.process`/`std.error`/`std.io`/`std.fs`/`std.text`（`lines`/`Builder`/`parse_i64`/`parse_u64`）/`std.test`；`dc run --` 转发；`dc test`（构建 + `tests/` 发现/harness + 子进程执行/超时/分类/过滤/汇总）；`examples/m19/textstats`（lib）与 `examples/m19/dtext`（lib+bin，path 依赖） |
+| 自动化验收 | `tests/m19_args.rs`(ARGS-01..04)、`m19_io.rs`(IO-01..04)、`m19_fs.rs`(FS-01..06)、`m19_text.rs`(TEXT-01..04)、`m19_test_cmd.rs`(TEST-01..06，12 项)、`m19_errors.rs`(ERR-01..04)、`m19_app.rs`(7 项)；两示例包各自 `dc test` 5 项 |
+| 真实示例/工具流程 | `dtext` 实际接收 stdin/文件、输出固定三行、错误诊断与退出码 0/1/2；发行包归档冒烟含 m19 构建/运行与两包 `dc test`（`SMOKE_SEQUENCE_OK`，Linux/macOS；Windows 由 CI） |
+| 当前文档 | 本报告各批节；[规格](proposal-m19-cli-stdlib.md) 状态与 §11/§16；[路线图](../roadmap.md) M19 完成；[README](../README.md) 里程碑行；[implemented-features](../implemented-features.md) 头部/§1/§16.1/§17/§19；[交接指南](../plan-m18-plus.md) 状态表与 §5；[examples/m19/README](../../examples/m19/README.md) 与 examples 索引 |
+
+### 平台与 CI
+
+| 平台 | 默认后端（Cranelift × Debug/Release） | LLVM | 结论 |
+| --- | --- | --- | --- |
+| Linux x86_64 | 全量 `cargo test --workspace` 366 passed；`m19_app` 7 passed | 全量 373 passed、显式列表 196 passed、backend 4 passed | 通过（H19-07 节） |
+| Windows x86_64 | `m19_app` 6 passed（`app_06` Linux-only 跳过）、其余 M19 套件与默认 lane 364 passed | 本机无 LLVM 22 未运行（CI 矩阵亦只要求 Linux LLVM） | 通过（H19-07-W 节，修复 4 个构建/运行时 + 2 个测试/门禁缺陷） |
+| macOS arm64 | `m19_app` 8 passed、默认 lane 367 passed | LLVM 22 lane 374 passed、显式列表 197 passed、backend 4 passed | 通过（H19-07-M 节，无产品缺陷；新增受控读写失败用例） |
+| 远端 CI | 用户确认 GitHub Actions 三平台质量门禁与归档冒烟通过 | 同上（Linux LLVM lane） | 通过（用户确认；本机不访问远端） |
+
+### 收尾复核（本机在最终 HEAD 上重跑，仅 Linux）
+
+```bash
+cargo test -p dolphin-compiler --test m19_app                            # 7 passed
+cargo test -p dolphin-compiler --features llvm --test m19_app            # 7 passed
+cargo test --workspace --exclude dolphin-codegen-llvm                    # 366 passed
+```
+
+### 边界与未验证项
+
+- 三平台结果来自用户本机会话与远端 CI；本收尾未在 Windows/macOS 重跑，也未访问远端仓库。
+- Windows zip 归档冒烟的最终确认由 CI 承担（H19-07-W 本机未跑 `scripts/package.py --target
+  x86_64-pc-windows-msvc`）。
+- macOS 本机开发需 `DYLD_FALLBACK_LIBRARY_PATH`（M18 已记录、CI 已处理）；发行包不受影响。
+- 受控 `close(2)` 失败、`EINTR` 注入、SIGPIPE 行为仍无可移植/规格要求的覆盖；`--system-linker`
+  与 `dc test` 组合未单独运行。
+- M19 明确不做：allocator 参数、隐式析构、异常、`?`、闭包、线程/异步、宏、HashMap、正则、
+  JSON、网络、完整 Unicode 算法、稳定二进制 ABI（规格 §1 非目标）。
+
+### 下一阶段
+
+1. M20 从 H20-00 开始：新建 `docs/proposal-m20-project-tools.md`，冻结结构化诊断、共享项目分析
+   快照、overlay 生命周期、lib/bin 选择与 LSP 测试协议；该批完成前不实现项目分析或 LSP 代码。
+2. M19 的 `examples/m19` 与 `dc test` 是 M20 的验收对象（H20-04 的 FMT-06、H20-05 的整体流程）。
+3. M21 仍为条件规划，需 M19/M20 的真实项目与测量后再选优化。

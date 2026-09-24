@@ -10,7 +10,7 @@
 //! - 返回确定性顺序的图，供构建层消费；网络逻辑不在 lower/codegen 内。
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use crate::cache::Cache;
 use crate::lockfile;
@@ -173,6 +173,35 @@ fn same_remote_repository(source: &PackageSource, repository: &str) -> bool {
     )
 }
 
+/// 去掉 Windows `fs::canonicalize` 产生的扩展长度前缀：`\\?\C:\x` 变为 `C:\x`，
+/// `\\?\UNC\server\share\x` 变为 `\\server\share\x`。其余前缀与非 Windows 路径不变。
+///
+/// 分析 overlay 键与 LSP `file://` URI 都用普通绝对路径；带前缀的依赖源码路径会
+/// 使未保存文本不匹配、URI 变成 `file:////%3F/...`（H20 Windows 复验缺陷）。
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => {
+            let mut result = PathBuf::from(format!("{}:", letter as char));
+            result.extend(components);
+            result
+        }
+        Prefix::VerbatimUNC(server, share) => {
+            let mut result = PathBuf::from(format!(
+                "\\\\{}\\{}",
+                server.to_string_lossy(),
+                share.to_string_lossy()
+            ));
+            result.extend(components);
+            result
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
 /// 来源描述：仓库 ID 或规范化路径，不含凭据。
 fn describe_source(source: &PackageSource) -> String {
     match source {
@@ -320,13 +349,16 @@ impl Resolver<'_> {
             }
             return Ok(existing);
         }
-        let manifest = crate::manifest::load(&canonical)?;
+        // 身份键与锁文件来源仍用规范化路径；包根/源码路径去掉 `\\?\` 前缀，
+        // 以免该平台产物泄漏进诊断、overlay 键与 LSP URI。
+        let root = strip_verbatim_prefix(&canonical);
+        let manifest = crate::manifest::load(&root)?;
         let key = (
             manifest.package.group.clone(),
             manifest.package.name.clone(),
         );
         if let Some(existing) = self.by_name.get(&key).copied() {
-            let incoming = format!("path `{}`", canonical.display());
+            let incoming = format!("path `{}`", root.display());
             return Err(self.source_conflict(parent, &incoming, existing));
         }
         if manifest.lib.is_none() {
@@ -478,6 +510,68 @@ mod tests {
         );
         assert!(!root.join("dolphin.lock").exists(), "只读解析不得写锁");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Windows 回归：路径依赖的源码根不得带 `fs::canonicalize` 的 `\\?\` 扩展前缀。
+    ///
+    /// 分析 overlay 键与 LSP `file://` URI 都用普通绝对路径；带前缀的源码路径
+    /// 会使未保存依赖文本不生效、definition URL 变成 `file:////%3F/...`（H20 Windows 复验）。
+    #[test]
+    fn path_dependency_roots_avoid_windows_verbatim_prefix() {
+        let base = temp_dir("verbatim");
+        let dep = base.join("dep");
+        write(
+            &dep.join("dolphin.toml"),
+            "[package]\ngroup = \"org.example\"\nname = \"dep\"\nversion = \"1.0.0\"\n\n[lib]\npath = \"src/lib.do\"\n",
+        );
+        write(
+            &dep.join("src/lib.do"),
+            "pub fn value(): i32 { return 1; }\n",
+        );
+        let app = base.join("app");
+        write(
+            &app.join("dolphin.toml"),
+            "[package]\ngroup = \"g\"\nname = \"app\"\nversion = \"0.1.0\"\n\n[[bin]]\nname = \"app\"\npath = \"src/main.do\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n",
+        );
+        write(&app.join("src/main.do"), "fn main() { return value(); }\n");
+
+        let manifest = crate::manifest::load(&app).unwrap();
+        let graph = resolve_paths_only(&manifest).expect("path-only graph resolves");
+        let package = graph
+            .packages
+            .iter()
+            .find(|package| package.name() == "dep")
+            .expect("dep package");
+        let root = package.manifest.root.to_string_lossy().into_owned();
+        let source = package.source_root.to_string_lossy().into_owned();
+        assert!(!root.starts_with(r"\\?\"), "包根不得带扩展前缀：{root}");
+        assert!(
+            !source.starts_with(r"\\?\"),
+            "源码根不得带扩展前缀：{source}"
+        );
+        assert!(
+            source.ends_with("dep\\src") || source.ends_with("dep/src"),
+            "源码根必须指向 `../dep/src`：{source}"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Windows 前缀剥离的盘符/UNC 两个分支；非 Windows 不适用。
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_windows_prefixes_are_stripped() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\proj\src")),
+            PathBuf::from(r"C:\proj\src")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share\src")),
+            PathBuf::from(r"\\server\share\src")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"C:\proj\src")),
+            PathBuf::from(r"C:\proj\src")
+        );
     }
 
     #[test]

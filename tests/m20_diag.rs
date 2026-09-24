@@ -83,6 +83,11 @@ fn file_uri(path: &Path) -> String {
     }
 }
 
+/// CLI `Diagnostic::at` 渲染的路径：Windows 也使用正斜杠（M20 规格 §4.1）。
+fn cli_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 /// DIAG-01：CLI `E0001` 文本位置与 LSP `code`/UTF-16 range 完全一致。
 #[test]
 fn diag_01_cli_and_lsp_same_error_identity() {
@@ -101,7 +106,7 @@ fn diag_01_cli_and_lsp_same_error_identity() {
         "CLI 首行必须是 E0001 纯消息：{stderr}"
     );
     assert!(
-        stderr.contains(&format!(" --> {}:1:20\n", file.display())),
+        stderr.contains(&format!(" --> {}:1:20\n", cli_path(&file))),
         "CLI 位置必须是 1:20：{stderr}"
     );
 
@@ -160,13 +165,11 @@ fn diag_02_two_files_independent_errors() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr_text(&output));
     let stderr = stderr_text(&output);
     assert!(
-        stderr.contains("error[E0001]: expected `}` after block")
-            && stderr.contains(&a.display().to_string()),
+        stderr.contains("error[E0001]: expected `}` after block") && stderr.contains(&cli_path(&a)),
         "CLI 缺少 a.do 的语法错误：{stderr}"
     );
     assert!(
-        stderr.contains("error[E0001]: unknown type `Missing`")
-            && stderr.contains(&b.display().to_string()),
+        stderr.contains("error[E0001]: unknown type `Missing`") && stderr.contains(&cli_path(&b)),
         "CLI 缺少 b.do 的声明级错误：{stderr}"
     );
 
@@ -199,11 +202,11 @@ fn diag_03_non_bmp_and_crlf_positions() {
     let stderr = stderr_text(&output);
     assert!(!stderr.contains("panicked"), "诊断不得 panic：{stderr}");
     assert!(
-        stderr.contains(&format!(" --> {}:2:12\n", file.display())),
+        stderr.contains(&format!(" --> {}:2:12\n", cli_path(&file))),
         "第 2 行（非 BMP 前）位置必须是 2:12：{stderr}"
     );
     assert!(
-        stderr.contains(&format!(" --> {}:3:12\n", file.display())),
+        stderr.contains(&format!(" --> {}:3:12\n", cli_path(&file))),
         "第 3 行（非 BMP 后、CRLF）位置必须是 3:12：{stderr}"
     );
 

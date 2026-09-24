@@ -312,7 +312,7 @@ fn fmt_04_check_writes_nothing() {
             ("src/main.do", "fn main() {\nval x = 1;\n}\n"),
         ],
     );
-    let file = project.join("src/main.do");
+    let file = project.join("src").join("main.do");
     let original = fs::read_to_string(&file).unwrap();
 
     let check = run_dc(&home, &["fmt", "--check", project.to_str().unwrap()]);

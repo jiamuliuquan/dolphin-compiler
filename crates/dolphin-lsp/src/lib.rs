@@ -991,10 +991,11 @@ mod tests {
     #[test]
     fn definition_points_to_declaration() {
         let mut server = initialized();
-        let uri = "file:///definition.do";
+        // 平台绝对路径的 `file://` URI（Windows 为盘符形式；单文件路径经 URI 往返）。
+        let uri = path_to_uri(&std::env::temp_dir().join("definition.do"));
         open(
             &mut server,
-            uri,
+            &uri,
             "fn helper() { return; }\nfn main() { helper(); return; }\n",
         );
         let outputs = server.handle(json!({
@@ -1007,7 +1008,7 @@ mod tests {
             }
         }));
         let location = &outputs[0]["result"];
-        assert_eq!(location["uri"], uri);
+        assert_eq!(location["uri"], uri.as_str());
         assert_eq!(location["range"]["start"]["line"], 0);
         assert_eq!(location["range"]["start"]["character"], 3);
     }
@@ -1108,16 +1109,11 @@ mod tests {
 
     #[test]
     fn related_information_maps_secondary_labels() {
-        let primary = SourceFile::with_id(
-            SourceId(0),
-            PathBuf::from("/a.do"),
-            "fn a() {}\n".to_string(),
-        );
-        let related = SourceFile::with_id(
-            SourceId(1),
-            PathBuf::from("/b.do"),
-            "fn b() {}\n".to_string(),
-        );
+        let base = std::env::temp_dir();
+        let primary =
+            SourceFile::with_id(SourceId(0), base.join("a.do"), "fn a() {}\n".to_string());
+        let related =
+            SourceFile::with_id(SourceId(1), base.join("b.do"), "fn b() {}\n".to_string());
         let files = vec![primary, related];
         let map = SourceMap::new(&files);
         let diagnostic = Diagnostic::at(&files[0], Span::new(3, 4), "duplicate").with_label(
@@ -1131,7 +1127,10 @@ mod tests {
         assert_eq!(value["range"]["start"]["character"], 3);
         let related_info = value["relatedInformation"].as_array().unwrap();
         assert_eq!(related_info.len(), 1);
-        assert_eq!(related_info[0]["location"]["uri"], "file:///b.do");
+        assert_eq!(
+            related_info[0]["location"]["uri"],
+            path_to_uri(&files[1].path).as_str()
+        );
         assert_eq!(related_info[0]["message"], "previous definition");
         assert_eq!(
             related_info[0]["location"]["range"]["start"]["character"],

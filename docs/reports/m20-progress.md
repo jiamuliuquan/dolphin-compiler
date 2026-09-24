@@ -686,3 +686,197 @@ formatted /tmp/dolphin-m20-fmt-fmt03-.../project/src/m_good.do
    或新增 macOS LLVM lane（成本另评）；未验证前不得用 Linux 结果代替。
 4. **H21-00**：M20 经用户验收后按计划派发（`docs/proposal-m21-delivery.md` 冻结交付/性能/兼容决策）；
    本批不提前实现 M21。
+
+## H20-W Windows 平台复验与缺陷修复
+
+- 批次：M20（H20-01..05）完成后的 Windows 平台复验补充节（沿用 H19-07-W 做法，不新增批次编号；
+  含使复验通过所需的最小缺陷修复）
+- 状态：**完成（Windows 11 企业版 build 26200 x86_64 本机：默认 Cranelift lane 58 harness
+  444 passed / 0 failed；M20 显式套件 m20_diag/m20_analysis/m20_lsp/m20_fmt 全绿；门禁
+  fmt/clippy/Release 构建/`dc fmt --check` 通过；首跑发现的 5 个失败目标全部定位并修复。
+  LLVM lane、`m20_debug`（本机无 LLVM 22 开发环境，且 §9.1 明确 Windows/PDB 不在范围）、
+  macOS 与远端 CI 未验证）**
+- 前置批次及报告：H20-05 / 本文件上一节
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`63a796919ed9fc1f425fc04db424ad687b2ec377`（`v0.3.0-M20-05`）；工作区干净。
+- 本批修改：
+  - `crates/dolphin-package/src/resolver.rs`：路径依赖根去除 Windows `\\?\` 扩展前缀（产品修复）
+    + 2 个 Windows 回归单测；
+  - `crates/dolphin-lsp/src/lib.rs`：2 个单测改用平台绝对路径期望（测试修复）；
+  - `tests/m20_diag.rs`：DIAG-01/02/03 的 CLI 路径期望按冻结的正斜杠渲染规则（测试修复）；
+  - `tests/m20_fmt.rs`：FMT-04 期望路径不再混用分隔符（测试修复）；
+  - 本报告与 `docs/plan-m18-plus.md` H20 状态同步。
+- 未 commit/push/tag；未改 `dolphin.toml`/`dolphin.lock`/`.dlib` 格式，未改 IR/layout/lower/runtime。
+
+### 环境
+
+| 项 | 值 |
+| --- | --- |
+| 平台 | Windows 11 企业版（build 26200），x86_64 |
+| rustc / cargo | 1.98.1（host `x86_64-pc-windows-msvc`） |
+| C 编译器 | Visual Studio 2022 Community MSVC 19.44.35228（`cl` 不在 PATH；全部 cargo 命令经 `vcvars64.bat` 激活，与 CI 的 `ilammy/msvc-dev-cmd` 等价） |
+| LLVM 22 dev | 不存在（无 `llvm-config`）；未构建/未运行 `--features llvm`，`m20_debug` 默认 lane 为 0 tests |
+| 调试器 | 本机有 scoop `lldb.exe`，但无 LLVM 22 开发环境，DBG 未在 Windows 尝试（§9.1 Windows/PDB 不在范围） |
+| 系统代码页 | 936（日志中的中文输出会显示乱码；本报告消息文本以测试源码断言为准） |
+| git EOL | `core.autocrlf=true` + 仓库 `.gitattributes`（`eol=lf`），工作树 LF |
+
+### 复验前失败清单（Windows 默认 lane，首跑）
+
+`cargo test --workspace --exclude dolphin-codegen-llvm` 首跑退出 101：5 个目标失败，其余全绿
+（日志：`%TEMP%\opencode\m20-win\workspace-default-nff.log`，未提交）。
+
+| # | 目标 / 测试 | 固定期望（断言） | 实际 | 类型 |
+| --- | --- | --- | --- | --- |
+| 1 | `m20_analysis::analysis_02_unsaved_dependency_affects_caller` | overlay path 依赖后 `partial=true` 且调用方 1 条 `E0001 expected \`i32\`, found \`bool\`` | `partial=false`、0 诊断（overlay 未命中） | **产品缺陷** |
+| 2 | `m20_lsp::lsp_02_cross_file_and_cross_package_definition` | definition URI `file:///C:/…/stats/src/lib.do` | `file:////%3F/C:/…`（`\\?\` 被百分号编码） | **产品缺陷** |
+| 3 | `m20_lsp::lsp_04_open_change_close_dependency_change` | 依赖 overlay 后发布调用方诊断 | 10s 内无通知（overlay 未命中，诊断无变化） | **产品缺陷** |
+| 4 | `m20_lsp::lsp_07_m19_development_flow` | 跨包 definition URI 为盘符形式 | 同 #2 | **产品缺陷** |
+| 5 | `m20_diag::diag_01/02/03` | CLI `-->` 行为 `C:/…`（规格 §4.1 Windows 正斜杠规则） | 测试用 `Path::display()` 的 `C:\…` 比较 | 测试期望缺陷 |
+| 6 | `m20_fmt::fmt_04_check_writes_nothing` | `would reformat <path>\src\main.do` | 测试期望 `…\project\src/main.do`（`join` 混用分隔符） | 测试期望缺陷 |
+| 7 | `dolphin-lsp::tests::definition_points_to_declaration` | 单文件定位回原 URI | 测试用 `/definition.do` 在 Windows 不是绝对路径，被按 cwd 绝对化 | 测试期望缺陷 |
+| 8 | `dolphin-lsp::tests::related_information_maps_secondary_labels` | relatedInformation URI | 同上（`/b.do`） | 测试期望缺陷 |
+
+### 根因与修复
+
+| # | 位置 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1–4 | `crates/dolphin-package/src/resolver.rs::acquire_path` | `fs::canonicalize` 在 Windows 返回扩展长度路径 `\\?\C:\…`，被写入 `manifest.root`/`source_root`，泄漏到分析源码路径；overlay 键（普通路径）与单元源码路径（`\\?\`）不同 ⇒ overlay 永不命中；`path_to_uri` 把 `?` 编码为 `%3F` | 规范化路径继续用于 `by_path` 身份键、`PackageSource::Path` 与锁文件；包根/源码路径经新的 `strip_verbatim_prefix`（盘符与 UNC 两个分支）去掉 `\\?\` 后加载清单 |
+| 5 | `tests/m20_diag.rs` | 规格冻结 CLI 渲染为正斜杠，测试期望未按平台归一 | 新增 `cli_path()`（`to_string_lossy().replace('\\', "/")`），与 `tests/ffi.rs`/`packages.rs` 既有约定一致 |
+| 6 | `tests/m20_fmt.rs` | `project.join("src/main.do")` 在 Windows 保留 `/`，与 `dc fmt` 递归发现的 `\` 不同 | 改为 `project.join("src").join("main.do")` |
+| 7–8 | `crates/dolphin-lsp/src/lib.rs` 单测 | 单测 fixture 使用 Unix 风格 `/x.do`；Windows 上非绝对路径，`path_to_uri` 按 cwd 绝对化（文档化行为） | fixture 改用 `std::env::temp_dir().join(...)`；期望用 `path_to_uri(&file.path)` 生成，平台无关 |
+
+产品修复未改 Linux 行为：非 Windows 无 `Prefix` 组件，`strip_verbatim_prefix` 原样返回；
+锁文件 `relative_path` 内部仍自行 `canonicalize`，输出格式不变。
+
+### 修复前复现结果
+
+```text
+# 1 analysis_02（产品缺陷）
+thread 'analysis_02_unsaved_dependency_affects_caller' panicked at tests\m20_analysis.rs:219:5:
+overlay 后必须 partial=true
+
+# 2/4 lsp_02 / lsp_07（产品缺陷）
+assertion `left == right` failed
+  left: String("file:////%3F/C:/Users/…/stats/src/lib.do")
+ right: "file:///C:/Users/…/stats/src/lib.do"
+
+# 3 lsp_04（产品缺陷）
+language server did not respond within 10s; stderr:
+
+# 5 diag_01（测试期望）
+CLI 位置必须是 1:20：error[E0001]: unknown variable `missing`
+ --> C:/Users/…/main.do:1:20          # 行/列正确，仅测试期望路径反斜杠不匹配
+
+# 6 fmt_04（测试期望）
+  left: "would reformat C:\\…\\project\\src\\main.do\n"     # dc 实际输出
+ right: "would reformat C:\\…\\project\\src/main.do\n"      # 测试 join 混用分隔符
+
+# 7–8 dolphin-lsp 单测（测试期望）
+  left: String("file:///C:/definition.do")
+ right: "file:///definition.do"
+```
+
+新增回归（先失败后通过）：`dolphin-package` 单测
+`resolver::tests::path_dependency_roots_avoid_windows_verbatim_prefix`（修复前失败文本
+`包根不得带扩展前缀：\\?\C:\…\dep`）与 `resolver::tests::verbatim_windows_prefixes_are_stripped`
+（`#[cfg(windows)]`，盘符/UNC 分支）。
+
+### 修复后结果（固定期望、真实测试名；Windows 默认后端 Cranelift）
+
+| 验收 | 测试（Windows 实际运行） | 固定期望 | 结果 |
+| --- | --- | --- | --- |
+| DIAG-01 | `diag_01_cli_and_lsp_same_error_identity` | `error[E0001]: unknown variable \`missing\``、`--> C:/…:1:20`、exit 1；LSP `code=E0001`、UTF-16 `(0,19)-(0,26)` | 通过 |
+| DIAG-02 | `diag_02_two_files_independent_errors` | 两 bin 的 `expected \`}\` after block` 与 `unknown type \`Missing\`` 同现在 CLI/LSP | 通过 |
+| DIAG-03 | `diag_03_non_bmp_and_crlf_positions` | CRLF、非 BMP 前后位置 `2:12`/`3:12`；LSP `(1,11)`/`(2,11)`；无 panic | 通过 |
+| DIAG-04 | `diag_04_generic_chain_and_user_type_names` | 可读限定名，无 `TypeId(`/`struct@` | 通过 |
+| DIAG-05 | `diag_05_error_program_no_panic_no_artifact` | exit 1、无产物、stderr 无 `panicked` | 通过 |
+| DIAG-06 | `diag_06_error_collection_bound` | 词法/语法/声明级各 100 条 + `E0002` | 通过 |
+| ANALYSIS-01 | `analysis_01_no_network_no_lock_write_no_artifacts` | 零网络/零写锁/零产物、`E1001` 文本含 `dc fetch` | 通过 |
+| ANALYSIS-02 | `analysis_02_unsaved_dependency_affects_caller` | overlay 后 1 条 `expected \`i32\`, found \`bool\``、primary 为 app；关闭后恢复 | 通过（修复后） |
+| ANALYSIS-03 | `analysis_03_library_without_main` | lib-only 无误报；bin 缺 main 报项目诊断 | 通过 |
+| ANALYSIS-04 | `analysis_04_multi_bin_and_custom_source` | `[Lib, Bin(first), Bin(second)]`、自定义 `code/`、共享文件取 Lib | 通过 |
+| ANALYSIS-05 | `analysis_05_same_name_different_package_not_confused` | 同名不同包 `DefId`/签名/定义文件不同 | 通过 |
+| ANALYSIS-06 | `analysis_06_cli_build_behavior_unchanged` | `dc build`（Debug）与 `--release` 均 exit 42、stderr 空、快照零写入 | 通过 |
+| LSP-01 | `lsp_01_pkg_use_type_error` | `version=1`、1 条 `E0001 expected \`bool\`, found \`i32\``、range 覆盖 `count()` | 通过 |
+| LSP-02 | `lsp_02_cross_file_and_cross_package_definition` | `helper`→根包 `src/util.do` 0:7-0:13；`count`→依赖 `stats/src/lib.do` 盘符 URI；hover ``fn `helper` ``/``fn `stats.count` `` | 通过（修复后） |
+| LSP-03 | `lsp_03_local_shadowing_and_parameters` | 遮蔽/参数解析到最近绑定；hover ``local `value`: i32`` | 通过 |
+| LSP-04 | `lsp_04_open_change_close_dependency_change` | 依赖 overlay→调用方 `version=1` 诊断；didClose 空诊断；URI 字典序发布 | 通过（修复后） |
+| LSP-05 | `lsp_05_sequential_versions_latest_wins` | 2→3 版本各发对应诊断；旧版本忽略；`documentSymbol=[main, extra]` | 通过 |
+| LSP-06 | `lsp_06_unknown_request_lifecycle_conformance` | `-32002`/`-32601`/`-32600`、shutdown 后 exit 0、未 shutdown exit 1、EOF 0 | 通过 |
+| LSP-07 | `lsp_07_m19_development_flow` | 真实 `examples/m19/dtext`：跨文件/跨包 definition、未保存错误→修复 | 通过（修复后） |
+| 补充 | `lsp_accepts_no_project_argument`/`lsp_non_file_uri_stays_single_file`/`lsp_project_failure_keeps_syntax_diagnostics`/`lsp_malformed_frame_terminates_with_error` | 无参可 initialize；`untitled:` 单文件；HTTP 依赖失败保留语法诊断；超限帧退出 1 | 通过 |
+| FMT-01 | `fmt_01_idempotent_on_examples_and_fixtures` | 37 个示例/标准库文件 + 4 fixture 幂等 | 通过 |
+| FMT-02 | `fmt_02_token_preservation_and_comments` | 非 trivia token 与注释文本不变 | 通过 |
+| FMT-03 | `fmt_03_error_file_not_written_all_or_nothing` | 坏文件时全项目逐字节不变、exit 1 | 通过 |
+| FMT-04 | `fmt_04_check_writes_nothing` | `--check` 零写入；`formatted`/`would reformat` 固定 stdout | 通过（修复后） |
+| FMT-05 | `fmt_05_project_discovery_and_crlf` | 清单 `source` 发现、排除 `out`/`.git`、CRLF→LF（目录符号链接用例 `#[cfg(unix)]` 按预期跳过） | 通过 |
+| FMT-06 | `fmt_06_m1_m19_examples_behavior_preserved` | 14 个示例格式化后固定构建/运行输出；m19 两包各 `5 passed` | 通过 |
+| DBG-01..04 | `m20_debug.rs`（需 `llvm` feature） | — | **未运行**（默认 lane 0 tests，不算通过；本机无 LLVM 22，§9.1 Windows/PDB 不在范围） |
+
+补充单测（Windows 实跑）：`dolphin-analysis` 17 passed（含 overlay stale、URI 盘符、单元选择、
+作用域解析）；`dolphin-lsp` 15 passed（含修复后的 2 个 URI 期望单测）；`dolphin-package`
+27 passed（含 2 个新增 Windows 前缀回归）。
+
+### 实际运行命令与结果
+
+全部经 `vcvars64.bat` 激活 MSVC（脚本与日志在 `%TEMP%\opencode\m20-win\`，未提交）。
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings` | 通过 |
+| `cargo test --workspace --exclude dolphin-codegen-llvm --no-fail-fast` | 58 harness 共 444 passed；0 failed；exit 0（首跑 5 目标失败见上） |
+| `cargo test -p dolphin-compiler --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt --test m20_debug` | 6 + 6 + 11 + 6 + 0 passed；0 failed（m20_debug 0 tests 按未运行计） |
+| `cargo test -p dolphin-analysis -p dolphin-lsp -p dolphin-package` | 17 + 15 + 27 passed；0 failed |
+| `cargo build --release --bins` | 通过 |
+| `.\target\release\dc.exe fmt --check examples crates/dolphin-std/src` | 通过（exit 0） |
+| `cargo test -p dolphin-package path_dependency_roots_avoid_windows_verbatim_prefix` | 修复前失败（`\\?\…\dep`），修复后通过 |
+
+计数差异说明：Windows 444 = H20-05 Linux 默认 lane 444 − `app_06_write_failure_not_trap`
+（`#[cfg(target_os = "linux")]`）+ 本批新增的 `cfg(windows)` 前缀单测；M20 各套件
+（DIAG 6、ANALYSIS 6、LSP 11、FMT 6）两端计数一致。
+
+### 行为/兼容变化
+
+- **Windows 产品修复**：路径依赖的 `manifest.root`/`source_root`（及派生的 lib/bin/native 源码路径）
+  不再带 `fs::canonicalize` 的 `\\?\` 扩展前缀；`PackageSource::Path`、`by_path` 身份键与
+  `dolphin.lock` 相对路径算法不变。效果：依赖文件诊断/definition URI 为盘符形式，未保存依赖
+  overlay 生效；`dc build`/`lock`/归档格式与输出不变（ANALYSIS-06 通过）。
+- **Linux/macOS**：`strip_verbatim_prefix` 在无 `Prefix` 组件时原样返回，Linux 行为逐字节不变；
+  未改 `unix_runtime.c`、IR/layout/lower/codegen。macOS 的 canonicalize 符号链接解析
+  （如 `/var`→`/private/var`）不在本批改动范围，见未验证项。
+- **测试**：4 处平台期望修正（CLI 正斜杠、`join` 分隔符、URI 平台绝对路径），断言强度不变；
+  新增 2 个 Windows 回归单测（其中 UNC/盘符分支仅 Windows 运行）。
+
+### 未验证项（不得当作通过）
+
+1. **LLVM lane**：本机无 `llvm-config`/LLVM 22 开发库，`--features llvm`、`tests/backend.rs`
+   与 LLVM × M20 组合未在 Windows 运行；Windows 只满足“默认 lane”，Linux LLVM lane
+   仍以既有 H20-01..05 报告为准。
+2. **DBG-01..04 / `m20_debug`**：Windows 默认 lane 0 tests，按规格计未运行；§9.1 明确
+   Windows/PDB 不在 M20 调试范围。本机虽有 scoop lldb，但无 LLVM 22 开发环境，不做替代验证。
+3. **macOS**：H20-01..05 的 macOS 默认 lane 从未运行；其中 `dolphin-analysis` 的 URI 盘符单测
+   在 macOS 会走非 Windows 分支，但 `lsp_02/04/07`、`analysis_02` 依赖路径在 macOS 经
+   `canonicalize` 会解析 `/var`→`/private/var` 等符号链接（与测试/客户端的词法路径可能不同），
+   本批未改该行为，macOS 复验需先确认真实结果。
+4. **远端 CI**：未 push/tag，未运行 GitHub Actions；本机结果为 Windows 默认 lane 的补充证据，
+   不替代 CI。
+5. **发行包/归档冒烟**：未运行 `python scripts/package.py --target x86_64-pc-windows-msvc`
+   与 `ci.yml` 归档冒烟序列（H19 报告遗留项，非 H20 验收项）。
+6. **能力文档**：`implemented-features.md`/`roadmap.md` 未更新（按 §11，M20 阶段完成并经用户
+   确认后再更新）。
+
+### 剩余问题和下一批输入
+
+1. **M20 阶段收尾（需用户确认）**：本补充节使 H20-01..05 的“三平台默认 lane”中
+   Windows 一项落实；第 12.6 节四种证据的“当前文档”仍需用户确认后更新
+   `implemented-features.md`/`roadmap.md`/README 进度表。本补充节不把 M20 记为完成。
+2. **macOS 复验**：建议在 macOS 上运行 `cargo test --workspace --exclude dolphin-codegen-llvm`
+   与 `cargo test -p dolphin-compiler --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt`；
+   若 `analysis_02`/`lsp_02`/`lsp_04`/`lsp_07` 因 `/var`→`/private/var` 失败，需另行决策是否把
+   依赖包根改为词法绝对路径（会影响 macOS 表示，需先确认），不在本批擅自扩大。
+3. **远端 CI**：Windows lane 应重跑默认 lane 并保持 `m20_*` 显式列表；LLVM lane（Ubuntu）继续
+   覆盖 `m20_debug`。
+4. **H21-00**：M20 经用户验收后按计划派发；本补充节不提前实现 M21。

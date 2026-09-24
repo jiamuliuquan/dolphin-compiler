@@ -14,7 +14,7 @@ window.DolphinDocsContent["en-US"].groups.push({
 <h2>1. Install the compiler</h2>
 <p>Releases cover three tier-1 platforms: Linux x86_64, macOS ARM64 and Windows x86_64. Download the archive, unpack it anywhere, and add the directory to <code>PATH</code>:</p>
 <pre><code>mkdir -p ~/.local/dolphin
-tar xzf dolphin-0.3.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
+tar xzf dolphin-0.4.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
 export PATH="$HOME/.local/dolphin:$PATH"</code></pre>
 <p>Inside the archive, <code>dc</code> is the compiler command and <code>rust-lld</code> is the bundled linker; they must stay in the same directory. See the <a href="../install.html">installation guide</a> for checksums and uninstall steps.</p>
 <p>Verify the installation:</p>

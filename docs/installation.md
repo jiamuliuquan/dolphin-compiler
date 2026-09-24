@@ -18,10 +18,10 @@ Dolphin 编译器以携带预编译 Dolphin 运行时与 LLD 的发行包发布�
 
 ```bash
 # Linux / macOS
-sha256sum -c dolphin-0.3.0-x86_64-unknown-linux-gnu.sha256
+sha256sum -c dolphin-0.4.0-x86_64-unknown-linux-gnu.sha256
 
 # Windows（PowerShell）
-Get-FileHash dolphin-0.3.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-FileHash dolphin-0.4.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 ```
 
 ## 2. 发行包内容
@@ -47,13 +47,13 @@ README.md              说明文档
 ```bash
 # Linux / macOS
 mkdir -p ~/.local/dolphin
-tar xzf dolphin-0.3.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
+tar xzf dolphin-0.4.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
 export PATH="$HOME/.local/dolphin:$PATH"   # 建议写入 ~/.bashrc 或 ~/.zshrc
 ```
 
 ```powershell
 # Windows（PowerShell）
-Expand-Archive dolphin-0.3.0-x86_64-pc-windows-msvc.zip -DestinationPath "$env:USERPROFILE\dolphin"
+Expand-Archive dolphin-0.4.0-x86_64-pc-windows-msvc.zip -DestinationPath "$env:USERPROFILE\dolphin"
 $env:Path = "$env:USERPROFILE\dolphin;$env:Path"   # 建议用系统环境变量持久化
 ```
 

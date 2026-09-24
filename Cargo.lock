@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "dolphin-analysis"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-hir",
  "dolphin-ir",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "dolphin-backend"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-ir",
  "dolphin-platform",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "dolphin-codegen-cranelift"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "dolphin-codegen-llvm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-backend",
  "dolphin-ir",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "dolphin-compiler"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "dolphin-analysis",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "dolphin-driver"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-backend",
  "dolphin-codegen-cranelift",
@@ -461,14 +461,14 @@ dependencies = [
 
 [[package]]
 name = "dolphin-format"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-source",
 ]
 
 [[package]]
 name = "dolphin-hir"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-ir",
  "dolphin-package",
@@ -479,14 +479,14 @@ dependencies = [
 
 [[package]]
 name = "dolphin-ir"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-syntax",
 ]
 
 [[package]]
 name = "dolphin-linker"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-platform",
  "dolphin-source",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "dolphin-lsp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-analysis",
  "dolphin-source",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "dolphin-package"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-source",
  "serde",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "dolphin-platform"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-source",
  "target-lexicon",
@@ -526,15 +526,15 @@ dependencies = [
 
 [[package]]
 name = "dolphin-source"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "dolphin-std"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "dolphin-syntax"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dolphin-source",
 ]

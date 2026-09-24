@@ -100,13 +100,13 @@
 
           <div class="tab-panel is-active" id="tab-linux">
             <h3 data-i18n="install.step.download">1. 下载归档</h3>
-            <pre><code>curl -LO https://github.com/foxlab/dolphin-compiler/releases/download/v0.3.0-M19/dolphin-0.3.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/foxlab/dolphin-compiler/releases/download/v0.3.0-M19/dolphin-0.3.0-x86_64-unknown-linux-gnu.sha256</code></pre>
+            <pre><code>curl -LO https://github.com/foxlab/dolphin-compiler/releases/download/v0.4.0/dolphin-0.4.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/foxlab/dolphin-compiler/releases/download/v0.4.0/dolphin-0.4.0-x86_64-unknown-linux-gnu.sha256</code></pre>
             <h3 data-i18n="install.step.verify">2. 校验完整性</h3>
-            <pre><code>sha256sum -c dolphin-0.3.0-x86_64-unknown-linux-gnu.sha256</code></pre>
+            <pre><code>sha256sum -c dolphin-0.4.0-x86_64-unknown-linux-gnu.sha256</code></pre>
             <h3 data-i18n="install.step.extract">3. 解压并加入 PATH</h3>
             <pre><code>mkdir -p ~/.local/dolphin
-tar xzf dolphin-0.3.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
+tar xzf dolphin-0.4.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
 echo 'export PATH="$HOME/.local/dolphin:$PATH"' &gt;&gt; ~/.bashrc</code></pre>
             <h3 data-i18n="install.step.verifyenv">4. 验证安装</h3>
             <pre><code>dc --version
@@ -115,13 +115,13 @@ dc env</code></pre>
 
           <div class="tab-panel" id="tab-macos">
             <h3 data-i18n="install.step.download">1. 下载归档</h3>
-            <pre><code>curl -LO https://github.com/foxlab/dolphin-compiler/releases/download/v0.3.0-M19/dolphin-0.3.0-aarch64-apple-darwin.tar.gz
-curl -LO https://github.com/foxlab/dolphin-compiler/releases/download/v0.3.0-M19/dolphin-0.3.0-aarch64-apple-darwin.sha256</code></pre>
+            <pre><code>curl -LO https://github.com/foxlab/dolphin-compiler/releases/download/v0.4.0/dolphin-0.4.0-aarch64-apple-darwin.tar.gz
+curl -LO https://github.com/foxlab/dolphin-compiler/releases/download/v0.4.0/dolphin-0.4.0-aarch64-apple-darwin.sha256</code></pre>
             <h3 data-i18n="install.step.verify">2. 校验完整性</h3>
-            <pre><code>shasum -a 256 -c dolphin-0.3.0-aarch64-apple-darwin.sha256</code></pre>
+            <pre><code>shasum -a 256 -c dolphin-0.4.0-aarch64-apple-darwin.sha256</code></pre>
             <h3 data-i18n="install.step.extract">3. 解压并加入 PATH</h3>
             <pre><code>mkdir -p ~/.local/dolphin
-tar xzf dolphin-0.3.0-aarch64-apple-darwin.tar.gz -C ~/.local/dolphin
+tar xzf dolphin-0.4.0-aarch64-apple-darwin.tar.gz -C ~/.local/dolphin
 echo 'export PATH="$HOME/.local/dolphin:$PATH"' &gt;&gt; ~/.zshrc</code></pre>
             <h3 data-i18n="install.step.verifyenv">4. 验证安装</h3>
             <pre><code>dc --version
@@ -130,12 +130,12 @@ dc env</code></pre>
 
           <div class="tab-panel" id="tab-windows">
             <h3 data-i18n="install.step.download">1. 下载归档</h3>
-            <pre><code>Invoke-WebRequest -Uri https://github.com/foxlab/dolphin-compiler/releases/download/v0.3.0-M19/dolphin-0.3.0-x86_64-pc-windows-msvc.zip `
-  -OutFile dolphin-0.3.0-x86_64-pc-windows-msvc.zip</code></pre>
+            <pre><code>Invoke-WebRequest -Uri https://github.com/foxlab/dolphin-compiler/releases/download/v0.4.0/dolphin-0.4.0-x86_64-pc-windows-msvc.zip `
+  -OutFile dolphin-0.4.0-x86_64-pc-windows-msvc.zip</code></pre>
             <h3 data-i18n="install.step.verify">2. 校验完整性</h3>
-            <pre><code>Get-FileHash dolphin-0.3.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256</code></pre>
+            <pre><code>Get-FileHash dolphin-0.4.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256</code></pre>
             <h3 data-i18n="install.step.extract">3. 解压并加入 PATH</h3>
-            <pre><code>Expand-Archive dolphin-0.3.0-x86_64-pc-windows-msvc.zip `
+            <pre><code>Expand-Archive dolphin-0.4.0-x86_64-pc-windows-msvc.zip `
   -DestinationPath "$env:USERPROFILE\dolphin"
 $env:Path = "$env:USERPROFILE\dolphin;$env:Path"</code></pre>
             <h3 data-i18n="install.step.verifyenv">4. 验证安装</h3>

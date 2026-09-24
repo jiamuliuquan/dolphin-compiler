@@ -14,7 +14,7 @@ window.DolphinDocsContent["zh-CN"].groups.push({
 <h2>1. 安装编译器</h2>
 <p>发行包提供三个一级平台的归档：Linux x86_64、macOS ARM64 与 Windows x86_64。下载后解压到任意目录，并把该目录加入 <code>PATH</code>：</p>
 <pre><code>mkdir -p ~/.local/dolphin
-tar xzf dolphin-0.3.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
+tar xzf dolphin-0.4.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
 export PATH="$HOME/.local/dolphin:$PATH"</code></pre>
 <p>解压目录中的 <code>dc</code> 是编译器主命令，<code>rust-lld</code> 是随包分发的链接器，二者必须位于同一目录。完整的平台说明、校验和与卸载方式见 <a href="../install.html">安装指南</a>。</p>
 <p>验证安装：</p>

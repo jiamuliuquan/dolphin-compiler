@@ -645,14 +645,44 @@ impl MonoState {
         Ok(())
     }
 
-    fn type_display(&self, id: TypeId) -> String {
-        let key = &self.type_keys[id.0];
-        if key.args.is_empty() {
-            key.name.clone()
-        } else {
-            let args: Vec<String> = key.args.iter().map(|ty| ty.to_string()).collect();
-            format!("{}<{}>", key.name, args.join(", "))
+    /// 可读类型渲染（M20/H20-01）：用户类型用限定名并递归渲染泛型实参，
+    /// 不输出 `struct@N`/`enum@N`。
+    pub fn display_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Struct(id) | Type::Enum(id) => {
+                let key = &self.type_keys[id.0];
+                if key.args.is_empty() {
+                    key.name.clone()
+                } else {
+                    let args: Vec<String> = key
+                        .args
+                        .iter()
+                        .map(|argument| self.display_type(argument))
+                        .collect();
+                    format!("{}<{}>", key.name, args.join(", "))
+                }
+            }
+            Type::Ptr { pointee, mutable } => {
+                if *mutable {
+                    format!("*{}", self.display_type(pointee))
+                } else {
+                    format!("*const {}", self.display_type(pointee))
+                }
+            }
+            Type::Slice { element, mutable } => {
+                if *mutable {
+                    format!("[]{}", self.display_type(element))
+                } else {
+                    format!("[]const {}", self.display_type(element))
+                }
+            }
+            Type::Array { element, length } => format!("[{element}; {length}]"),
+            other => other.to_string(),
         }
+    }
+
+    fn type_display(&self, id: TypeId) -> String {
+        self.display_type(&self.type_of(id))
     }
 
     /// 一个类型按值包含的用户自定义类型（指针与切片是间接边，不展开）。
@@ -744,7 +774,10 @@ impl MonoState {
         Err(Diagnostic::at(
             source,
             span,
-            format!("type `{ty}` cannot be used in an `extern struct` field"),
+            format!(
+                "type `{}` cannot be used in an `extern struct` field",
+                self.display_type(ty)
+            ),
         ))
     }
 
@@ -813,7 +846,8 @@ impl MonoState {
                     template_source,
                     parameter.ty.span,
                     format!(
-                        "type `{ty}` cannot be passed by value to a C function; use a C scalar, pointer, or `*Unit`"
+                        "type `{}` cannot be passed by value to a C function; use a C scalar, pointer, or `*Unit`",
+                        self.display_type(&ty)
                     ),
                 ));
             }
@@ -826,7 +860,10 @@ impl MonoState {
                     return Err(Diagnostic::at(
                         template_source,
                         template.function.return_type.as_ref().unwrap().span,
-                        format!("type `{ty}` cannot be returned by value from a C function"),
+                        format!(
+                            "type `{}` cannot be returned by value from a C function",
+                            self.display_type(&ty)
+                        ),
                     ));
                 }
                 ty
@@ -996,7 +1033,10 @@ impl MonoState {
                     return Err(Diagnostic::at(
                         source,
                         span,
-                        format!("type `{other}` cannot implement trait `{trait_name}`"),
+                        format!(
+                            "type `{}` cannot implement trait `{trait_name}`",
+                            self.display_type(other)
+                        ),
                     ));
                 }
             };
@@ -1125,7 +1165,9 @@ impl MonoState {
                                 source,
                                 typeref.span,
                                 format!(
-                                    "type parameter `{name}` inferred as both `{existing}` and `{concrete}`"
+                                    "type parameter `{name}` inferred as both `{}` and `{}`",
+                                    self.display_type(&existing),
+                                    self.display_type(concrete)
                                 ),
                             ));
                         }
@@ -1146,7 +1188,10 @@ impl MonoState {
                             return Err(Diagnostic::at(
                                 source,
                                 typeref.span,
-                                format!("expected `{name}`, found `{concrete}`"),
+                                format!(
+                                    "expected `{name}`, found `{}`",
+                                    self.display_type(concrete)
+                                ),
                             ));
                         }
                     };
@@ -1163,7 +1208,11 @@ impl MonoState {
                     return Err(Diagnostic::at(
                         source,
                         typeref.span,
-                        format!("expected `{resolved}`, found `{concrete}`"),
+                        format!(
+                            "expected `{}`, found `{}`",
+                            self.display_type(&resolved),
+                            self.display_type(concrete)
+                        ),
                     ));
                 }
                 Ok(())
@@ -1175,7 +1224,10 @@ impl MonoState {
                 _ => Err(Diagnostic::at(
                     source,
                     typeref.span,
-                    format!("expected a pointer, found `{concrete}`"),
+                    format!(
+                        "expected a pointer, found `{}`",
+                        self.display_type(concrete)
+                    ),
                 )),
             },
             TypeRefKind::Slice { element, .. } => match concrete {
@@ -1185,7 +1237,7 @@ impl MonoState {
                 _ => Err(Diagnostic::at(
                     source,
                     typeref.span,
-                    format!("expected a slice, found `{concrete}`"),
+                    format!("expected a slice, found `{}`", self.display_type(concrete)),
                 )),
             },
             TypeRefKind::Array { element, .. } => match concrete {
@@ -1202,7 +1254,7 @@ impl MonoState {
                 _ => Err(Diagnostic::at(
                     source,
                     typeref.span,
-                    format!("expected an array, found `{concrete}`"),
+                    format!("expected an array, found `{}`", self.display_type(concrete)),
                 )),
             },
         }

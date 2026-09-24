@@ -9,7 +9,7 @@ use dolphin_linker::linker;
 use dolphin_package::{lockfile, manifest, package_archive, registry, resolver};
 use dolphin_platform::platform;
 use dolphin_source::lexer;
-use dolphin_source::source::SourceFile;
+use dolphin_source::source::{SourceFile, Span};
 use dolphin_syntax::parser;
 
 pub use dolphin_linker::linker::LinkerChoice;
@@ -342,6 +342,202 @@ pub fn check_library_with_graph(
     let native = package_native_inputs(graph, platform.as_ref())?;
     validate_native_paths(platform.as_ref(), &native)?;
     compile_library(manifest, graph).map(|_| ())
+}
+
+/// 收集单文件（非项目）前端的全部诊断（M20/H20-01）；空 Vec 表示通过。
+///
+/// 目录输入走项目源码根（`<dir>/src`）的收集式 loader；单文件输入使用
+/// `lex_recovering`/`parse_recovering`，语义阶段收集声明级错误。
+pub fn check_source_collecting(input: &Path) -> Vec<Diagnostic> {
+    if input.is_dir() {
+        let packages = vec![modules::PackageSources {
+            id: PackageId::ROOT,
+            prefix: String::new(),
+            aliases: BTreeMap::new(),
+            source_root: input.join("src"),
+            exclude: HashSet::new(),
+            extra: Vec::new(),
+        }];
+        let loaded = modules::load_packages_collecting(&packages);
+        if !loaded.diagnostics.is_empty() {
+            return loaded.diagnostics;
+        }
+        let Some(program) = &loaded.program else {
+            return vec![Diagnostic::plain(
+                "internal error: collecting loader produced no merged program",
+            )];
+        };
+        return match lower::lower_sources_analysis_collecting(
+            &loaded.sources,
+            program,
+            &loaded.packages,
+            true,
+        ) {
+            Ok(_) => Vec::new(),
+            Err(diagnostics) => diagnostics,
+        };
+    }
+    let source_text = match fs::read_to_string(input) {
+        Ok(text) => text,
+        Err(error) => {
+            return vec![Diagnostic::plain(format!(
+                "could not read `{}`: {error}",
+                input.display()
+            ))];
+        }
+    };
+    let source = SourceFile::new(input.to_path_buf(), source_text);
+    let (tokens, lex_diagnostics) = lexer::lex_recovering(&source);
+    if !lex_diagnostics.is_empty() {
+        return lex_diagnostics;
+    }
+    let (program, parse_diagnostics) = parser::parse_recovering(&source, tokens);
+    if !parse_diagnostics.is_empty() {
+        return parse_diagnostics;
+    }
+    if let Some(package) = &program.package {
+        return vec![Diagnostic::at(
+            &source,
+            package.span,
+            "`pkg` requires compiling a project directory",
+        )];
+    }
+    if let Some(import) = program.uses.first() {
+        return vec![Diagnostic::at(
+            &source,
+            import.span,
+            "`use` requires compiling a project directory",
+        )];
+    }
+    match lower::lower_collecting(&source, &program) {
+        Ok(_) => Vec::new(),
+        Err(diagnostics) => diagnostics,
+    }
+}
+
+/// 收集 lib + 全部 bin 的前端诊断（M20/H20-01）；空 Vec 表示通过。
+///
+/// 每个目标先收集式 loader；有诊断则不再 lower；否则调用
+/// `lower_sources_analysis_collecting`（声明级全部诊断或函数体首错）。
+/// 跨目标按 `(primary 路径, span, code, message)` 去重并保留首个目标的顺序。
+pub fn check_manifest_collecting(manifest: &Manifest, graph: &PackageGraph) -> Vec<Diagnostic> {
+    let platform = match platform::host() {
+        Ok(platform) => platform,
+        Err(diagnostic) => return vec![diagnostic],
+    };
+    let native = match package_native_inputs(graph, platform.as_ref()) {
+        Ok(native) => native,
+        Err(diagnostic) => return vec![diagnostic],
+    };
+    if let Err(diagnostic) = validate_native_paths(platform.as_ref(), &native) {
+        return vec![diagnostic];
+    }
+
+    let mut diagnostics = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(lib) = &manifest.lib {
+        if !lib.path.is_file() {
+            push_diagnostic_unique(
+                &mut diagnostics,
+                &mut seen,
+                &[],
+                &Diagnostic::plain(format!(
+                    "library entry `{}` does not exist",
+                    lib.path.display()
+                )),
+            );
+        } else {
+            let exclude: HashSet<PathBuf> =
+                manifest.bins.iter().map(|bin| bin.path.clone()).collect();
+            collect_target_diagnostics(graph, exclude, false, &mut diagnostics, &mut seen);
+        }
+    }
+    for target in &manifest.bins {
+        if !target.path.is_file() {
+            push_diagnostic_unique(
+                &mut diagnostics,
+                &mut seen,
+                &[],
+                &Diagnostic::plain(format!(
+                    "binary target `{}` entry `{}` does not exist",
+                    target.name,
+                    target.path.display()
+                )),
+            );
+            continue;
+        }
+        let exclude: HashSet<PathBuf> = manifest
+            .bins
+            .iter()
+            .filter(|other| other.name != target.name)
+            .map(|other| other.path.clone())
+            .collect();
+        collect_target_diagnostics(graph, exclude, true, &mut diagnostics, &mut seen);
+    }
+    diagnostics
+}
+
+/// 单个目标的收集式前端检查：loader 诊断或 lower 诊断（声明级全部/函数体首错）。
+fn collect_target_diagnostics(
+    graph: &PackageGraph,
+    exclude: HashSet<PathBuf>,
+    require_main: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+    seen: &mut HashSet<(Option<PathBuf>, Option<Span>, String, String)>,
+) {
+    let loaded = load_graph_sources_collecting(graph, exclude, Vec::new());
+    for diagnostic in &loaded.diagnostics {
+        push_diagnostic_unique(diagnostics, seen, &loaded.sources, diagnostic);
+    }
+    if !loaded.diagnostics.is_empty() {
+        return;
+    }
+    let Some(program) = &loaded.program else {
+        push_diagnostic_unique(
+            diagnostics,
+            seen,
+            &loaded.sources,
+            &Diagnostic::plain("internal error: collecting loader produced no merged program"),
+        );
+        return;
+    };
+    if let Err(errors) = lower::lower_sources_analysis_collecting(
+        &loaded.sources,
+        program,
+        &loaded.packages,
+        require_main,
+    ) {
+        for diagnostic in &errors {
+            push_diagnostic_unique(diagnostics, seen, &loaded.sources, diagnostic);
+        }
+    }
+}
+
+/// 按 `(primary 路径, span, code, message)` 去重并追加（M20 §5.5）。
+fn push_diagnostic_unique(
+    diagnostics: &mut Vec<Diagnostic>,
+    seen: &mut HashSet<(Option<PathBuf>, Option<Span>, String, String)>,
+    sources: &[SourceFile],
+    diagnostic: &Diagnostic,
+) {
+    let (path, span) = match diagnostic.labels().first() {
+        Some(label) => (
+            sources
+                .get(label.source.0 as usize)
+                .map(|source| source.path.clone()),
+            Some(label.span),
+        ),
+        None => (None, None),
+    };
+    let key = (
+        path,
+        span,
+        diagnostic.code().to_string(),
+        diagnostic.message().to_string(),
+    );
+    if seen.insert(key) {
+        diagnostics.push(diagnostic.clone());
+    }
 }
 
 /// `dc check` 只校验声明、清单与路径：原生输入必须存在。
@@ -953,7 +1149,25 @@ fn load_graph_sources_with_extra(
     root_exclude: HashSet<PathBuf>,
     root_extra: Vec<modules::ExtraSource>,
 ) -> Result<modules::LoadedProgram, Diagnostic> {
-    let packages: Vec<modules::PackageSources> = graph
+    modules::load_packages(&package_sources(graph, root_exclude, root_extra))
+}
+
+/// 收集式加载（M20/H20-01）：不提前返回，返回全部前端诊断与部分 AST。
+fn load_graph_sources_collecting(
+    graph: &PackageGraph,
+    root_exclude: HashSet<PathBuf>,
+    root_extra: Vec<modules::ExtraSource>,
+) -> modules::LoadedSources {
+    modules::load_packages_collecting(&package_sources(graph, root_exclude, root_extra))
+}
+
+/// 把包图中的各包源码根转为模块加载配置。
+fn package_sources(
+    graph: &PackageGraph,
+    root_exclude: HashSet<PathBuf>,
+    root_extra: Vec<modules::ExtraSource>,
+) -> Vec<modules::PackageSources> {
+    graph
         .packages
         .iter()
         .map(|package| modules::PackageSources {
@@ -981,8 +1195,7 @@ fn load_graph_sources_with_extra(
                 Vec::new()
             },
         })
-        .collect();
-    modules::load_packages(&packages)
+        .collect()
 }
 
 pub fn build_with_profile(
@@ -1089,8 +1302,15 @@ fn compile_frontend(input: &Path) -> Result<ir::Program, Diagnostic> {
             Diagnostic::plain(format!("could not read `{}`: {error}", input.display()))
         })?;
         let source = SourceFile::new(input.to_path_buf(), source_text);
-        let tokens = lexer::lex(&source)?;
-        let program = parser::parse(&source, tokens)?;
+        // 单文件路径走 recovering 版本以收集全部错误；库入口仍只返回首条。
+        let (tokens, lex_diagnostics) = lexer::lex_recovering(&source);
+        if let Some(diagnostic) = lex_diagnostics.into_iter().next() {
+            return Err(diagnostic);
+        }
+        let (program, parse_diagnostics) = parser::parse_recovering(&source, tokens);
+        if let Some(diagnostic) = parse_diagnostics.into_iter().next() {
+            return Err(diagnostic);
+        }
         if let Some(package) = &program.package {
             return Err(Diagnostic::at(
                 &source,

@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use dolphin_package::package::{PackageId, qualify_module};
 use dolphin_source::diagnostic::Diagnostic;
 use dolphin_source::lexer;
-use dolphin_source::source::SourceFile;
+use dolphin_source::source::{SourceFile, SourceId};
 use dolphin_syntax::ast::{self, ExprKind, StatementKind};
 use dolphin_syntax::parser;
 
@@ -14,6 +14,68 @@ pub struct LoadedProgram {
     pub program: ast::Program,
     /// 与 `sources` 对齐的定义所在包身份（用户源码为 `ROOT`，内建标准库为 `STD`）。
     pub packages: Vec<PackageId>,
+}
+
+/// 收集式加载结果（M20/H20-01）：部分文件失败时也返回与 `sources` 对齐的
+/// 部分 AST 与全部读取/词法/语法/pkg 校验诊断。
+pub struct LoadedSources {
+    pub sources: Vec<SourceFile>,
+    /// 与 `sources` 对齐；词法/语法失败为 `None`。
+    pub asts: Vec<Option<ast::Program>>,
+    /// 与 `sources` 对齐。
+    pub packages: Vec<PackageId>,
+    /// 按文件顺序（再按 span.start）排列的读取/词法/语法/pkg 校验诊断。
+    pub diagnostics: Vec<Diagnostic>,
+    /// 全部文件成功且模块解析成功后的合并 AST。
+    pub program: Option<ast::Program>,
+}
+
+/// 源码提供器（M20/H20-01）。overlay 实现属 H20-02；本批提供磁盘实现。
+pub trait SourceProvider {
+    /// 递归发现源码根下的 `.do` 文件，返回绝对、词法规范化、排序后的路径。
+    /// 目录不存在返回空列表，不报错。
+    fn discover(&self, source_root: &Path) -> Result<Vec<PathBuf>, String>;
+    /// 读取源码文本；overlay 优先于磁盘。返回错误文本而非 Diagnostic。
+    fn read(&self, path: &Path) -> Result<String, String>;
+}
+
+/// 磁盘实现：与 M19 loader 相同的递归发现与读取语义。
+pub struct DiskProvider;
+
+impl SourceProvider for DiskProvider {
+    fn discover(&self, source_root: &Path) -> Result<Vec<PathBuf>, String> {
+        if !source_root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut paths = Vec::new();
+        discover_sources(source_root, &mut paths).map_err(|diagnostic| diagnostic.to_string())?;
+        Ok(paths)
+    }
+
+    fn read(&self, path: &Path) -> Result<String, String> {
+        fs::read_to_string(path).map_err(|error| error.to_string())
+    }
+}
+
+/// 纯词法路径规范化：去掉 `.`、折叠 `..`、统一分隔符；不解析符号链接、不要求存在。
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if result.file_name().is_some() {
+                    result.pop();
+                } else if !result.has_root() {
+                    result.push("..");
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                result.push(component.as_os_str());
+            }
+        }
+    }
+    result
 }
 
 /// 一个待加载包的源码配置（M15-C）。
@@ -98,65 +160,155 @@ pub fn load_sources(
 }
 
 /// 从多个包的源码根加载并合并为单个编译单元（M15-C）。
+///
+/// 内部走收集式 loader；有诊断时返回第一条（保持 M19 的首错文本与顺序）。
 pub fn load_packages(packages: &[PackageSources]) -> Result<LoadedProgram, Diagnostic> {
-    let mut sources = Vec::new();
-    let mut units = Vec::new();
+    let loaded = load_packages_collecting(packages);
+    if let Some(diagnostic) = loaded.diagnostics.into_iter().next() {
+        return Err(diagnostic);
+    }
+    let program = loaded.program.ok_or_else(|| {
+        Diagnostic::plain("internal error: collecting loader produced no merged program")
+    })?;
+    Ok(LoadedProgram {
+        sources: loaded.sources,
+        program,
+        packages: loaded.packages,
+    })
+}
+
+/// 收集式加载（M20/H20-01）：不提前返回，收集全部读取/词法/语法/pkg 校验诊断。
+pub fn load_packages_collecting(packages: &[PackageSources]) -> LoadedSources {
+    load_packages_with_provider(packages, &DiskProvider)
+}
+
+/// 与 [`load_packages_collecting`] 相同，但源码发现/读取走给定 `SourceProvider`。
+pub fn load_packages_with_provider(
+    packages: &[PackageSources],
+    provider: &dyn SourceProvider,
+) -> LoadedSources {
+    let mut sources: Vec<SourceFile> = Vec::new();
+    let mut asts: Vec<Option<ast::Program>> = Vec::new();
+    let mut units: Vec<Unit> = Vec::new();
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+    let mut all_clean = true;
+
     for package in packages {
         if !package.source_root.is_dir() {
-            return Err(Diagnostic::plain(format!(
+            diagnostics.push(Diagnostic::plain(format!(
                 "project does not contain a source directory `{}`",
                 package.source_root.display()
             )));
+            all_clean = false;
+            continue;
         }
-        let mut paths = Vec::new();
-        discover_sources(&package.source_root, &mut paths)?;
-        paths.retain(|path| !package.exclude.contains(path));
+        let discovered = match provider.discover(&package.source_root) {
+            Ok(paths) => paths,
+            Err(error) => {
+                diagnostics.push(Diagnostic::plain(error));
+                all_clean = false;
+                continue;
+            }
+        };
+        let exclude: HashSet<PathBuf> = package
+            .exclude
+            .iter()
+            .map(|path| normalize_path(path))
+            .collect();
+        let mut paths: Vec<PathBuf> = discovered
+            .into_iter()
+            .filter(|path| !exclude.contains(&normalize_path(path)))
+            .collect();
         paths.sort();
         if paths.is_empty() && package.extra.is_empty() {
-            return Err(Diagnostic::plain(format!(
+            diagnostics.push(Diagnostic::plain(format!(
                 "source directory `{}` does not contain any `.do` files",
                 package.source_root.display()
             )));
+            all_clean = false;
+            continue;
         }
         let mut top_level = HashSet::new();
         let mut parsed = Vec::with_capacity(paths.len() + package.extra.len());
         for path in &paths {
-            let text = fs::read_to_string(path).map_err(|error| {
-                Diagnostic::plain(format!("could not read `{}`: {error}", path.display()))
-            })?;
-            let source = SourceFile::new(path.clone(), text);
-            let tokens = lexer::lex(&source)?;
-            let mut program = parser::parse(&source, tokens)?;
-            let relative = expected_module(&package.source_root, path)?;
-            let expected_package = expected_package(&package.source_root, path)?;
-            validate_package(&source, &program, &expected_package)?;
-            if let Some(segment) = relative.split('.').next()
-                && !segment.is_empty()
-            {
-                top_level.insert(segment.to_string());
-            }
+            let text = match provider.read(path) {
+                Ok(text) => text,
+                Err(error) => {
+                    diagnostics.push(Diagnostic::plain(format!(
+                        "could not read `{}`: {error}",
+                        path.display()
+                    )));
+                    all_clean = false;
+                    continue;
+                }
+            };
+            let source = SourceFile::with_id(next_source_id(sources.len()), path.clone(), text);
             let source_id = sources.len();
-            assign_source_id(&mut program, source_id);
-            sources.push(source);
-            parsed.push((source_id, relative, program));
+            match parse_source_file(&source, &package.source_root) {
+                Err(file_diagnostics) => {
+                    diagnostics.extend(file_diagnostics);
+                    all_clean = false;
+                    sources.push(source);
+                    asts.push(None);
+                }
+                Ok((mut program, relative, expected_package)) => {
+                    if let Err(diagnostic) = validate_package(&source, &program, &expected_package)
+                    {
+                        diagnostics.push(diagnostic);
+                        all_clean = false;
+                    }
+                    if let Some(segment) = relative.split('.').next()
+                        && !segment.is_empty()
+                    {
+                        top_level.insert(segment.to_string());
+                    }
+                    assign_source_id(&mut program, source_id);
+                    asts.push(Some(program.clone()));
+                    sources.push(source);
+                    parsed.push((source_id, relative, program));
+                }
+            }
         }
         // 注入的额外源码按根模块文件处理：不得声明 `pkg`，可访问根模块私有项。
         for extra in &package.extra {
-            let source = SourceFile::new(extra.path.clone(), extra.text.clone());
-            let tokens = lexer::lex(&source)?;
-            let mut program = parser::parse(&source, tokens)?;
-            validate_package(&source, &program, "")?;
+            let source = SourceFile::with_id(
+                next_source_id(sources.len()),
+                extra.path.clone(),
+                extra.text.clone(),
+            );
             let source_id = sources.len();
+            let (tokens, lex_diagnostics) = lexer::lex_recovering(&source);
+            if !lex_diagnostics.is_empty() {
+                diagnostics.extend(lex_diagnostics);
+                all_clean = false;
+                sources.push(source);
+                asts.push(None);
+                continue;
+            }
+            let (mut program, parse_errors) = parser::parse_recovering(&source, tokens);
+            if !parse_errors.is_empty() {
+                diagnostics.extend(parse_errors);
+                all_clean = false;
+                sources.push(source);
+                asts.push(None);
+                continue;
+            }
+            if let Err(diagnostic) = validate_package(&source, &program, "") {
+                diagnostics.push(diagnostic);
+                all_clean = false;
+            }
             assign_source_id(&mut program, source_id);
+            asts.push(Some(program.clone()));
             sources.push(source);
             parsed.push((source_id, String::new(), program));
         }
         for (segment, target) in &package.aliases {
             if top_level.contains(segment) {
-                return Err(Diagnostic::plain(format!(
+                diagnostics.push(Diagnostic::plain(format!(
                     "dependency alias `{segment}` conflicts with a top-level module of package `{}`",
                     package.id
                 )));
+                all_clean = false;
             }
             let _ = target;
         }
@@ -174,9 +326,64 @@ pub fn load_packages(packages: &[PackageSources]) -> Result<LoadedProgram, Diagn
         }
     }
 
-    append_stdlib_units(&mut sources, &mut units)?;
-    resolve_modules(&sources, &mut units)?;
-    Ok(flatten_units(sources, units))
+    append_stdlib_units_collecting(
+        &mut sources,
+        &mut asts,
+        &mut units,
+        &mut diagnostics,
+        &mut all_clean,
+    );
+
+    let program = if all_clean {
+        match resolve_modules(&sources, &mut units) {
+            Ok(()) => Some(merge_units(&mut units)),
+            Err(diagnostic) => {
+                diagnostics.push(diagnostic);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let packages = units.iter().map(|unit| unit.package).collect();
+    LoadedSources {
+        sources,
+        asts,
+        packages,
+        diagnostics,
+        program,
+    }
+}
+
+/// 收集式解析一个源码文件；词法/语法/路径错误返回诊断列表。
+///
+/// 成功时返回 `(program, 相对模块路径, 期望包路径)`。
+fn parse_source_file(
+    source: &SourceFile,
+    source_root: &Path,
+) -> Result<(ast::Program, String, String), Vec<Diagnostic>> {
+    let (tokens, lex_diagnostics) = lexer::lex_recovering(source);
+    if !lex_diagnostics.is_empty() {
+        return Err(lex_diagnostics);
+    }
+    let (program, parse_diagnostics) = parser::parse_recovering(source, tokens);
+    if !parse_diagnostics.is_empty() {
+        return Err(parse_diagnostics);
+    }
+    let relative = match expected_module(source_root, &source.path) {
+        Ok(relative) => relative,
+        Err(diagnostic) => return Err(vec![diagnostic]),
+    };
+    let expected_package = match expected_package(source_root, &source.path) {
+        Ok(expected) => expected,
+        Err(diagnostic) => return Err(vec![diagnostic]),
+    };
+    Ok((program, relative, expected_package))
+}
+
+/// 下一个 `SourceId`：等于文件在加载单元 `sources` 向量中的下标。
+fn next_source_id(index: usize) -> SourceId {
+    SourceId(u32::try_from(index).expect("source count fits in u32"))
 }
 
 /// 单文件模式：把给定程序视为根模块，注入内建标准库后完成模块解析。
@@ -184,7 +391,8 @@ pub(crate) fn inject_stdlib(
     source: &SourceFile,
     program: &ast::Program,
 ) -> Result<LoadedProgram, Diagnostic> {
-    let source = SourceFile::new(source.path.clone(), source.text.clone());
+    // 保留调用方分配的 `SourceId`：诊断 label 需要与调用方持有的 `SourceMap` 对齐。
+    let source = SourceFile::with_id(source.id, source.path.clone(), source.text.clone());
     let mut program = program.clone();
     assign_source_id(&mut program, 0);
     let mut sources = vec![source];
@@ -199,7 +407,12 @@ pub(crate) fn inject_stdlib(
     }];
     append_stdlib_units(&mut sources, &mut units)?;
     resolve_modules(&sources, &mut units)?;
-    Ok(flatten_units(sources, units))
+    let packages = units.iter().map(|unit| unit.package).collect();
+    Ok(LoadedProgram {
+        sources,
+        program: merge_units(&mut units),
+        packages,
+    })
 }
 
 /// 追加编译器内建标准库单元（模块名与包身份固定，跳过磁盘 `pkg` 校验）。
@@ -208,7 +421,11 @@ fn append_stdlib_units(
     units: &mut Vec<Unit>,
 ) -> Result<(), Diagnostic> {
     for (module, path, text) in STDLIB_SOURCES {
-        let source = SourceFile::new(PathBuf::from(path), (*text).to_string());
+        let source = SourceFile::with_id(
+            next_source_id(sources.len()),
+            PathBuf::from(path),
+            (*text).to_string(),
+        );
         let tokens = lexer::lex(&source)?;
         let mut program = parser::parse(&source, tokens)?;
         let source_id = sources.len();
@@ -227,33 +444,74 @@ fn append_stdlib_units(
     Ok(())
 }
 
-/// 合并各单元为单个 `ast::Program`，并保留与 `sources` 对齐的包身份。
-fn flatten_units(sources: Vec<SourceFile>, mut units: Vec<Unit>) -> LoadedProgram {
-    let packages = units.iter().map(|unit| unit.package).collect();
+/// 收集式追加内建标准库单元；标准库源码受信，失败也按普通诊断收集。
+fn append_stdlib_units_collecting(
+    sources: &mut Vec<SourceFile>,
+    asts: &mut Vec<Option<ast::Program>>,
+    units: &mut Vec<Unit>,
+    diagnostics: &mut Vec<Diagnostic>,
+    all_clean: &mut bool,
+) {
+    for (module, path, text) in STDLIB_SOURCES {
+        let source = SourceFile::with_id(
+            next_source_id(sources.len()),
+            PathBuf::from(path),
+            (*text).to_string(),
+        );
+        let source_id = sources.len();
+        let (tokens, lex_diagnostics) = lexer::lex_recovering(&source);
+        if !lex_diagnostics.is_empty() {
+            diagnostics.extend(lex_diagnostics);
+            *all_clean = false;
+            sources.push(source);
+            asts.push(None);
+            continue;
+        }
+        let (mut program, parse_diagnostics) = parser::parse_recovering(&source, tokens);
+        if !parse_diagnostics.is_empty() {
+            diagnostics.extend(parse_diagnostics);
+            *all_clean = false;
+            sources.push(source);
+            asts.push(None);
+            continue;
+        }
+        assign_source_id(&mut program, source_id);
+        asts.push(Some(program.clone()));
+        sources.push(source);
+        units.push(Unit {
+            source_id,
+            module: (*module).to_string(),
+            program,
+            builtin: true,
+            package: PackageId::STD,
+            prefix: String::new(),
+            aliases: BTreeMap::new(),
+        });
+    }
+}
+
+/// 合并各单元为单个 `ast::Program`（不消费单元，包身份由调用方保留）。
+fn merge_units(units: &mut [Unit]) -> ast::Program {
     let mut functions = Vec::new();
     let mut structs = Vec::new();
     let mut enums = Vec::new();
     let mut traits = Vec::new();
     let mut impls = Vec::new();
-    for unit in &mut units {
+    for unit in units {
         functions.append(&mut unit.program.functions);
         structs.append(&mut unit.program.structs);
         enums.append(&mut unit.program.enums);
         traits.append(&mut unit.program.traits);
         impls.append(&mut unit.program.impls);
     }
-    LoadedProgram {
-        sources,
-        program: ast::Program {
-            package: None,
-            uses: Vec::new(),
-            functions,
-            structs,
-            enums,
-            traits,
-            impls,
-        },
-        packages,
+    ast::Program {
+        package: None,
+        uses: Vec::new(),
+        functions,
+        structs,
+        enums,
+        traits,
+        impls,
     }
 }
 
@@ -1402,4 +1660,137 @@ fn qualify(module: &str, name: &str) -> String {
 
 fn display_module(module: &str) -> &str {
     if module.is_empty() { "<root>" } else { module }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "dolphin-hir-loader-{tag}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn write(path: &Path, text: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent dir");
+        }
+        fs::write(path, text).expect("write source");
+    }
+
+    fn package(source_root: PathBuf) -> PackageSources {
+        PackageSources {
+            id: PackageId::ROOT,
+            prefix: String::new(),
+            aliases: BTreeMap::new(),
+            source_root,
+            exclude: HashSet::new(),
+            extra: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn collecting_loader_keeps_source_ids_aligned() {
+        let root = temp_dir("ids");
+        write(&root.join("main.do"), "fn main() { return 0; }\n");
+        write(&root.join("helper.do"), "fn helper(): i32 { return 1; }\n");
+        let loaded = load_packages_collecting(&[package(root.clone())]);
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert!(loaded.program.is_some());
+        assert_eq!(loaded.sources.len(), loaded.asts.len());
+        assert_eq!(loaded.sources.len(), loaded.packages.len());
+        for (index, source) in loaded.sources.iter().enumerate() {
+            assert_eq!(source.id, SourceId(index as u32));
+        }
+        // 文件按路径排序：helper.do 在 main.do 前。
+        assert!(loaded.sources[0].path.ends_with("helper.do"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collecting_loader_collects_multiple_file_diagnostics() {
+        let root = temp_dir("errors");
+        write(&root.join("a.do"), "fn main() { val § = 1; }\n");
+        write(
+            &root.join("sub/b.do"),
+            "pkg wrong;\nfn helper() { return; }\n",
+        );
+        write(&root.join("c.do"), "fn ok() { return; }\n");
+        let loaded = load_packages_collecting(&[package(root.clone())]);
+        assert!(loaded.program.is_none());
+        assert_eq!(loaded.diagnostics.len(), 2, "{:?}", loaded.diagnostics);
+        assert!(
+            loaded.diagnostics[0]
+                .message()
+                .contains("unexpected character `§`")
+        );
+        assert!(
+            loaded.diagnostics[1]
+                .message()
+                .contains("package path `wrong` does not match directory `sub`"),
+            "{:?}",
+            loaded.diagnostics[1]
+        );
+        assert_eq!(loaded.asts.len(), loaded.sources.len());
+        // 词法失败的文件 ast 为 None；pkg 校验失败的文件仍保留 AST。
+        assert!(loaded.asts[0].is_none());
+        assert!(loaded.asts[1].is_some());
+        assert!(loaded.asts[2].is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    struct OverlayProvider {
+        path: PathBuf,
+        text: String,
+    }
+
+    impl SourceProvider for OverlayProvider {
+        fn discover(&self, source_root: &Path) -> Result<Vec<PathBuf>, String> {
+            Ok(vec![source_root.join("main.do")])
+        }
+
+        fn read(&self, path: &Path) -> Result<String, String> {
+            if path == self.path {
+                Ok(self.text.clone())
+            } else {
+                fs::read_to_string(path).map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn load_packages_with_provider_uses_provider_text() {
+        let root = temp_dir("provider");
+        let path = root.join("main.do");
+        let provider = OverlayProvider {
+            path: path.clone(),
+            text: "fn main() { return missing; }\n".to_string(),
+        };
+        let loaded = load_packages_with_provider(&[package(root.clone())], &provider);
+        assert!(!path.exists(), "overlay 文本不应来自磁盘");
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(loaded.sources.len(), 1 + STDLIB_SOURCES.len());
+        assert_eq!(loaded.sources[0].text, "fn main() { return missing; }\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn normalize_path_is_lexical_only() {
+        assert_eq!(
+            normalize_path(Path::new("/a/./b/../c")),
+            PathBuf::from("/a/c")
+        );
+        assert_eq!(normalize_path(Path::new("/../a")), PathBuf::from("/a"));
+        assert_eq!(normalize_path(Path::new("a/b/../../c")), PathBuf::from("c"));
+    }
 }

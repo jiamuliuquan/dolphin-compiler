@@ -47,6 +47,9 @@ dolphin-driver.workspace = true
 dolphin-format.workspace = true
 dolphin-lsp.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [features]
 default = ["cranelift"]
 cranelift = ["dolphin-driver/cranelift"]

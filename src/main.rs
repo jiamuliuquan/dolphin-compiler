@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use dolphin_compiler::{
     BackendChoice, BuildArtifact, BuildOptions, BuildProfile, BuildSettings, Cache, DependencyKind,
-    LibraryArtifact, LinkerChoice, Manifest, ResolveOptions, build_library_with_graph,
-    build_manifest_with_graph, build_test_target_with_graph, build_with_profile, check,
-    check_library_with_graph, check_manifest_with_graph, discover_manifest, host_platform,
-    publish_library, resolve_project,
+    Diagnostic, LibraryArtifact, LinkerChoice, Manifest, ResolveOptions, build_library_with_graph,
+    build_manifest_with_graph, build_test_target_with_graph, build_with_profile,
+    check_library_with_graph, check_manifest_collecting, check_source_collecting,
+    discover_manifest, host_platform, publish_library, resolve_project,
 };
 
 #[derive(Parser)]
@@ -326,8 +326,11 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
                     };
                     let resolved = resolve_project(&manifest, options)
                         .map_err(|error| (error.to_string(), color))?;
-                    check_manifest_with_graph(&manifest, &resolved.graph)
-                        .map_err(|error| (error.to_string(), color))?;
+                    let diagnostics = check_manifest_collecting(&manifest, &resolved.graph);
+                    if !diagnostics.is_empty() {
+                        print_diagnostics(&diagnostics);
+                        return Ok(ExitCode::FAILURE);
+                    }
                     println!("Checked {}", manifest.package.coordinate());
                 }
                 None => {
@@ -338,7 +341,11 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
                             color,
                         ));
                     }
-                    check(&input).map_err(|error| (error.to_string(), color))?;
+                    let diagnostics = check_source_collecting(&input);
+                    if !diagnostics.is_empty() {
+                        print_diagnostics(&diagnostics);
+                        return Ok(ExitCode::FAILURE);
+                    }
                     println!("Checked {}", input.display());
                 }
             }
@@ -366,6 +373,11 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
                     ));
                 }
                 // 单文件模式没有清单，默认 profile 为 Debug。
+                let diagnostics = check_source_collecting(&input);
+                if !diagnostics.is_empty() {
+                    print_diagnostics(&diagnostics);
+                    return Ok(ExitCode::FAILURE);
+                }
                 let artifact = build_with_profile(
                     BuildOptions {
                         input,
@@ -382,6 +394,11 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             let profile = BuildProfile::resolve(&manifest, explicit);
             let resolved = resolve_project(&manifest, args.resolve_options())
                 .map_err(|error| (error.to_string(), color))?;
+            let diagnostics = check_manifest_collecting(&manifest, &resolved.graph);
+            if !diagnostics.is_empty() {
+                print_diagnostics(&diagnostics);
+                return Ok(ExitCode::FAILURE);
+            }
             if args.lib {
                 let artifact =
                     build_library_with_graph(&manifest, profile, settings, &resolved.graph)
@@ -432,6 +449,11 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
                         color,
                     ));
                 }
+                let diagnostics = check_source_collecting(&input);
+                if !diagnostics.is_empty() {
+                    print_diagnostics(&diagnostics);
+                    return Ok(ExitCode::FAILURE);
+                }
                 let artifact = build_with_profile(
                     BuildOptions {
                         input,
@@ -446,6 +468,11 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             let profile = BuildProfile::resolve(&manifest, explicit);
             let resolved = resolve_project(&manifest, args.resolve_options())
                 .map_err(|error| (error.to_string(), color))?;
+            let diagnostics = check_manifest_collecting(&manifest, &resolved.graph);
+            if !diagnostics.is_empty() {
+                print_diagnostics(&diagnostics);
+                return Ok(ExitCode::FAILURE);
+            }
             let artifacts = build_manifest_with_graph(
                 &manifest,
                 args.bin.as_deref(),
@@ -469,6 +496,11 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             let profile = BuildProfile::resolve(&manifest, args.explicit_profile());
             let resolved = resolve_project(&manifest, args.resolve_options())
                 .map_err(|error| (error.to_string(), color))?;
+            let diagnostics = check_manifest_collecting(&manifest, &resolved.graph);
+            if !diagnostics.is_empty() {
+                print_diagnostics(&diagnostics);
+                return Ok(ExitCode::FAILURE);
+            }
             // H19-05c：发现 + 生成 harness + 构建，然后逐个子进程运行选中的测试。
             // 0 测试与过滤无匹配按冻结规则只输出固定消息并以 1 退出。
             let target =
@@ -842,6 +874,13 @@ fn run_test_case(executable: &Path, name: &str) -> Result<TestOutcome, (String, 
                 ));
             }
         }
+    }
+}
+
+/// 按收集顺序把全部诊断打印到 stderr（M20/H20-01，不添加分隔行）。
+fn print_diagnostics(diagnostics: &[Diagnostic]) {
+    for diagnostic in diagnostics {
+        eprintln!("{diagnostic}");
     }
 }
 

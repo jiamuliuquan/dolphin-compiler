@@ -4,18 +4,30 @@ use crate::ast::{
     PathRef, Program, Statement, StatementKind, StructDecl, TraitDecl, TypeParamDecl, TypeRef,
     TypeRefKind, UnaryOperator, VariantDecl,
 };
-use dolphin_source::diagnostic::Diagnostic;
+use dolphin_source::diagnostic::{Diagnostic, push_capped};
 use dolphin_source::source::{SourceFile, Span};
 use dolphin_source::token::{Token, TokenKind};
 
+/// 首错即停的语法分析（行为与 M19 一致）。
 pub fn parse(source: &SourceFile, tokens: Vec<Token>) -> Result<Program, Diagnostic> {
     Parser::new(source, tokens).parse_program()
+}
+
+/// 收集式语法分析（M20/H20-01）：块内同步到 `;`/`}`/同层语句起始关键字，
+/// 顶层同步到下一个项起始关键字或 EOF；顶层多余的 `}` 报错并跳过。
+/// 得到的 AST 允许含残缺节点，只用于诊断与文档符号，不得传给 `lower*`。
+/// 每文件最多收集 100 条诊断（含 `E0002`）。
+pub fn parse_recovering(source: &SourceFile, tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
+    Parser::new_recovering(source, tokens).parse_program_recovering()
 }
 
 struct Parser<'a> {
     source: &'a SourceFile,
     tokens: Vec<Token>,
     position: usize,
+    recovering: bool,
+    diagnostics: Vec<Diagnostic>,
+    capped: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -24,6 +36,27 @@ impl<'a> Parser<'a> {
             source,
             tokens,
             position: 0,
+            recovering: false,
+            diagnostics: Vec::new(),
+            capped: false,
+        }
+    }
+
+    fn new_recovering(source: &'a SourceFile, tokens: Vec<Token>) -> Self {
+        Self {
+            source,
+            tokens,
+            position: 0,
+            recovering: true,
+            diagnostics: Vec::new(),
+            capped: false,
+        }
+    }
+
+    /// 收集一条诊断；达到上限后置 `capped`。
+    fn report(&mut self, diagnostic: Diagnostic) {
+        if !push_capped(&mut self.diagnostics, diagnostic) {
+            self.capped = true;
         }
     }
 
@@ -43,74 +76,23 @@ impl<'a> Parser<'a> {
             uses.push(self.parse_path("expected import path")?);
             self.expect_simple(TokenKind::Semicolon, "expected `;` after import")?;
         }
-        let mut functions = Vec::new();
-        let mut structs = Vec::new();
-        let mut enums = Vec::new();
-        let mut traits = Vec::new();
-        let mut impls = Vec::new();
+        let mut program = Program {
+            package,
+            uses,
+            functions: Vec::new(),
+            structs: Vec::new(),
+            enums: Vec::new(),
+            traits: Vec::new(),
+            impls: Vec::new(),
+        };
         while !self.check(&TokenKind::Eof) {
-            match self.current().kind {
-                TokenKind::Fn => functions.push(self.parse_function()?),
-                TokenKind::Struct => structs.push(self.parse_struct()?),
-                TokenKind::Enum => enums.push(self.parse_enum()?),
-                TokenKind::Trait => traits.push(self.parse_trait()?),
-                TokenKind::Impl => impls.push(self.parse_impl()?),
-                TokenKind::Extern => {
-                    if self.check_extern_struct() {
-                        self.advance();
-                        let mut structure = self.parse_struct()?;
-                        structure.extern_c = true;
-                        structs.push(structure);
-                    } else {
-                        self.parse_extern_block(&mut functions)?;
-                    }
-                }
-                TokenKind::Pub => {
-                    let public = self.consume(&TokenKind::Pub).is_some();
-                    match self.current().kind {
-                        TokenKind::Fn => {
-                            let mut function = self.parse_function()?;
-                            function.public = public;
-                            functions.push(function);
-                        }
-                        TokenKind::Struct => {
-                            let mut structure = self.parse_struct()?;
-                            structure.public = public;
-                            structs.push(structure);
-                        }
-                        TokenKind::Enum => {
-                            let mut enumeration = self.parse_enum()?;
-                            enumeration.public = public;
-                            enums.push(enumeration);
-                        }
-                        TokenKind::Trait => {
-                            let mut item = self.parse_trait()?;
-                            item.public = public;
-                            traits.push(item);
-                        }
-                        _ => {
-                            return Err(Diagnostic::at(
-                                self.source,
-                                self.current().span,
-                                "expected `fn`, `struct`, `enum`, or `trait` after `pub`",
-                            ));
-                        }
-                    }
-                }
-                _ => {
-                    return Err(Diagnostic::at(
-                        self.source,
-                        self.current().span,
-                        "expected a function, struct, or enum",
-                    ));
-                }
-            }
+            self.parse_item(&mut program)?;
         }
-        if functions.is_empty()
-            && structs.is_empty()
-            && enums.is_empty()
-            && traits.is_empty()
-            && impls.is_empty()
+        if program.functions.is_empty()
+            && program.structs.is_empty()
+            && program.enums.is_empty()
+            && program.traits.is_empty()
+            && program.impls.is_empty()
         {
             return Err(Diagnostic::at(
                 self.source,
@@ -118,15 +100,198 @@ impl<'a> Parser<'a> {
                 "expected a function, struct, enum, trait, or impl",
             ));
         }
-        Ok(Program {
+        Ok(program)
+    }
+
+    /// 收集式顶层解析：项解析失败后同步到下一个项起始或 EOF，继续收集。
+    fn parse_program_recovering(mut self) -> (Program, Vec<Diagnostic>) {
+        let package = if self.consume(&TokenKind::Pkg).is_some() {
+            match self.parse_path("expected package path") {
+                Ok(path) => {
+                    if let Err(diagnostic) = self.expect_simple(
+                        TokenKind::Semicolon,
+                        "expected `;` after package declaration",
+                    ) {
+                        self.report(diagnostic);
+                        self.recover_top_level();
+                    }
+                    Some(path)
+                }
+                Err(diagnostic) => {
+                    self.report(diagnostic);
+                    self.recover_top_level();
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut uses = Vec::new();
+        while self.consume(&TokenKind::Use).is_some() {
+            match self.parse_path("expected import path") {
+                Ok(path) => {
+                    uses.push(path);
+                    if let Err(diagnostic) =
+                        self.expect_simple(TokenKind::Semicolon, "expected `;` after import")
+                    {
+                        self.report(diagnostic);
+                        self.recover_top_level();
+                    }
+                }
+                Err(diagnostic) => {
+                    self.report(diagnostic);
+                    self.recover_top_level();
+                }
+            }
+        }
+        let mut program = Program {
             package,
             uses,
-            functions,
-            structs,
-            enums,
-            traits,
-            impls,
-        })
+            functions: Vec::new(),
+            structs: Vec::new(),
+            enums: Vec::new(),
+            traits: Vec::new(),
+            impls: Vec::new(),
+        };
+        while !self.check(&TokenKind::Eof) && !self.capped {
+            let before = self.position;
+            if let Err(diagnostic) = self.parse_item(&mut program) {
+                self.report(diagnostic);
+                self.recover_top_level();
+            }
+            if self.position == before {
+                // 保证前进：同步点停留在当前 token 时至少消费一个。
+                self.advance();
+            }
+        }
+        if program.functions.is_empty()
+            && program.structs.is_empty()
+            && program.enums.is_empty()
+            && program.traits.is_empty()
+            && program.impls.is_empty()
+            && self.diagnostics.is_empty()
+        {
+            self.report(Diagnostic::at(
+                self.source,
+                self.current().span,
+                "expected a function, struct, enum, trait, or impl",
+            ));
+        }
+        (program, self.diagnostics)
+    }
+
+    /// 解析一个顶层项并追加到 `program`。
+    fn parse_item(&mut self, program: &mut Program) -> Result<(), Diagnostic> {
+        match self.current().kind {
+            TokenKind::Fn => program.functions.push(self.parse_function()?),
+            TokenKind::Struct => program.structs.push(self.parse_struct()?),
+            TokenKind::Enum => program.enums.push(self.parse_enum()?),
+            TokenKind::Trait => program.traits.push(self.parse_trait()?),
+            TokenKind::Impl => program.impls.push(self.parse_impl()?),
+            TokenKind::Extern => {
+                if self.check_extern_struct() {
+                    self.advance();
+                    let mut structure = self.parse_struct()?;
+                    structure.extern_c = true;
+                    program.structs.push(structure);
+                } else {
+                    self.parse_extern_block(&mut program.functions)?;
+                }
+            }
+            TokenKind::Pub => {
+                let public = self.consume(&TokenKind::Pub).is_some();
+                match self.current().kind {
+                    TokenKind::Fn => {
+                        let mut function = self.parse_function()?;
+                        function.public = public;
+                        program.functions.push(function);
+                    }
+                    TokenKind::Struct => {
+                        let mut structure = self.parse_struct()?;
+                        structure.public = public;
+                        program.structs.push(structure);
+                    }
+                    TokenKind::Enum => {
+                        let mut enumeration = self.parse_enum()?;
+                        enumeration.public = public;
+                        program.enums.push(enumeration);
+                    }
+                    TokenKind::Trait => {
+                        let mut item = self.parse_trait()?;
+                        item.public = public;
+                        program.traits.push(item);
+                    }
+                    _ => {
+                        return Err(Diagnostic::at(
+                            self.source,
+                            self.current().span,
+                            "expected `fn`, `struct`, `enum`, or `trait` after `pub`",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(Diagnostic::at(
+                    self.source,
+                    self.current().span,
+                    "expected a function, struct, or enum",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// 顶层同步：跳过到下一个项起始关键字或 EOF；多余的 `}` 报错并跳过。
+    fn recover_top_level(&mut self) {
+        loop {
+            match self.current().kind {
+                TokenKind::Eof => return,
+                TokenKind::RightBrace => {
+                    let span = self.current().span;
+                    self.advance();
+                    self.report(Diagnostic::at(self.source, span, "unexpected `}`"));
+                }
+                TokenKind::Fn
+                | TokenKind::Struct
+                | TokenKind::Enum
+                | TokenKind::Trait
+                | TokenKind::Impl
+                | TokenKind::Use
+                | TokenKind::Pkg
+                | TokenKind::Extern
+                | TokenKind::Pub => return,
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    /// 块内同步：跳过到 `;`（消费）、同层 `}`（不消费）或同层语句起始关键字。
+    fn recover_block(&mut self) {
+        let mut depth = 0usize;
+        loop {
+            match self.current().kind {
+                TokenKind::Eof => return,
+                TokenKind::Semicolon if depth == 0 => {
+                    self.advance();
+                    return;
+                }
+                TokenKind::RightBrace if depth == 0 => return,
+                TokenKind::LeftBrace => {
+                    depth += 1;
+                    self.advance();
+                }
+                TokenKind::RightBrace => {
+                    depth -= 1;
+                    self.advance();
+                }
+                _ if depth == 0 && is_statement_start(&self.current().kind) => return,
+                _ => {
+                    self.advance();
+                }
+            }
+        }
     }
 
     /// 解析 `trait Name<T> { type Item; fn method(self: *Self): T; }`。
@@ -847,7 +1012,19 @@ impl<'a> Parser<'a> {
         let left = self.expect_simple(TokenKind::LeftBrace, "expected `{`")?;
         let mut statements = Vec::new();
         while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
-            statements.push(self.parse_statement()?);
+            let before = self.position;
+            match self.parse_statement() {
+                Ok(statement) => statements.push(statement),
+                Err(diagnostic) if self.recovering => {
+                    self.report(diagnostic);
+                    self.recover_block();
+                    if self.position == before {
+                        // 保证前进：同步点停留在当前 token 时至少消费一个。
+                        self.advance();
+                    }
+                }
+                Err(diagnostic) => return Err(diagnostic),
+            }
         }
         let right = self.expect_simple(TokenKind::RightBrace, "expected `}` after block")?;
         Ok((left.merge(right), statements))
@@ -1484,6 +1661,23 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// 块内同步点：同层语句起始关键字（M20 §5.2）。
+fn is_statement_start(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::If
+            | TokenKind::While
+            | TokenKind::Loop
+            | TokenKind::For
+            | TokenKind::Return
+            | TokenKind::Break
+            | TokenKind::Continue
+            | TokenKind::Defer
+            | TokenKind::Val
+            | TokenKind::Var
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1554,5 +1748,104 @@ mod tests {
     fn comparison_is_not_parsed_as_type_arguments() {
         let program = parse_text("fn main() { val a = 1; val b = 2; if a < b { return; } }");
         assert_eq!(program.functions[0].body.len(), 3);
+    }
+
+    fn parse_recovering_text(text: &str) -> (Program, Vec<Diagnostic>) {
+        let source = SourceFile::new(PathBuf::from("main.do"), text.to_string());
+        let tokens = lexer::lex_recovering(&source).0;
+        parse_recovering(&source, tokens)
+    }
+
+    #[test]
+    fn recovering_collects_independent_statement_errors() {
+        let (program, diagnostics) =
+            parse_recovering_text("fn main() { val a: = 1; val b: = 2; return; }");
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].body.len(), 1);
+    }
+
+    #[test]
+    fn recovering_syncs_to_next_top_level_item() {
+        let (program, diagnostics) = parse_recovering_text("fn broken( { fn good() { return; } }");
+        assert!(!diagnostics.is_empty());
+        assert!(
+            program
+                .functions
+                .iter()
+                .any(|function| function.name == "good")
+        );
+    }
+
+    #[test]
+    fn recovering_reports_stray_closing_brace() {
+        let (program, diagnostics) = parse_recovering_text("} fn main() { return; }");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("unexpected `}`"))
+        );
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].name, "main");
+    }
+
+    #[test]
+    fn parse_keeps_first_error_behavior() {
+        let source = SourceFile::new(
+            PathBuf::from("main.do"),
+            "fn main() { val a: = 1; val b: = 2; }".to_string(),
+        );
+        let tokens = lexer::lex(&source).expect("lexing should succeed");
+        let error = parse(&source, tokens).expect_err("parsing should fail");
+        assert!(error.message().contains("expected type name after `:`"));
+    }
+
+    #[test]
+    fn recovering_never_panics_on_garbage() {
+        for text in [
+            "}}}}}",
+            "fn",
+            "fn main() { if { } }",
+            "struct {",
+            "impl",
+            "fn main() { match 1 { } }",
+            "fn main() { for in { } }",
+            "fn main() { val = ; }",
+            "fn main() { defer; }",
+            "fn main() { return 1 }",
+        ] {
+            let (_, diagnostics) = parse_recovering_text(text);
+            assert!(
+                !diagnostics.is_empty(),
+                "garbage `{text}` should produce diagnostics"
+            );
+        }
+    }
+
+    /// 确定性伪随机输入：`parse_recovering` 对任意 `lex_recovering` 输出不得 panic。
+    #[test]
+    fn recovering_is_panic_free_on_random_input() {
+        const ALPHABET: &[&str] = &[
+            "fn", "main", "(", ")", "{", "}", "[", "]", ";", ":", "::", ",", "=", "==", "->", "=>",
+            "<", ">", "+", "-", "*", "/", "%", ".", "..", "..=", "&", "&&", "|", "||", "!", "val",
+            "var", "if", "else", "while", "loop", "for", "in", "return", "break", "continue",
+            "defer", "struct", "enum", "trait", "impl", "pub", "use", "pkg", "match", "extern",
+            "\"s\"", "'c'", "42", "_", "§", "𝄞", " ", "\n", "//c\n", "/*",
+        ];
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for _ in 0..500 {
+            let length = (next() % 64) as usize;
+            let mut text = String::new();
+            for _ in 0..length {
+                text.push_str(ALPHABET[(next() % ALPHABET.len() as u64) as usize]);
+            }
+            let (_, _) = parse_recovering_text(&text);
+        }
     }
 }

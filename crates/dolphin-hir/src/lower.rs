@@ -11,7 +11,7 @@ use dolphin_ir::ir::{
 };
 use dolphin_ir::layout;
 use dolphin_package::package::{PackageId, module_of};
-use dolphin_source::diagnostic::Diagnostic;
+use dolphin_source::diagnostic::{DIAGNOSTIC_LIMIT, Diagnostic, push_capped};
 use dolphin_source::source::{SourceFile, Span};
 use dolphin_syntax::ast::{
     self, AssignmentOperator, BinaryOperator, ExprKind, ForIterable, Statement, StatementKind,
@@ -40,6 +40,29 @@ pub fn lower_library(
     ProgramLowerer::new(sources, program, packages)?.lower(false)
 }
 
+/// 收集式 lowering（M20/H20-01）：与 `lower_sources`/`lower_library` 相同，
+/// 但声明级错误全部收集；函数体 lowering 仍首错即停。
+pub fn lower_sources_analysis_collecting(
+    sources: &[SourceFile],
+    program: &ast::Program,
+    packages: &[PackageId],
+    require_main: bool,
+) -> Result<ir::Program, Vec<Diagnostic>> {
+    ProgramLowerer::new_collecting(sources, program, packages)?
+        .lower(require_main)
+        .map_err(|diagnostic| vec![diagnostic])
+}
+
+/// 单文件收集式 lowering：注入内建标准库后走收集式声明校验。
+pub fn lower_collecting(
+    source: &SourceFile,
+    program: &ast::Program,
+) -> Result<ir::Program, Vec<Diagnostic>> {
+    let loaded =
+        crate::modules::inject_stdlib(source, program).map_err(|diagnostic| vec![diagnostic])?;
+    lower_sources_analysis_collecting(&loaded.sources, &loaded.program, &loaded.packages, true)
+}
+
 struct ProgramLowerer<'a> {
     sources: &'a [SourceFile],
     ast: &'a ast::Program,
@@ -53,7 +76,28 @@ impl<'a> ProgramLowerer<'a> {
         ast: &'a ast::Program,
         packages: &'a [PackageId],
     ) -> Result<Self, Diagnostic> {
-        let tables = build_templates(sources, ast, packages)?;
+        let (tables, mut diagnostics) = build_templates_collecting(sources, ast, packages);
+        if !diagnostics.is_empty() {
+            return Err(diagnostics.remove(0));
+        }
+        Ok(Self {
+            sources,
+            ast,
+            tables,
+            state: RefCell::new(MonoState::default()),
+        })
+    }
+
+    /// 收集式构造：声明级诊断非空时直接返回，不进入实例化/函数体 lowering。
+    fn new_collecting(
+        sources: &'a [SourceFile],
+        ast: &'a ast::Program,
+        packages: &'a [PackageId],
+    ) -> Result<Self, Vec<Diagnostic>> {
+        let (tables, diagnostics) = build_templates_collecting(sources, ast, packages);
+        if !diagnostics.is_empty() {
+            return Err(diagnostics);
+        }
         Ok(Self {
             sources,
             ast,
@@ -238,26 +282,43 @@ impl<'a> ProgramLowerer<'a> {
 }
 
 /// 收集所有声明为模板：泛型/普通结构体、枚举与函数。
-fn build_templates(
+///
+/// M20/H20-01 收集式版本：失败声明报一条诊断并从模板表跳过，后续独立声明继续
+/// 校验；每个顶层声明至多贡献一条声明级诊断，达到 100 条后追加 `E0002` 并停止。
+fn build_templates_collecting(
     sources: &[SourceFile],
     ast: &ast::Program,
     packages: &[PackageId],
-) -> Result<TemplateTables, Diagnostic> {
+) -> (TemplateTables, Vec<Diagnostic>) {
     let package_of_source = |source_id: usize| -> PackageId {
         packages.get(source_id).copied().unwrap_or(PackageId::ROOT)
     };
     let mut tables = TemplateTables::default();
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
     for structure in &ast.structs {
+        if diagnostics.len() >= DIAGNOSTIC_LIMIT {
+            return (tables, diagnostics);
+        }
         let source = &sources[structure.source_id];
-        let type_params = type_param_names(&structure.type_params, source)?;
+        let type_params = match type_param_names(&structure.type_params, source) {
+            Ok(names) => names,
+            Err(diagnostic) => {
+                push_capped(&mut diagnostics, diagnostic);
+                continue;
+            }
+        };
         if tables.structs.contains_key(&structure.name)
             || tables.enums.contains_key(&structure.name)
         {
-            return Err(Diagnostic::at(
-                source,
-                structure.name_span,
-                format!("type `{}` is already defined", structure.name),
-            ));
+            push_capped(
+                &mut diagnostics,
+                Diagnostic::at(
+                    source,
+                    structure.name_span,
+                    format!("type `{}` is already defined", structure.name),
+                ),
+            );
+            continue;
         }
         tables.structs.insert(
             structure.name.clone(),
@@ -273,16 +334,29 @@ fn build_templates(
         );
     }
     for enumeration in &ast.enums {
+        if diagnostics.len() >= DIAGNOSTIC_LIMIT {
+            return (tables, diagnostics);
+        }
         let source = &sources[enumeration.source_id];
-        let type_params = type_param_names(&enumeration.type_params, source)?;
+        let type_params = match type_param_names(&enumeration.type_params, source) {
+            Ok(names) => names,
+            Err(diagnostic) => {
+                push_capped(&mut diagnostics, diagnostic);
+                continue;
+            }
+        };
         if tables.structs.contains_key(&enumeration.name)
             || tables.enums.contains_key(&enumeration.name)
         {
-            return Err(Diagnostic::at(
-                source,
-                enumeration.name_span,
-                format!("type `{}` is already defined", enumeration.name),
-            ));
+            push_capped(
+                &mut diagnostics,
+                Diagnostic::at(
+                    source,
+                    enumeration.name_span,
+                    format!("type `{}` is already defined", enumeration.name),
+                ),
+            );
+            continue;
         }
         tables.enums.insert(
             enumeration.name.clone(),
@@ -297,37 +371,59 @@ fn build_templates(
         );
     }
     for function in &ast.functions {
+        if diagnostics.len() >= DIAGNOSTIC_LIMIT {
+            return (tables, diagnostics);
+        }
         let source = &sources[function.source_id];
         if matches!(function.name.as_str(), "print" | "println" | "length") {
-            return Err(Diagnostic::at(
-                source,
-                function.name_span,
-                format!("`{}` is a reserved built-in function", function.name),
-            ));
+            push_capped(
+                &mut diagnostics,
+                Diagnostic::at(
+                    source,
+                    function.name_span,
+                    format!("`{}` is a reserved built-in function", function.name),
+                ),
+            );
+            continue;
         }
         if function.name == "main" {
             if !function.type_params.is_empty() {
-                return Err(Diagnostic::at(
-                    source,
-                    function.name_span,
-                    "`main` cannot have type parameters",
-                ));
+                push_capped(
+                    &mut diagnostics,
+                    Diagnostic::at(
+                        source,
+                        function.name_span,
+                        "`main` cannot have type parameters",
+                    ),
+                );
+                continue;
             }
             if !function.parameters.is_empty() {
-                return Err(Diagnostic::at(
-                    source,
-                    function.name_span,
-                    "`main` cannot have parameters yet",
-                ));
+                push_capped(
+                    &mut diagnostics,
+                    Diagnostic::at(
+                        source,
+                        function.name_span,
+                        "`main` cannot have parameters yet",
+                    ),
+                );
+                continue;
             }
         }
-        type_param_names(&function.type_params, source)?;
+        if let Err(diagnostic) = type_param_names(&function.type_params, source) {
+            push_capped(&mut diagnostics, diagnostic);
+            continue;
+        }
         if tables.functions.contains_key(&function.name) {
-            return Err(Diagnostic::at(
-                source,
-                function.name_span,
-                format!("function `{}` is already defined", function.name),
-            ));
+            push_capped(
+                &mut diagnostics,
+                Diagnostic::at(
+                    source,
+                    function.name_span,
+                    format!("function `{}` is already defined", function.name),
+                ),
+            );
+            continue;
         }
         let bounds = type_param_bounds(&function.type_params);
         tables.functions.insert(
@@ -344,28 +440,44 @@ fn build_templates(
 
     // trait 声明。
     for item in &ast.traits {
+        if diagnostics.len() >= DIAGNOSTIC_LIMIT {
+            return (tables, diagnostics);
+        }
         let source = &sources[item.source_id];
-        type_param_names(&item.type_params, source)?;
+        if let Err(diagnostic) = type_param_names(&item.type_params, source) {
+            push_capped(&mut diagnostics, diagnostic);
+            continue;
+        }
         if tables.traits.contains_key(&item.name)
             || tables.structs.contains_key(&item.name)
             || tables.enums.contains_key(&item.name)
         {
-            return Err(Diagnostic::at(
-                source,
-                item.name_span,
-                format!("trait `{}` is already defined", item.name),
-            ));
+            push_capped(
+                &mut diagnostics,
+                Diagnostic::at(
+                    source,
+                    item.name_span,
+                    format!("trait `{}` is already defined", item.name),
+                ),
+            );
+            continue;
         }
         let mut associated_types = Vec::new();
+        let mut duplicate_associated = None;
         for associated in &item.associated_types {
             if associated_types.contains(&associated.name) {
-                return Err(Diagnostic::at(
+                duplicate_associated = Some(Diagnostic::at(
                     source,
                     associated.name_span,
                     format!("associated type `{}` is already declared", associated.name),
                 ));
+                break;
             }
             associated_types.push(associated.name.clone());
+        }
+        if let Some(diagnostic) = duplicate_associated {
+            push_capped(&mut diagnostics, diagnostic);
+            continue;
         }
         tables.traits.insert(
             item.name.clone(),
@@ -377,43 +489,67 @@ fn build_templates(
     }
 
     // impl 块。
-    for item in &ast.impls {
+    'impls: for item in &ast.impls {
+        if diagnostics.len() >= DIAGNOSTIC_LIMIT {
+            return (tables, diagnostics);
+        }
         let source = &sources[item.source_id];
-        validate_impl_header(&tables, source, item)?;
-        let type_params = type_param_names(&item.type_params, source)?;
+        if let Some(diagnostic) = validate_impl_header(&tables, source, item) {
+            push_capped(&mut diagnostics, diagnostic);
+            continue;
+        }
+        let type_params = match type_param_names(&item.type_params, source) {
+            Ok(names) => names,
+            Err(diagnostic) => {
+                push_capped(&mut diagnostics, diagnostic);
+                continue;
+            }
+        };
         if let Some(trait_name) = &item.trait_name {
             let Some(trait_template) = tables
                 .traits
                 .get(trait_name)
                 .map(|template| (template.associated_types.clone(), template.methods.clone()))
             else {
-                return Err(Diagnostic::at(
-                    source,
-                    item.trait_span,
-                    format!("unknown trait `{trait_name}`"),
-                ));
+                push_capped(
+                    &mut diagnostics,
+                    Diagnostic::at(
+                        source,
+                        item.trait_span,
+                        format!("unknown trait `{trait_name}`"),
+                    ),
+                );
+                continue;
             };
             let (trait_associated, trait_methods) = trait_template;
             if tables
                 .trait_impls
                 .contains_key(&(trait_name.clone(), item.type_name.clone()))
             {
-                return Err(Diagnostic::at(
-                    source,
-                    item.trait_span,
-                    format!(
-                        "`{}` already implements trait `{trait_name}`",
-                        item.type_name
+                push_capped(
+                    &mut diagnostics,
+                    Diagnostic::at(
+                        source,
+                        item.trait_span,
+                        format!(
+                            "`{}` already implements trait `{trait_name}`",
+                            item.type_name
+                        ),
                     ),
-                ));
+                );
+                continue;
             }
             for name in &trait_associated {
                 if !item.associated_types.iter().any(|b| b.name == *name) {
-                    return Err(Diagnostic::at(
-                        source,
-                        item.type_span,
-                        format!("impl of `{trait_name}` is missing associated type `{name}`"),
-                    ));
+                    push_capped(
+                        &mut diagnostics,
+                        Diagnostic::at(
+                            source,
+                            item.type_span,
+                            format!("impl of `{trait_name}` is missing associated type `{name}`"),
+                        ),
+                    );
+                    continue 'impls;
                 }
             }
             for trait_method in &trait_methods {
@@ -422,14 +558,18 @@ fn build_templates(
                     .iter()
                     .find(|method| method.name == trait_method.name)
                 else {
-                    return Err(Diagnostic::at(
-                        source,
-                        item.type_span,
-                        format!(
-                            "impl of `{trait_name}` is missing method `{}`",
-                            trait_method.name
+                    push_capped(
+                        &mut diagnostics,
+                        Diagnostic::at(
+                            source,
+                            item.type_span,
+                            format!(
+                                "impl of `{trait_name}` is missing method `{}`",
+                                trait_method.name
+                            ),
                         ),
-                    ));
+                    );
+                    continue 'impls;
                 };
                 let bindings: HashMap<String, ast::TypeRef> = item
                     .associated_types
@@ -442,35 +582,47 @@ fn build_templates(
                     &item.type_name,
                     &bindings,
                 ) {
-                    return Err(Diagnostic::at(
-                        source,
-                        implementation.name_span,
-                        format!(
-                            "method `{}` does not match the `{trait_name}` declaration",
-                            implementation.name
+                    push_capped(
+                        &mut diagnostics,
+                        Diagnostic::at(
+                            source,
+                            implementation.name_span,
+                            format!(
+                                "method `{}` does not match the `{trait_name}` declaration",
+                                implementation.name
+                            ),
                         ),
-                    ));
+                    );
+                    continue 'impls;
                 }
             }
             for binding in &item.associated_types {
                 if !trait_associated.contains(&binding.name) {
-                    return Err(Diagnostic::at(
-                        source,
-                        binding.name_span,
-                        format!(
-                            "`{}` is not an associated type of `{trait_name}`",
-                            binding.name
+                    push_capped(
+                        &mut diagnostics,
+                        Diagnostic::at(
+                            source,
+                            binding.name_span,
+                            format!(
+                                "`{}` is not an associated type of `{trait_name}`",
+                                binding.name
+                            ),
                         ),
-                    ));
+                    );
+                    continue 'impls;
                 }
             }
             for method in &item.methods {
                 if !trait_methods.iter().any(|m| m.name == method.name) {
-                    return Err(Diagnostic::at(
-                        source,
-                        method.name_span,
-                        format!("`{}` is not a method of `{trait_name}`", method.name),
-                    ));
+                    push_capped(
+                        &mut diagnostics,
+                        Diagnostic::at(
+                            source,
+                            method.name_span,
+                            format!("`{}` is not a method of `{trait_name}`", method.name),
+                        ),
+                    );
+                    continue 'impls;
                 }
             }
             tables.trait_impls.insert(
@@ -486,14 +638,20 @@ fn build_templates(
             );
         }
         let mut seen_associated = std::collections::HashSet::new();
+        let mut duplicate_binding = None;
         for binding in &item.associated_types {
             if !seen_associated.insert(binding.name.clone()) {
-                return Err(Diagnostic::at(
+                duplicate_binding = Some(Diagnostic::at(
                     source,
                     binding.name_span,
                     format!("associated type `{}` is bound more than once", binding.name),
                 ));
+                break;
             }
+        }
+        if let Some(diagnostic) = duplicate_binding {
+            push_capped(&mut diagnostics, diagnostic);
+            continue;
         }
         for method in &item.methods {
             let key = format!("{}::{}", item.type_name, method.name);
@@ -502,11 +660,15 @@ fn build_templates(
                     Some(trait_name) => format!("trait `{trait_name}`"),
                     None => "an inherent impl".to_string(),
                 };
-                return Err(Diagnostic::at(
-                    source,
-                    method.name_span,
-                    format!("method `{key}` is already defined by {owner}"),
-                ));
+                push_capped(
+                    &mut diagnostics,
+                    Diagnostic::at(
+                        source,
+                        method.name_span,
+                        format!("method `{key}` is already defined by {owner}"),
+                    ),
+                );
+                continue 'impls;
             }
             tables.methods.insert(
                 key,
@@ -526,7 +688,7 @@ fn build_templates(
             );
         }
     }
-    Ok(tables)
+    (tables, diagnostics)
 }
 
 /// H18-05：在声明处校验 impl 头。
@@ -539,10 +701,10 @@ fn validate_impl_header(
     tables: &TemplateTables,
     source: &SourceFile,
     item: &ast::ImplBlock,
-) -> Result<(), Diagnostic> {
+) -> Option<Diagnostic> {
     for param in &item.type_params {
         if param.bound.is_some() {
-            return Err(Diagnostic::at(
+            return Some(Diagnostic::at(
                 source,
                 param.name_span,
                 "bounds on impl type parameters are not supported yet; declare the bound on the type instead",
@@ -551,7 +713,7 @@ fn validate_impl_header(
     }
     for method in &item.methods {
         if let Some(param) = method.type_params.first() {
-            return Err(Diagnostic::at(
+            return Some(Diagnostic::at(
                 source,
                 param.name_span,
                 format!(
@@ -562,7 +724,7 @@ fn validate_impl_header(
         }
     }
     if let Some(argument) = item.trait_arguments.first() {
-        return Err(Diagnostic::at(
+        return Some(Diagnostic::at(
             source,
             argument.span,
             "generic trait arguments are not supported yet",
@@ -573,7 +735,7 @@ fn validate_impl_header(
         .iter()
         .any(|param| param.name == item.type_name)
     {
-        return Err(Diagnostic::at(
+        return Some(Diagnostic::at(
             source,
             item.type_span,
             "blanket impl is not supported; the impl target must be a named struct or enum",
@@ -590,21 +752,21 @@ fn validate_impl_header(
                 .map(|template| template.type_params.clone())
         });
     let Some(declaration_params) = declaration_params else {
-        return Err(Diagnostic::at(
+        return Some(Diagnostic::at(
             source,
             item.type_span,
             format!("unknown type `{}`", item.type_name),
         ));
     };
     if item.type_params.is_empty() && !item.type_arguments.is_empty() {
-        return Err(Diagnostic::at(
+        return Some(Diagnostic::at(
             source,
             item.type_span,
             "concrete impl targets for generic types are not supported; declare impl type parameters and use them as target arguments",
         ));
     }
     if item.type_params.len() != declaration_params.len() {
-        return Err(Diagnostic::at(
+        return Some(Diagnostic::at(
             source,
             item.type_span,
             format!(
@@ -617,7 +779,7 @@ fn validate_impl_header(
         ));
     }
     if item.type_arguments.len() != declaration_params.len() {
-        return Err(Diagnostic::at(
+        return Some(Diagnostic::at(
             source,
             item.type_span,
             format!(
@@ -635,14 +797,14 @@ fn validate_impl_header(
                 if arguments.is_empty() && name == &item.type_params[index].name
         );
         if !matches {
-            return Err(Diagnostic::at(
+            return Some(Diagnostic::at(
                 source,
                 argument.span,
                 "impl target must use the impl type parameters in order; specialization, reordering, repeated and nested arguments are not supported",
             ));
         }
     }
-    Ok(())
+    None
 }
 
 fn type_param_names(
@@ -938,6 +1100,11 @@ impl<'a> FunctionLowerer<'a> {
 
     fn concrete_type_id(&self, name: &str) -> Option<TypeId> {
         self.state.borrow().concrete_type_id(self.tables, name)
+    }
+
+    /// 错误消息中的类型显示：用户类型用可读限定名与泛型实参（M20/H20-01）。
+    fn display_type(&self, ty: &Type) -> String {
+        self.state.borrow().display_type(ty)
     }
 
     fn signature_of(&self, id: FunctionId) -> Signature {
@@ -1407,7 +1574,7 @@ impl<'a> FunctionLowerer<'a> {
                 return Err(Diagnostic::at(
                     self.source,
                     name_span,
-                    format!("cannot index value of type `{other}`"),
+                    format!("cannot index value of type `{}`", self.display_type(&other)),
                 ));
             }
         }
@@ -1446,7 +1613,10 @@ impl<'a> FunctionLowerer<'a> {
                 return Err(Diagnostic::at(
                     self.source,
                     name_span,
-                    format!("cannot access field on pointee type `{pointee}`"),
+                    format!(
+                        "cannot access field on pointee type `{}`",
+                        self.display_type(pointee)
+                    ),
                 ));
             };
             id
@@ -1649,7 +1819,10 @@ impl<'a> FunctionLowerer<'a> {
                 return Err(Diagnostic::at(
                     self.source,
                     span,
-                    format!("expected a return value of type `{expected}`"),
+                    format!(
+                        "expected a return value of type `{}`",
+                        self.display_type(&expected)
+                    ),
                 ));
             }
         };
@@ -1886,7 +2059,10 @@ impl<'a> FunctionLowerer<'a> {
             other => Err(Diagnostic::at(
                 self.source,
                 expression.span,
-                format!("`for` expects an array, slice, range, or iterator, found `{other}`"),
+                format!(
+                    "`for` expects an array, slice, range, or iterator, found `{}`",
+                    self.display_type(&other)
+                ),
             )),
         }
     }
@@ -2152,7 +2328,7 @@ impl<'a> FunctionLowerer<'a> {
                         return Err(Diagnostic::at(
                             self.source,
                             array.span,
-                            format!("cannot index value of type `{other}`"),
+                            format!("cannot index value of type `{}`", self.display_type(&other)),
                         ));
                     }
                 };
@@ -2226,7 +2402,7 @@ impl<'a> FunctionLowerer<'a> {
                         return Err(Diagnostic::at(
                             self.source,
                             expression.span,
-                            format!("cannot negate `{}`", operand.ty),
+                            format!("cannot negate `{}`", self.display_type(&operand.ty)),
                         ));
                     }
                     UnaryOperator::Not => Type::Bool,
@@ -2326,7 +2502,10 @@ impl<'a> FunctionLowerer<'a> {
                 return Err(Diagnostic::at(
                     self.source,
                     span,
-                    format!("cannot dereference value of type `{other}`"),
+                    format!(
+                        "cannot dereference value of type `{}`",
+                        self.display_type(other)
+                    ),
                 ));
             }
         };
@@ -2408,7 +2587,7 @@ impl<'a> FunctionLowerer<'a> {
                         return Err(Diagnostic::at(
                             self.source,
                             expr.span,
-                            format!("cannot index value of type `{other}`"),
+                            format!("cannot index value of type `{}`", self.display_type(other)),
                         ));
                     }
                 };
@@ -2436,7 +2615,10 @@ impl<'a> FunctionLowerer<'a> {
                         return Err(Diagnostic::at(
                             self.source,
                             expr.span,
-                            format!("cannot dereference value of type `{other}`"),
+                            format!(
+                                "cannot dereference value of type `{}`",
+                                self.display_type(other)
+                            ),
                         ));
                     }
                 };
@@ -2890,7 +3072,7 @@ impl<'a> FunctionLowerer<'a> {
             other => Err(Diagnostic::at(
                 self.source,
                 span,
-                format!("type `{other}` has no methods"),
+                format!("type `{}` has no methods", self.display_type(other)),
             )),
         }
     }
@@ -3407,7 +3589,10 @@ impl<'a> FunctionLowerer<'a> {
             return Err(Diagnostic::at(
                 self.source,
                 span,
-                format!("`mem.{name}` cannot operate on zero-sized type `{element}`"),
+                format!(
+                    "`mem.{name}` cannot operate on zero-sized type `{}`",
+                    self.display_type(element)
+                ),
             ));
         }
         Ok(())
@@ -3817,7 +4002,10 @@ impl<'a> FunctionLowerer<'a> {
                     return Err(Diagnostic::at(
                         self.source,
                         span,
-                        format!("values of type `{}` cannot be ordered", left.ty),
+                        format!(
+                            "values of type `{}` cannot be ordered",
+                            self.display_type(&left.ty)
+                        ),
                     ));
                 }
                 self.require_type(&right.ty, &left.ty, span)?;
@@ -3828,7 +4016,10 @@ impl<'a> FunctionLowerer<'a> {
                     return Err(Diagnostic::at(
                         self.source,
                         span,
-                        format!("values of type `{}` cannot be compared", left.ty),
+                        format!(
+                            "values of type `{}` cannot be compared",
+                            self.display_type(&left.ty)
+                        ),
                     ));
                 }
                 self.require_type(&right.ty, &left.ty, span)?;
@@ -3886,7 +4077,11 @@ impl<'a> FunctionLowerer<'a> {
             Err(Diagnostic::at(
                 self.source,
                 span,
-                format!("expected `{expected}`, found `{actual}`"),
+                format!(
+                    "expected `{}`, found `{}`",
+                    self.display_type(expected),
+                    self.display_type(actual)
+                ),
             ))
         }
     }
@@ -4384,6 +4579,47 @@ mod tests {
     fn rejects_assignment_to_val() {
         let error = lower_text("fn main() { val answer = 42; answer = 0; }").unwrap_err();
         assert!(error.to_string().contains("immutable variable"));
+    }
+
+    #[test]
+    fn collecting_lowering_reports_independent_declarations() {
+        let source = SourceFile::new(
+            PathBuf::from("main.do"),
+            "impl Missing0 { }\nimpl Missing1 { }\nfn main() { return 0; }\n".to_string(),
+        );
+        let tokens = lexer::lex(&source).unwrap();
+        let ast = parser::parse(&source, tokens).unwrap();
+        let loaded = crate::modules::inject_stdlib(&source, &ast).unwrap();
+        let errors = lower_sources_analysis_collecting(
+            &loaded.sources,
+            &loaded.program,
+            &loaded.packages,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].message().contains("unknown type `Missing0`"));
+        assert!(errors[1].message().contains("unknown type `Missing1`"));
+    }
+
+    #[test]
+    fn collecting_lowering_keeps_first_body_error() {
+        let source = SourceFile::new(
+            PathBuf::from("main.do"),
+            "fn main() { val a: i32 = true; val b: i32 = \"x\"; return; }\n".to_string(),
+        );
+        let tokens = lexer::lex(&source).unwrap();
+        let ast = parser::parse(&source, tokens).unwrap();
+        let loaded = crate::modules::inject_stdlib(&source, &ast).unwrap();
+        let errors = lower_sources_analysis_collecting(
+            &loaded.sources,
+            &loaded.program,
+            &loaded.packages,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(errors.len(), 1, "函数体 lowering 仍首错即停：{errors:?}");
+        assert!(errors[0].message().contains("expected `i32`, found `bool`"));
     }
 
     #[test]

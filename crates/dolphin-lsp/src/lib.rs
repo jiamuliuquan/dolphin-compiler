@@ -4,15 +4,15 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use dolphin_hir::lower::lower;
-use dolphin_source::diagnostic::Diagnostic;
-use dolphin_source::lexer::lex;
-use dolphin_source::source::{SourceFile, Span};
+use dolphin_hir::lower::lower_collecting;
+use dolphin_source::diagnostic::{Diagnostic, Label, Severity};
+use dolphin_source::lexer::{lex, lex_recovering};
+use dolphin_source::source::{SourceFile, SourceId, SourceMap, Span};
 use dolphin_source::token::{Token, TokenKind};
 use dolphin_syntax::ast;
-use dolphin_syntax::parser::parse;
+use dolphin_syntax::parser::{parse, parse_recovering};
 use serde_json::{Value, json};
 
 // LSP `SymbolKind` 取值。
@@ -202,10 +202,12 @@ impl Server {
     }
 
     fn publish(&self, uri: &str, text: &str) -> Vec<Value> {
-        let source = SourceFile::new(path_for(uri), text.to_string());
+        // 单文件分析的 `SourceId` 固定为 0，与 `SourceMap` 一起让结构化诊断能换算位置。
+        let source = SourceFile::with_id(SourceId(0), path_for(uri), text.to_string());
+        let map = SourceMap::new(std::slice::from_ref(&source));
         let diagnostics = analyze(&source)
             .iter()
-            .map(|diagnostic| diagnostic_to_lsp(&source, diagnostic))
+            .map(|diagnostic| diagnostic_to_lsp(&map, diagnostic))
             .collect::<Vec<_>>();
         vec![notification(
             "textDocument/publishDiagnostics",
@@ -377,16 +379,16 @@ fn identifier_at(tokens: &[Token], offset: usize) -> Option<(String, Span)> {
     None
 }
 
-/// 词法/语法错误直接返回；无 `pkg`/`use` 时再运行语义检查。
+/// 词法/语法错误全部返回（收集式）；无 `pkg`/`use` 时再运行语义检查。
 fn analyze(source: &SourceFile) -> Vec<Diagnostic> {
-    let tokens = match lex(source) {
-        Ok(tokens) => tokens,
-        Err(diagnostic) => return vec![diagnostic],
-    };
-    let program = match parse(source, tokens) {
-        Ok(program) => program,
-        Err(diagnostic) => return vec![diagnostic],
-    };
+    let (tokens, lex_diagnostics) = lex_recovering(source);
+    if !lex_diagnostics.is_empty() {
+        return lex_diagnostics;
+    }
+    let (program, parse_diagnostics) = parse_recovering(source, tokens);
+    if !parse_diagnostics.is_empty() {
+        return parse_diagnostics;
+    }
     if program.package.is_some() || !program.uses.is_empty() {
         return Vec::new();
     }
@@ -398,48 +400,82 @@ fn analyze(source: &SourceFile) -> Vec<Diagnostic> {
     {
         return Vec::new();
     }
-    match lower(source, &program) {
+    match lower_collecting(source, &program) {
         Ok(_) => Vec::new(),
-        Err(diagnostic) => vec![diagnostic],
+        Err(diagnostics) => diagnostics,
     }
 }
 
-fn diagnostic_to_lsp(source: &SourceFile, diagnostic: &Diagnostic) -> Value {
-    let rendered = diagnostic.to_string();
-    let range = match rendered_location(&rendered) {
-        Some((line, column)) => {
-            let start = char_column_to_offset(source, line, column);
-            let end = next_char_end(source, start);
-            json!({
-                "start": offset_to_position(source, start),
-                "end": offset_to_position(source, end),
-            })
-        }
-        None => json!({
-            "start": { "line": 0, "character": 0 },
-            "end": { "line": 0, "character": 0 },
-        }),
+/// 结构化诊断 -> LSP `PublishDiagnosticsParams.diagnostics` 元素（M20 §4.1 规则 6）。
+fn diagnostic_to_lsp(map: &SourceMap<'_>, diagnostic: &Diagnostic) -> Value {
+    let range = match diagnostic.labels().first() {
+        Some(label) => label_range(map, label),
+        None => zero_range(),
     };
-    json!({
+    let related = diagnostic
+        .labels()
+        .iter()
+        .skip(1)
+        .map(|label| {
+            json!({
+                "location": {
+                    "uri": uri_for_path(map, label.source),
+                    "range": label_range(map, label),
+                },
+                "message": label.message,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut value = json!({
         "range": range,
-        "severity": 1,
+        "severity": severity_to_lsp(diagnostic.severity()),
+        "code": diagnostic.code(),
         "source": "dolphin",
-        "message": rendered,
+        "message": diagnostic.message(),
+    });
+    if !related.is_empty() {
+        value["relatedInformation"] = Value::Array(related);
+    }
+    value
+}
+
+fn severity_to_lsp(severity: Severity) -> u32 {
+    match severity {
+        Severity::Error => 1,
+        Severity::Warning => 2,
+        Severity::Note => 3,
+    }
+}
+
+fn zero_range() -> Value {
+    json!({
+        "start": { "line": 0, "character": 0 },
+        "end": { "line": 0, "character": 0 },
     })
 }
 
-/// 解析渲染诊断中的 ` --> <path>:<line>:<col>` 行，返回 1-based `(line, col)`。
-fn rendered_location(rendered: &str) -> Option<(usize, usize)> {
-    for line in rendered.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("--> ") else {
-            continue;
-        };
-        let mut parts = rest.rsplitn(3, ':');
-        let column = parts.next()?.trim().parse().ok()?;
-        let line = parts.next()?.trim().parse().ok()?;
-        return Some((line, column));
+fn label_range(map: &SourceMap<'_>, label: &Label) -> Value {
+    match map.file(label.source) {
+        Some(source) => range_json(source, label.span),
+        None => zero_range(),
     }
-    None
+}
+
+/// relatedInformation 的 URI（完整 URI 编解码属 H20-02）。
+fn uri_for_path(map: &SourceMap<'_>, id: SourceId) -> String {
+    match map.path(id) {
+        Some(path) => path_to_uri(path),
+        None => String::new(),
+    }
+}
+
+fn path_to_uri(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
 }
 
 fn range_json(source: &SourceFile, span: Span) -> Value {
@@ -480,31 +516,6 @@ fn position_to_offset(source: &SourceFile, line: u64, character: u64) -> usize {
         byte += character_unit.len_utf8();
     }
     byte
-}
-
-/// 1-based 字符列 → 行内字节偏移。
-fn char_column_to_offset(source: &SourceFile, line: usize, column: usize) -> usize {
-    if line == 0 || line > source.line_count() {
-        return 0;
-    }
-    let mut byte = source.line_start(line);
-    let mut remaining = column.saturating_sub(1);
-    for character in source.line_text(line).chars() {
-        if remaining == 0 {
-            break;
-        }
-        byte += character.len_utf8();
-        remaining -= 1;
-    }
-    byte
-}
-
-fn next_char_end(source: &SourceFile, start: usize) -> usize {
-    let mut end = start.saturating_add(1).min(source.text.len());
-    while end < source.text.len() && !source.text.is_char_boundary(end) {
-        end += 1;
-    }
-    end
 }
 
 fn path_for(uri: &str) -> PathBuf {
@@ -669,5 +680,71 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0]["id"], 99);
         assert_eq!(outputs[0]["result"], Value::Null);
+    }
+
+    #[test]
+    fn structured_diagnostics_use_code_message_and_utf16_range() {
+        let mut server = Server::new();
+        let outputs = open(
+            &mut server,
+            "file:///bad.do",
+            "fn main() {\n    return missing;\n}\n",
+        );
+        let diagnostics = diagnostics(&outputs).as_array().unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["code"], "E0001");
+        assert_eq!(diagnostics[0]["message"], "unknown variable `missing`");
+        assert_eq!(diagnostics[0]["severity"], 1);
+        assert_eq!(diagnostics[0]["source"], "dolphin");
+        assert_eq!(
+            diagnostics[0]["range"]["start"],
+            json!({ "line": 1, "character": 11 })
+        );
+        assert_eq!(
+            diagnostics[0]["range"]["end"],
+            json!({ "line": 1, "character": 18 })
+        );
+    }
+
+    #[test]
+    fn related_information_maps_secondary_labels() {
+        let primary = SourceFile::with_id(
+            SourceId(0),
+            PathBuf::from("/a.do"),
+            "fn a() {}\n".to_string(),
+        );
+        let related = SourceFile::with_id(
+            SourceId(1),
+            PathBuf::from("/b.do"),
+            "fn b() {}\n".to_string(),
+        );
+        let files = vec![primary, related];
+        let map = SourceMap::new(&files);
+        let diagnostic = Diagnostic::at(&files[0], Span::new(3, 4), "duplicate").with_label(
+            &files[1],
+            Span::new(3, 4),
+            "previous definition",
+        );
+        let value = diagnostic_to_lsp(&map, &diagnostic);
+        assert_eq!(value["code"], "E0001");
+        assert_eq!(value["message"], "duplicate");
+        assert_eq!(value["range"]["start"]["character"], 3);
+        let related_info = value["relatedInformation"].as_array().unwrap();
+        assert_eq!(related_info.len(), 1);
+        assert_eq!(related_info[0]["location"]["uri"], "file:///b.do");
+        assert_eq!(related_info[0]["message"], "previous definition");
+        assert_eq!(
+            related_info[0]["location"]["range"]["start"]["character"],
+            3
+        );
+    }
+
+    #[test]
+    fn anonymous_diagnostic_without_map_entry_gets_zero_range() {
+        let anonymous = SourceFile::new(PathBuf::from("/anon.do"), "fn a() {}\n".to_string());
+        let diagnostic = Diagnostic::at(&anonymous, Span::new(3, 4), "bad");
+        let map = SourceMap::new(std::slice::from_ref(&anonymous));
+        let value = diagnostic_to_lsp(&map, &diagnostic);
+        assert_eq!(value["range"], zero_range());
     }
 }

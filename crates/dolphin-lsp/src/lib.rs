@@ -1,18 +1,25 @@
-//! Dolphin 语言服务器（M17）：标准输入/输出上的最小 LSP 实现。
+//! Dolphin 语言服务器（M17；M20/H20-03 升级为项目级分析）。
 //!
-//! 提供文档诊断、文档符号、悬停与跳转定义，覆盖 M1-M15 语法。
+//! 在标准输入/输出上提供最小 LSP：结构化诊断、文档符号、悬停与跳转定义。
+//! 项目模式下使用 `dolphin-analysis` 的共享分析快照与符号索引（overlay、跨文件与
+//! 跨包定义、局部遮蔽），不做文本同名猜测；无清单时按单文件规则分析。
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
 
-use dolphin_hir::lower::lower_collecting;
+use dolphin_analysis::{
+    AnalysisHost, AnalysisMode, AnalysisSnapshot, DefKind, Resolution, SingleFileAnalysis,
+    SymbolId, SymbolIndex, analyze_single_file, path_to_uri, uri_to_path,
+};
 use dolphin_source::diagnostic::{Diagnostic, Label, Severity};
-use dolphin_source::lexer::{lex, lex_recovering};
+use dolphin_source::lexer::lex;
 use dolphin_source::source::{SourceFile, SourceId, SourceMap, Span};
 use dolphin_source::token::{Token, TokenKind};
 use dolphin_syntax::ast;
-use dolphin_syntax::parser::{parse, parse_recovering};
+use dolphin_syntax::parser::parse;
 use serde_json::{Value, json};
 
 // LSP `SymbolKind` 取值。
@@ -26,12 +33,15 @@ const SYMBOL_STRUCT: u32 = 23;
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 /// 在 stdin/stdout 上运行语言服务器，直到客户端发送 `exit`。
-pub fn serve() -> io::Result<()> {
+///
+/// 退出码按 §7.2：已 `shutdown` 后 `exit` 或 EOF 为 0；未 `shutdown` 的 `exit` 为 1。
+pub fn serve(project: Option<PathBuf>) -> io::Result<ExitCode> {
+    let root = project.unwrap_or_else(|| PathBuf::from("."));
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = io::BufReader::new(stdin.lock());
     let mut writer = io::BufWriter::new(stdout.lock());
-    let mut server = Server::new();
+    let mut server = Server::with_root(root);
 
     while let Some(body) = read_message(&mut reader)? {
         let Ok(message) = serde_json::from_slice::<Value>(&body) else {
@@ -45,7 +55,7 @@ pub fn serve() -> io::Result<()> {
             break;
         }
     }
-    Ok(())
+    Ok(server.exit_code())
 }
 
 fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
@@ -93,16 +103,76 @@ fn write_message(writer: &mut impl Write, message: &Value) -> io::Result<()> {
 }
 
 /// 协议处理器：不依赖标准输入/输出，便于单元测试。
-#[derive(Default)]
 pub struct Server {
-    documents: HashMap<String, String>,
+    host: AnalysisHost,
+    /// 打开的文档，按 URI 字典序排列（发布顺序确定性，§7.3 规则 2）。
+    documents: BTreeMap<String, OpenDocument>,
+    initialized: bool,
+    shutdown: bool,
     /// 收到 `exit` 后置位，由传输循环负责终止。
     pub exited: bool,
+    last_project_message: Option<String>,
+}
+
+/// 一个打开文档的未保存文本、版本与上次发布的诊断。
+struct OpenDocument {
+    uri: String,
+    path: Option<PathBuf>,
+    version: u64,
+    text: String,
+    last_published: Option<Vec<Value>>,
+    single_file: Option<(u64, Arc<SingleFileAnalysis>)>,
+}
+
+impl OpenDocument {
+    /// 该文档当前版本的单文件分析；同版本重复查询复用缓存。
+    fn single_file(&mut self) -> Arc<SingleFileAnalysis> {
+        if let Some((version, analysis)) = &self.single_file
+            && *version == self.version
+        {
+            return analysis.clone();
+        }
+        let path = self
+            .path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(&self.uri));
+        let source = SourceFile::with_id(SourceId(0), path, self.text.clone());
+        let analysis = Arc::new(analyze_single_file(&source));
+        self.single_file = Some((self.version, analysis.clone()));
+        analysis
+    }
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Server {
+    /// 默认项目根为当前目录。
     pub fn new() -> Self {
-        Self::default()
+        Self::with_root(PathBuf::from("."))
+    }
+
+    pub fn with_root(root: PathBuf) -> Self {
+        Server {
+            host: AnalysisHost::new(root),
+            documents: BTreeMap::new(),
+            initialized: false,
+            shutdown: false,
+            exited: false,
+            last_project_message: None,
+        }
+    }
+
+    /// 传输循环终止后使用的退出码（§7.2）。
+    pub fn exit_code(&self) -> ExitCode {
+        if self.exited && !self.shutdown {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        }
     }
 
     /// 处理一条 JSON-RPC 消息，返回需要写回的响应与通知（按顺序）。
@@ -115,23 +185,34 @@ impl Server {
         let id = message.get("id").cloned();
         let params = message.get("params").cloned().unwrap_or(Value::Null);
 
-        match method.as_str() {
-            "initialize" => vec![response(
-                id,
-                json!({
-                    "capabilities": {
-                        "textDocumentSync": 1,
-                        "hoverProvider": true,
-                        "definitionProvider": true,
-                        "documentSymbolProvider": true,
-                    }
-                }),
-            )],
-            "initialized" => Vec::new(),
-            "shutdown" => vec![response(id, Value::Null)],
-            "exit" => {
-                self.exited = true;
+        if method == "exit" {
+            self.exited = true;
+            return Vec::new();
+        }
+        if !self.initialized {
+            return match method.as_str() {
+                "initialize" => {
+                    self.initialized = true;
+                    vec![response(id, capabilities())]
+                }
+                _ if id.is_some() => vec![error_response(id, -32002, "Server not initialized")],
+                _ => Vec::new(),
+            };
+        }
+        if self.shutdown {
+            return if id.is_some() {
+                vec![error_response(id, -32600, "Invalid Request")]
+            } else {
                 Vec::new()
+            };
+        }
+
+        match method.as_str() {
+            "initialize" => vec![response(id, capabilities())],
+            "initialized" => Vec::new(),
+            "shutdown" => {
+                self.shutdown = true;
+                vec![response(id, Value::Null)]
             }
             "textDocument/didOpen" => self.did_open(&params),
             "textDocument/didChange" => self.did_change(&params),
@@ -141,7 +222,7 @@ impl Server {
             "textDocument/definition" => vec![response(id, self.definition(&params))],
             _ => {
                 if id.is_some() {
-                    vec![response(id, Value::Null)]
+                    vec![error_response(id, -32601, "Method not found")]
                 } else {
                     Vec::new()
                 }
@@ -156,13 +237,34 @@ impl Server {
         let uri = document
             .get("uri")
             .and_then(Value::as_str)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_string();
         let text = document
             .get("text")
             .and_then(Value::as_str)
-            .unwrap_or_default();
-        self.documents.insert(uri.to_string(), text.to_string());
-        self.publish(uri, text)
+            .unwrap_or_default()
+            .to_string();
+        let version = document.get("version").and_then(Value::as_u64).unwrap_or(0);
+        let path = uri_to_path(&uri);
+        if let Some(path) = &path {
+            let accepted = self.host.set_overlay(path.clone(), version, text.clone());
+            if !accepted && self.documents.contains_key(&uri) {
+                // 重复打开且 overlay 版本不更新：忽略，保持最新文本。
+                return Vec::new();
+            }
+        }
+        self.documents.insert(
+            uri.clone(),
+            OpenDocument {
+                uri,
+                path,
+                version,
+                text,
+                last_published: None,
+                single_file: None,
+            },
+        );
+        self.publish_all()
     }
 
     fn did_change(&mut self, params: &Value) -> Vec<Value> {
@@ -172,7 +274,9 @@ impl Server {
         let uri = document
             .get("uri")
             .and_then(Value::as_str)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_string();
+        let version = document.get("version").and_then(Value::as_u64).unwrap_or(0);
         let Some(text) = params
             .get("contentChanges")
             .and_then(Value::as_array)
@@ -182,8 +286,28 @@ impl Server {
         else {
             return Vec::new();
         };
-        self.documents.insert(uri.to_string(), text.to_string());
-        self.publish(uri, text)
+        let Some(current) = self.documents.get(&uri) else {
+            return Vec::new();
+        };
+        if version <= current.version {
+            // 旧版本 overlay 不生效（§6.5 规则 2），保持最新文本。
+            return Vec::new();
+        }
+        let path = current.path.clone();
+        if let Some(path) = &path
+            && !self
+                .host
+                .set_overlay(path.clone(), version, text.to_string())
+        {
+            return Vec::new();
+        }
+        let Some(document) = self.documents.get_mut(&uri) else {
+            return Vec::new();
+        };
+        document.version = version;
+        document.text = text.to_string();
+        document.single_file = None;
+        self.publish_all()
     }
 
     fn did_close(&mut self, params: &Value) -> Vec<Value> {
@@ -193,26 +317,60 @@ impl Server {
         let uri = document
             .get("uri")
             .and_then(Value::as_str)
-            .unwrap_or_default();
-        self.documents.remove(uri);
-        vec![notification(
+            .unwrap_or_default()
+            .to_string();
+        if let Some(document) = self.documents.remove(&uri)
+            && let Some(path) = &document.path
+        {
+            self.host.remove_overlay(path);
+        }
+        let mut outputs = vec![notification(
             "textDocument/publishDiagnostics",
             json!({ "uri": uri, "diagnostics": [] }),
-        )]
+        )];
+        outputs.extend(self.publish_all());
+        outputs
     }
 
-    fn publish(&self, uri: &str, text: &str) -> Vec<Value> {
-        // 单文件分析的 `SourceId` 固定为 0，与 `SourceMap` 一起让结构化诊断能换算位置。
-        let source = SourceFile::with_id(SourceId(0), path_for(uri), text.to_string());
-        let map = SourceMap::new(std::slice::from_ref(&source));
-        let diagnostics = analyze(&source)
-            .iter()
-            .map(|diagnostic| diagnostic_to_lsp(&map, diagnostic))
-            .collect::<Vec<_>>();
-        vec![notification(
-            "textDocument/publishDiagnostics",
-            json!({ "uri": uri, "diagnostics": diagnostics }),
-        )]
+    /// 重算全部打开文档的诊断；只在集合变化时发布（§7.3）。
+    fn publish_all(&mut self) -> Vec<Value> {
+        let snapshot = self.host.snapshot();
+        let mut outputs = Vec::new();
+        let project_message = (!snapshot.project_diagnostics.is_empty()).then(|| {
+            snapshot
+                .project_diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        match project_message {
+            Some(message) => {
+                if self.last_project_message.as_deref() != Some(message.as_str()) {
+                    outputs.push(notification(
+                        "window/showMessage",
+                        json!({ "type": 1, "message": message.clone() }),
+                    ));
+                    self.last_project_message = Some(message);
+                }
+            }
+            None => self.last_project_message = None,
+        }
+        let uris: Vec<String> = self.documents.keys().cloned().collect();
+        for uri in uris {
+            let Some(document) = self.documents.get_mut(&uri) else {
+                continue;
+            };
+            let diagnostics = document_diagnostics(&snapshot, document);
+            if document.last_published.as_ref() == Some(&diagnostics) {
+                continue;
+            }
+            document.last_published = Some(diagnostics.clone());
+            let mut params = json!({ "uri": uri, "diagnostics": diagnostics });
+            params["version"] = json!(document.version);
+            outputs.push(notification("textDocument/publishDiagnostics", params));
+        }
+        outputs
     }
 
     fn document_symbol(&self, params: &Value) -> Value {
@@ -233,72 +391,209 @@ impl Server {
         Value::Array(symbols)
     }
 
-    fn hover(&self, params: &Value) -> Value {
-        let Some((source, program)) = self.parsed(params) else {
+    fn hover(&mut self, params: &Value) -> Value {
+        let Some(uri) = document_uri(params) else {
             return Value::Null;
         };
-        let Some((name, span)) = self.identifier(params, &source) else {
+        let Some((line, character)) = cursor(params) else {
             return Value::Null;
         };
-        let Some(declaration) = find_declaration(&program, &name) else {
-            return Value::Null;
-        };
-        json!({
-            "contents": {
-                "kind": "markdown",
-                "value": format!("{} `{}`", declaration.kind_label, declaration.name),
-            },
-            "range": range_json(&source, span),
+        self.with_index(uri, |sources, source_id, index| {
+            let Some(source) = sources.get(source_id.0 as usize) else {
+                return Value::Null;
+            };
+            let offset = position_to_offset(source, line, character);
+            hover_at(sources, source_id, index, offset)
         })
+        .unwrap_or(Value::Null)
     }
 
-    fn definition(&self, params: &Value) -> Value {
-        let Some(uri) = params
-            .get("textDocument")
-            .and_then(|document| document.get("uri"))
-            .and_then(Value::as_str)
-        else {
+    fn definition(&mut self, params: &Value) -> Value {
+        let Some(uri) = document_uri(params) else {
             return Value::Null;
         };
-        let Some((source, program)) = self.parsed(params) else {
+        let Some((line, character)) = cursor(params) else {
             return Value::Null;
         };
-        let Some((name, _)) = self.identifier(params, &source) else {
-            return Value::Null;
-        };
-        let Some(declaration) = find_declaration(&program, &name) else {
-            return Value::Null;
-        };
-        json!({ "uri": uri, "range": range_json(&source, declaration.name_span) })
+        self.with_index(uri, |sources, source_id, index| {
+            let Some(source) = sources.get(source_id.0 as usize) else {
+                return Value::Null;
+            };
+            let offset = position_to_offset(source, line, character);
+            let (target_source, target_span) = match index.resolve(source_id, offset) {
+                Resolution::Local { source, name_span } => (source, name_span),
+                Resolution::Def(def) => match index.definition_of(&SymbolId::Def(def)) {
+                    Some(definition) => (definition.source, definition.name_span),
+                    None => return Value::Null,
+                },
+                Resolution::Instance { def, .. } => {
+                    match index.definition_of(&SymbolId::Def(def)) {
+                        Some(definition) => (definition.source, definition.name_span),
+                        None => return Value::Null,
+                    }
+                }
+                Resolution::Module { .. } | Resolution::Unresolved => return Value::Null,
+            };
+            location(sources, target_source, target_span)
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    /// 对打开文档执行一次索引查询：项目单元优先，否则单文件分析。
+    fn with_index<R>(
+        &mut self,
+        uri: &str,
+        query: impl FnOnce(&[SourceFile], SourceId, &SymbolIndex) -> R,
+    ) -> Option<R> {
+        let snapshot = self.host.snapshot();
+        let document = self.documents.get_mut(uri)?;
+        let path = document.path.clone()?;
+        if snapshot.mode == AnalysisMode::Project
+            && let Some(unit) = snapshot.unit_for_path(&path)
+            && let Some(source_id) = unit.source_id_for_path(&path)
+            && let Some(index) = unit.index.as_ref()
+        {
+            return Some(query(&unit.sources, source_id, index));
+        }
+        let analysis = document.single_file();
+        let index = analysis.index.as_ref()?;
+        let source_id = analysis.sources.first()?.id;
+        Some(query(&analysis.sources, source_id, index))
     }
 
     fn parsed(&self, params: &Value) -> Option<(SourceFile, ast::Program)> {
-        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
-        let text = self.documents.get(uri)?;
-        let source = SourceFile::new(path_for(uri), text.clone());
+        let uri = document_uri(params)?;
+        let text = self.documents.get(uri)?.text.as_str();
+        let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
+        let source = SourceFile::new(path, text.to_string());
         let tokens = lex(&source).ok()?;
         let program = parse(&source, tokens).ok()?;
         Some((source, program))
     }
+}
 
-    fn identifier(&self, params: &Value, source: &SourceFile) -> Option<(String, Span)> {
-        let position = params.get("position")?;
-        let line = position.get("line").and_then(Value::as_u64).unwrap_or(0);
-        let character = position
-            .get("character")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let offset = position_to_offset(source, line, character);
-        let tokens = lex(source).ok()?;
-        identifier_at(&tokens, offset)
+/// 该文档在当前快照下的 LSP 诊断数组（§7.3/§7.4）。
+fn document_diagnostics(snapshot: &AnalysisSnapshot, document: &mut OpenDocument) -> Vec<Value> {
+    if snapshot.mode == AnalysisMode::Project
+        && let Some(path) = &document.path
+        && let Some(unit) = snapshot.unit_for_path(path)
+        && let Some(source_id) = unit.source_id_for_path(path)
+    {
+        let map = SourceMap::new(&unit.sources);
+        return unit
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic
+                    .labels()
+                    .first()
+                    .is_some_and(|label| label.source == source_id)
+            })
+            .map(|diagnostic| diagnostic_to_lsp(&map, diagnostic))
+            .collect();
     }
+    // 项目解析失败或文档不在任何单元内：仍做单文件语法/语义分析，
+    // 保证“无法分析”不被显示为“没有错误”（§7.4）。
+    let analysis = document.single_file();
+    let map = SourceMap::new(&analysis.sources);
+    analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic_to_lsp(&map, diagnostic))
+        .collect()
+}
+
+/// 悬停结果：身份来自 `SymbolIndex`，未解析返回 `null`（§2.5、§7.5）。
+fn hover_at(
+    sources: &[SourceFile],
+    source_id: SourceId,
+    index: &SymbolIndex,
+    offset: usize,
+) -> Value {
+    let Some(source) = sources.get(source_id.0 as usize) else {
+        return Value::Null;
+    };
+    let Ok(tokens) = lex(source) else {
+        return Value::Null;
+    };
+    let Some((_, token_span)) = identifier_at(&tokens, offset) else {
+        return Value::Null;
+    };
+    let value = match index.resolve(source_id, offset) {
+        Resolution::Local {
+            source: local,
+            name_span,
+        } => {
+            let Some(local_source) = sources.get(local.0 as usize) else {
+                return Value::Null;
+            };
+            let Some(name) = slice_text(local_source, name_span) else {
+                return Value::Null;
+            };
+            match index.local_type(local, name_span) {
+                Some(ty) => format!("local `{name}`: {ty}"),
+                None => format!("local `{name}`"),
+            }
+        }
+        Resolution::Def(def) => {
+            let Some(text) = hover_definition(index, &SymbolId::Def(def)) else {
+                return Value::Null;
+            };
+            text
+        }
+        Resolution::Instance { def, type_args } => {
+            let Some(text) = hover_definition(index, &SymbolId::Instance { def, type_args }) else {
+                return Value::Null;
+            };
+            text
+        }
+        Resolution::Module { qualified } => {
+            let Some(display) = index.display_name(&SymbolId::Module { qualified }) else {
+                return Value::Null;
+            };
+            format!("module `{display}`")
+        }
+        Resolution::Unresolved => return Value::Null,
+    };
+    json!({
+        "contents": { "kind": "markdown", "value": value },
+        "range": range_json(source, token_span),
+    })
+}
+
+fn hover_definition(index: &SymbolIndex, symbol: &SymbolId) -> Option<String> {
+    let definition = index.definition_of(symbol)?;
+    let display = index.display_name(symbol)?;
+    Some(format!("{} `{display}`", kind_label(definition.kind)))
+}
+
+fn kind_label(kind: DefKind) -> &'static str {
+    match kind {
+        DefKind::Function | DefKind::Method => "fn",
+        DefKind::Struct => "struct",
+        DefKind::Enum => "enum",
+        DefKind::Trait => "trait",
+        DefKind::Field => "field",
+        DefKind::Variant => "variant",
+        DefKind::TypeParam => "type",
+    }
+}
+
+/// 定义位置：使用该分析单元的源码表把 `SourceId` 换算为 `file://` URI。
+fn location(sources: &[SourceFile], source_id: SourceId, span: Span) -> Value {
+    let Some(source) = sources.get(source_id.0 as usize) else {
+        return Value::Null;
+    };
+    json!({
+        "uri": path_to_uri(&source.path),
+        "range": range_json(source, span),
+    })
 }
 
 /// 收集单文件顶层声明的名称、种类与位置。
 struct Declaration {
     name: String,
     kind: u32,
-    kind_label: &'static str,
     name_span: Span,
     span: Span,
 }
@@ -309,7 +604,6 @@ fn collect_declarations(program: &ast::Program) -> Vec<Declaration> {
         declarations.push(Declaration {
             name: function.name.clone(),
             kind: SYMBOL_FUNCTION,
-            kind_label: "function",
             name_span: function.name_span,
             span: function.span,
         });
@@ -318,7 +612,6 @@ fn collect_declarations(program: &ast::Program) -> Vec<Declaration> {
         declarations.push(Declaration {
             name: structure.name.clone(),
             kind: SYMBOL_STRUCT,
-            kind_label: "struct",
             name_span: structure.name_span,
             span: structure.name_span,
         });
@@ -327,7 +620,6 @@ fn collect_declarations(program: &ast::Program) -> Vec<Declaration> {
         declarations.push(Declaration {
             name: enumeration.name.clone(),
             kind: SYMBOL_ENUM,
-            kind_label: "enum",
             name_span: enumeration.name_span,
             span: enumeration.name_span,
         });
@@ -336,7 +628,6 @@ fn collect_declarations(program: &ast::Program) -> Vec<Declaration> {
         declarations.push(Declaration {
             name: trait_decl.name.clone(),
             kind: SYMBOL_INTERFACE,
-            kind_label: "trait",
             name_span: trait_decl.name_span,
             span: trait_decl.name_span,
         });
@@ -345,18 +636,11 @@ fn collect_declarations(program: &ast::Program) -> Vec<Declaration> {
         declarations.push(Declaration {
             name: impl_block.type_name.clone(),
             kind: SYMBOL_OBJECT,
-            kind_label: "impl",
             name_span: impl_block.type_span,
             span: impl_block.type_span,
         });
     }
     declarations
-}
-
-fn find_declaration(program: &ast::Program, name: &str) -> Option<Declaration> {
-    collect_declarations(program)
-        .into_iter()
-        .find(|declaration| declaration.name == name)
 }
 
 fn identifier_at(tokens: &[Token], offset: usize) -> Option<(String, Span)> {
@@ -379,33 +663,6 @@ fn identifier_at(tokens: &[Token], offset: usize) -> Option<(String, Span)> {
     None
 }
 
-/// 词法/语法错误全部返回（收集式）；无 `pkg`/`use` 时再运行语义检查。
-fn analyze(source: &SourceFile) -> Vec<Diagnostic> {
-    let (tokens, lex_diagnostics) = lex_recovering(source);
-    if !lex_diagnostics.is_empty() {
-        return lex_diagnostics;
-    }
-    let (program, parse_diagnostics) = parse_recovering(source, tokens);
-    if !parse_diagnostics.is_empty() {
-        return parse_diagnostics;
-    }
-    if program.package.is_some() || !program.uses.is_empty() {
-        return Vec::new();
-    }
-    // 库文件或尚未写完 `main` 的文档不做语义检查，避免误报 "missing main"。
-    if !program
-        .functions
-        .iter()
-        .any(|function| function.name == "main")
-    {
-        return Vec::new();
-    }
-    match lower_collecting(source, &program) {
-        Ok(_) => Vec::new(),
-        Err(diagnostics) => diagnostics,
-    }
-}
-
 /// 结构化诊断 -> LSP `PublishDiagnosticsParams.diagnostics` 元素（M20 §4.1 规则 6）。
 fn diagnostic_to_lsp(map: &SourceMap<'_>, diagnostic: &Diagnostic) -> Value {
     let range = match diagnostic.labels().first() {
@@ -419,7 +676,7 @@ fn diagnostic_to_lsp(map: &SourceMap<'_>, diagnostic: &Diagnostic) -> Value {
         .map(|label| {
             json!({
                 "location": {
-                    "uri": uri_for_path(map, label.source),
+                    "uri": label_uri(map, label),
                     "range": label_range(map, label),
                 },
                 "message": label.message,
@@ -461,20 +718,10 @@ fn label_range(map: &SourceMap<'_>, label: &Label) -> Value {
     }
 }
 
-/// relatedInformation 的 URI（完整 URI 编解码属 H20-02）。
-fn uri_for_path(map: &SourceMap<'_>, id: SourceId) -> String {
-    match map.path(id) {
+fn label_uri(map: &SourceMap<'_>, label: &Label) -> String {
+    match map.path(label.source) {
         Some(path) => path_to_uri(path),
         None => String::new(),
-    }
-}
-
-fn path_to_uri(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    if text.starts_with('/') {
-        format!("file://{text}")
-    } else {
-        format!("file:///{text}")
     }
 }
 
@@ -487,10 +734,7 @@ fn range_json(source: &SourceFile, span: Span) -> Value {
 
 /// 字节偏移 → LSP 位置（0-based 行、UTF-16 列）。
 fn offset_to_position(source: &SourceFile, offset: usize) -> Value {
-    let mut offset = offset.min(source.text.len());
-    while !source.text.is_char_boundary(offset) {
-        offset -= 1;
-    }
+    let offset = snap_boundary(source, offset);
     let (line, _) = source.line_column(offset);
     let start = source.line_start(line);
     let character = source.text[start..offset]
@@ -518,12 +762,57 @@ fn position_to_offset(source: &SourceFile, line: u64, character: u64) -> usize {
     byte
 }
 
-fn path_for(uri: &str) -> PathBuf {
-    PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri))
+fn snap_boundary(source: &SourceFile, offset: usize) -> usize {
+    let mut offset = offset.min(source.text.len());
+    while !source.text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+fn slice_text(source: &SourceFile, span: Span) -> Option<String> {
+    let start = snap_boundary(source, span.start);
+    let end = snap_boundary(source, span.end);
+    source.text.get(start..end).map(str::to_string)
+}
+
+fn document_uri(params: &Value) -> Option<&str> {
+    params.get("textDocument")?.get("uri")?.as_str()
+}
+
+fn cursor(params: &Value) -> Option<(u64, u64)> {
+    let position = params.get("position")?;
+    Some((
+        position.get("line").and_then(Value::as_u64).unwrap_or(0),
+        position
+            .get("character")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    ))
+}
+
+fn capabilities() -> Value {
+    json!({
+        "capabilities": {
+            "textDocumentSync": 1,
+            "hoverProvider": true,
+            "definitionProvider": true,
+            "documentSymbolProvider": true,
+            "positionEncoding": "utf-16",
+        }
+    })
 }
 
 fn response(id: Option<Value>, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "result": result })
+}
+
+fn error_response(id: Option<Value>, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id.unwrap_or(Value::Null),
+        "error": { "code": code, "message": message },
+    })
 }
 
 fn notification(method: &str, params: Value) -> Value {
@@ -533,6 +822,13 @@ fn notification(method: &str, params: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn initialized() -> Server {
+        let mut server = Server::new();
+        server.handle(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }));
+        server.handle(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+        server
+    }
 
     fn open(server: &mut Server, uri: &str, text: &str) -> Vec<Value> {
         server.handle(json!({
@@ -600,11 +896,59 @@ mod tests {
         assert_eq!(capabilities["hoverProvider"], true);
         assert_eq!(capabilities["definitionProvider"], true);
         assert_eq!(capabilities["documentSymbolProvider"], true);
+        assert_eq!(capabilities["positionEncoding"], "utf-16");
+    }
+
+    #[test]
+    fn requests_before_initialize_report_not_initialized() {
+        let mut server = Server::new();
+        let outputs = server.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "textDocument/hover",
+            "params": {}
+        }));
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["id"], 7);
+        assert_eq!(outputs[0]["error"]["code"], -32002);
+        assert!(outputs[0].get("result").is_none());
+    }
+
+    #[test]
+    fn requests_after_shutdown_report_invalid_request() {
+        let mut server = initialized();
+        server.handle(json!({ "jsonrpc": "2.0", "id": 2, "method": "shutdown" }));
+        let outputs = server.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/documentSymbol",
+            "params": {}
+        }));
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["id"], 3);
+        assert_eq!(outputs[0]["error"]["code"], -32600);
+    }
+
+    #[test]
+    fn exit_without_shutdown_is_failure() {
+        let mut server = initialized();
+        assert!(
+            server
+                .handle(json!({ "jsonrpc": "2.0", "method": "exit" }))
+                .is_empty()
+        );
+        assert!(server.exited);
+        assert_eq!(server.exit_code(), ExitCode::FAILURE);
+
+        let mut clean = initialized();
+        clean.handle(json!({ "jsonrpc": "2.0", "id": 9, "method": "shutdown" }));
+        clean.handle(json!({ "jsonrpc": "2.0", "method": "exit" }));
+        assert_eq!(clean.exit_code(), ExitCode::SUCCESS);
     }
 
     #[test]
     fn publishes_semantic_diagnostics() {
-        let mut server = Server::new();
+        let mut server = initialized();
         let outputs = open(
             &mut server,
             "file:///bad.do",
@@ -615,14 +959,14 @@ mod tests {
 
     #[test]
     fn publishes_no_diagnostics_for_valid_program() {
-        let mut server = Server::new();
+        let mut server = initialized();
         let outputs = open(&mut server, "file:///good.do", "fn main() { return; }");
         assert!(diagnostics(&outputs).as_array().unwrap().is_empty());
     }
 
     #[test]
     fn document_symbols_list_declarations() {
-        let mut server = Server::new();
+        let mut server = initialized();
         let uri = "file:///symbols.do";
         open(
             &mut server,
@@ -646,7 +990,7 @@ mod tests {
 
     #[test]
     fn definition_points_to_declaration() {
-        let mut server = Server::new();
+        let mut server = initialized();
         let uri = "file:///definition.do";
         open(
             &mut server,
@@ -669,8 +1013,63 @@ mod tests {
     }
 
     #[test]
-    fn unknown_request_returns_null() {
-        let mut server = Server::new();
+    fn hover_local_reports_type_annotation() {
+        let mut server = initialized();
+        let uri = "file:///hover.do";
+        open(
+            &mut server,
+            uri,
+            "fn helper(value: i32): i32 { return value; }\nfn main() { return helper(1); }\n",
+        );
+        let outputs = server.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 37 }
+            }
+        }));
+        let result = &outputs[0]["result"];
+        assert_eq!(result["contents"]["value"], "local `value`: i32");
+        assert_eq!(result["range"]["start"]["character"], 36);
+    }
+
+    #[test]
+    fn hover_definition_kinds_use_display_names() {
+        let mut server = initialized();
+        let uri = "file:///kinds.do";
+        open(
+            &mut server,
+            uri,
+            "struct Point { x: i32 }\nfn main() { val p = Point(1); return p.x; }\n",
+        );
+        let outputs = server.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 22 }
+            }
+        }));
+        assert_eq!(outputs[0]["result"]["contents"]["value"], "struct `Point`");
+        // 未解析的字段访问不得回退为文本同名查找。
+        let outputs = server.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 39 }
+            }
+        }));
+        assert_eq!(outputs[0]["result"], Value::Null);
+    }
+
+    #[test]
+    fn unknown_request_returns_method_not_found() {
+        let mut server = initialized();
         let outputs = server.handle(json!({
             "jsonrpc": "2.0",
             "id": 99,
@@ -679,12 +1078,13 @@ mod tests {
         }));
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0]["id"], 99);
-        assert_eq!(outputs[0]["result"], Value::Null);
+        assert_eq!(outputs[0]["error"]["code"], -32601);
+        assert!(outputs[0].get("result").is_none());
     }
 
     #[test]
     fn structured_diagnostics_use_code_message_and_utf16_range() {
-        let mut server = Server::new();
+        let mut server = initialized();
         let outputs = open(
             &mut server,
             "file:///bad.do",

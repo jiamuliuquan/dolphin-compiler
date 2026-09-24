@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod lsp;
+
 use std::fs;
 use std::io::Read;
 use std::path::Path;

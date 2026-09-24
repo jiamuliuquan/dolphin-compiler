@@ -48,8 +48,13 @@ fn stderr_text(output: &Output) -> String {
 }
 
 /// 打开一个文档并返回 `textDocument/publishDiagnostics` 的 diagnostics 数组。
+///
+/// H20-03 起通知在 `initialize` 之前被忽略，因此这里先完成握手（真实 stdio 会话
+/// 的协议验收见 `tests/m20_lsp.rs`）。
 fn lsp_diagnostics(uri: &str, text: &str) -> Vec<Value> {
     let mut server = Server::new();
+    server.handle(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }));
+    server.handle(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
     let outputs = server.handle(json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",

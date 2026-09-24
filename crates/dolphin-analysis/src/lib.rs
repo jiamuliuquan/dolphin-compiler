@@ -8,10 +8,12 @@
 
 pub mod host;
 pub mod index;
+pub mod single;
 pub mod uri;
 
 pub use host::{AnalysisHost, AnalysisMode, AnalysisSnapshot, AnalysisUnit, UnitKind};
 pub use index::{
     DefId, DefKind, Definition, DocumentSymbol, Resolution, ResolutionEntry, SymbolId, SymbolIndex,
 };
+pub use single::{SingleFileAnalysis, analyze_single_file};
 pub use uri::{path_to_uri, uri_to_path};

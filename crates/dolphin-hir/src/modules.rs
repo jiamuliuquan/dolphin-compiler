@@ -427,6 +427,17 @@ fn next_source_id(index: usize) -> SourceId {
     SourceId(u32::try_from(index).expect("source count fits in u32"))
 }
 
+/// 单文件模式（M20/H20-03）：把给定程序视为根模块，注入内建标准库并完成模块解析。
+///
+/// 保留调用方分配的 `SourceId`，使返回的 `sources[0]` 与调用方持有的
+/// `SourceMap` 对齐；供分析路径构建单文件符号索引。
+pub fn load_single_source(
+    source: &SourceFile,
+    program: &ast::Program,
+) -> Result<LoadedProgram, Diagnostic> {
+    inject_stdlib(source, program)
+}
+
 /// 单文件模式：把给定程序视为根模块，注入内建标准库后完成模块解析。
 pub(crate) fn inject_stdlib(
     source: &SourceFile,

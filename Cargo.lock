@@ -495,7 +495,7 @@ dependencies = [
 name = "dolphin-lsp"
 version = "0.3.0"
 dependencies = [
- "dolphin-hir",
+ "dolphin-analysis",
  "dolphin-source",
  "dolphin-syntax",
  "serde",

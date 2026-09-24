@@ -66,7 +66,10 @@ enum Commands {
     Fmt(FmtArgs),
 
     /// Run the language server over stdin/stdout
-    Lsp,
+    Lsp {
+        /// Dolphin project directory (defaults to the current directory)
+        project: Option<PathBuf>,
+    },
 }
 
 #[derive(Args)]
@@ -645,10 +648,10 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Fmt(args) => run_fmt(args, color),
-        Commands::Lsp => {
-            dolphin_lsp::serve()
+        Commands::Lsp { project } => {
+            let code = dolphin_lsp::serve(project)
                 .map_err(|error| (format!("language server error: {error}"), color))?;
-            Ok(ExitCode::SUCCESS)
+            Ok(code)
         }
     }
 }

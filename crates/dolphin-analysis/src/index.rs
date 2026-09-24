@@ -109,6 +109,8 @@ pub struct SymbolIndex {
     modules: HashSet<String>,
     display_names: HashMap<PackageId, String>,
     documents: BTreeMap<u32, Vec<DocumentSymbol>>,
+    /// 局部绑定的类型标注显示文本；键是 `(source, name_span.start, name_span.end)`。
+    local_types: HashMap<(u32, usize, usize), String>,
 }
 
 impl SymbolIndex {
@@ -182,6 +184,7 @@ impl SymbolIndex {
             modules,
             display_names,
             documents: BTreeMap::new(),
+            local_types: HashMap::new(),
         };
         index.collect_documents(program);
         index.collect_resolutions(program, sources);
@@ -244,6 +247,24 @@ impl SymbolIndex {
 
     pub fn document_symbols(&self, source: SourceId) -> Vec<DocumentSymbol> {
         self.documents.get(&source.0).cloned().unwrap_or_default()
+    }
+
+    /// 符号的显示名（§6.6 规则 3）：依赖包前缀替换为包 `name`；实例带类型实参；
+    /// 局部绑定没有独立显示名，返回 `None`。
+    pub fn display_name(&self, id: &SymbolId) -> Option<String> {
+        match id {
+            SymbolId::Def(_) | SymbolId::Instance { .. } | SymbolId::Module { .. } => {
+                Some(self.render_symbol(id))
+            }
+            SymbolId::Local { .. } => None,
+        }
+    }
+
+    /// 局部绑定（参数/`val`/`var`）的类型标注显示文本；没有标注时返回 `None`。
+    pub fn local_type(&self, source: SourceId, name_span: Span) -> Option<&str> {
+        self.local_types
+            .get(&(source.0, name_span.start, name_span.end))
+            .map(String::as_str)
     }
 
     fn render_symbol(&self, symbol: &SymbolId) -> String {
@@ -335,11 +356,17 @@ impl SymbolIndex {
                 text: &source.text,
                 by_qualified: &self.by_qualified,
                 modules: &self.modules,
+                display: &self.display_names,
                 scopes: Vec::new(),
                 entries: Vec::new(),
+                local_types: Vec::new(),
             };
             resolver.run(program);
             self.resolutions.extend(resolver.entries);
+            for (span, text) in resolver.local_types {
+                self.local_types
+                    .insert((source.id.0, span.start, span.end), text);
+            }
         }
         self.resolutions.sort_by_key(|entry| {
             (
@@ -358,8 +385,10 @@ struct ScopeResolver<'a> {
     text: &'a str,
     by_qualified: &'a HashMap<String, DefId>,
     modules: &'a HashSet<String>,
+    display: &'a HashMap<PackageId, String>,
     scopes: Vec<HashMap<String, Span>>,
     entries: Vec<ResolutionEntry>,
+    local_types: Vec<(Span, String)>,
 }
 
 impl ScopeResolver<'_> {
@@ -389,7 +418,7 @@ impl ScopeResolver<'_> {
     fn function(&mut self, function: &ast::Function) {
         self.scopes.push(HashMap::new());
         for parameter in &function.parameters {
-            self.declare(&parameter.name, parameter.name_span);
+            self.declare(&parameter.name, parameter.name_span, Some(&parameter.ty));
         }
         self.block(&function.body);
         self.scopes.pop();
@@ -416,7 +445,7 @@ impl ScopeResolver<'_> {
                 if let Some(ty) = type_name {
                     self.type_ref(ty);
                 }
-                self.declare(name, *name_span);
+                self.declare(name, *name_span, type_name.as_ref());
             }
             ast::StatementKind::Assignment {
                 name,
@@ -480,7 +509,7 @@ impl ScopeResolver<'_> {
                     ast::ForIterable::Array(array) => self.expr(array),
                 }
                 self.scopes.push(HashMap::new());
-                self.declare(name, *name_span);
+                self.declare(name, *name_span, None);
                 self.block(body);
                 self.scopes.pop();
             }
@@ -570,7 +599,7 @@ impl ScopeResolver<'_> {
                 self.record(*name_span, resolution);
                 let spans = binding_spans(self.text, *name_span);
                 for (binding, span) in bindings.iter().zip(spans) {
-                    self.declare(binding, span);
+                    self.declare(binding, span, None);
                 }
             }
         }
@@ -653,9 +682,13 @@ impl ScopeResolver<'_> {
         Resolution::Unresolved
     }
 
-    fn declare(&mut self, name: &str, span: Span) {
+    fn declare(&mut self, name: &str, span: Span, ty: Option<&ast::TypeRef>) {
         if name == "_" {
             return;
+        }
+        if let Some(ty) = ty {
+            self.local_types
+                .push((span, render_type_ref(ty, self.display)));
         }
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), span);

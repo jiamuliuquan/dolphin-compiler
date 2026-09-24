@@ -330,3 +330,118 @@
 3. 单文件模式（无清单）与打开文档的单文件诊断、`window/showMessage` 项目诊断发布规则见 §7.1/§7.3/§7.4。
 4. H20-05 前需核实 gdb/lldb 可用性；本机未检查调试器。
 5. 本报告不把 M20 记为完成；H20-02 状态以三平台 CI 结果为准。
+
+## H20-03 项目诊断、符号绑定与定义导航
+
+- 批次：H20-03
+- 状态：**实现完成，Linux 本机默认 lane 与 Linux LLVM lane 通过；Windows/macOS 默认 lane 与远端 CI 未验证**
+  （§12.3 完成标准要求三平台，本机只跑 Linux；未验证项见下）
+- 前置批次及报告：H20-02 / 本文件上一节；规格 §7、§10.1、§12.3；D-M20-1/2/3 已确认
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`47c4faece2bb6d3ff137443fc2a3874c9a445f25`（`v0.3.0-M20-02`）；工作区干净。
+- 无用户未提交改动被覆盖；未 commit/push/tag。
+
+### 本批修改范围（源码，非文档）
+
+| 范围 | 文件 |
+| --- | --- |
+| 单文件 loader 公开入口 `load_single_source`（保留调用方 `SourceId`，注入内建标准库） | `crates/dolphin-hir/src/modules.rs` |
+| `SingleFileAnalysis`/`analyze_single_file`（§7.1 单文件规则 + 语义成功时符号索引） | `crates/dolphin-analysis/src/single.rs`（新增）、`lib.rs` |
+| `SymbolIndex::display_name`/`local_type`；参数/`val`/`var` 类型标注收集 | `crates/dolphin-analysis/src/index.rs` |
+| LSP 重写：`dc lsp [PROJECT]` 项目/单文件分析、协议状态机（-32002/-32601/-32600、退出码）、按 overlay 版本发布诊断、`window/showMessage`、URI 排序、基于 `SymbolIndex` 的 hover/definition、保留 `documentSymbol` | `crates/dolphin-lsp/src/lib.rs` |
+| `dolphin-lsp` 依赖从 `dolphin-hir` 切换为 `dolphin-analysis` | `crates/dolphin-lsp/Cargo.toml`、`Cargo.lock` |
+| `dc lsp [PROJECT]` 参数与退出码接线 | `src/main.rs` |
+| 真实 stdio JSON-RPC 会话驱动 | `tests/support/lsp.rs`（新增）、`tests/support/mod.rs` |
+| LSP-01..06 与 4 个补充边界用例 | `tests/m20_lsp.rs`（新增） |
+| 进程内 LSP helper 增加 `initialize` 握手（断言不变；通知在 initialize 前被忽略） | `tests/m20_diag.rs` |
+| CI/README 显式 `--test` 列表加入 `m20_lsp`；README CLI 用法与 LSP 描述更新 | `.github/workflows/ci.yml`、`README.md` |
+
+### 验收映射（真实测试名与固定期望）
+
+| 验收 | 测试（`tests/m20_lsp.rs`） | 固定期望（断言内容） | 结果 |
+| --- | --- | --- | --- |
+| LSP-01 | `lsp_01_pkg_use_type_error` | 打开含 `use stats.count` 的 bin：`publishDiagnostics` 带 `version=1`、恰好 1 条 `code=E0001`、`message=expected \`bool\`, found \`i32\``、severity=1、source=dolphin、range 覆盖 `count()`（行/列由 fixture 计算并断言起止） | 通过 |
+| LSP-02 | `lsp_02_cross_file_and_cross_package_definition` | `helper()` definition → 根包 `src/util.do` 的 `name_span`（0:7-0:13）；`count()` definition → path 依赖 `stats/src/lib.do`（0:7-0:12）；hover 分别为 ``fn `helper` `` 与 ``fn `stats.count` `` | 通过 |
+| LSP-03 | `lsp_03_local_shadowing_and_parameters` | 内层 `x` 使用解析到内层绑定、外层 `return x` 解析到外层绑定；参数 `value` definition 指向参数 `name_span`，hover 为 ``local `value`: i32`` | 通过 |
+| LSP-04 | `lsp_04_open_change_close_dependency_change` | 依赖 didOpen/overlay 改 `bool` 后调用方发布 `version=1` 的 `expected \`i32\`, found \`bool\``；didClose 先发该 URI 空诊断（无 version）再恢复调用方空诊断；一次 overlay 变化同时改变两文档诊断时按 URI 字典序升序发布 | 通过 |
+| LSP-05 | `lsp_05_sequential_versions_latest_wins` | 连续 didChange 2→3 各发布对应 version 与最新文本诊断（`missing1`→`missing2`→空）；旧 version=2 再变更被忽略，`documentSymbol` 仍为 version 3 的 `[main, extra]` | 通过 |
+| LSP-06 | `lsp_06_unknown_request_lifecycle_conformance` | initialize 前请求 `-32002`；未知请求 `-32601` + `Method not found`；未知通知被忽略；shutdown `result:null`；shutdown 后请求 `-32600`；已 shutdown `exit`=0、未 shutdown `exit`=1、EOF=0 | 通过 |
+
+补充边界用例（同一文件，验收矩阵外）：
+
+| 测试 | 固定期望 | 结果 |
+| --- | --- | --- |
+| `lsp_accepts_no_project_argument` | 无位置参数 `dc lsp` 可 initialize（`positionEncoding=utf-16`）并正常退出 0 | 通过 |
+| `lsp_non_file_uri_stays_single_file` | `untitled:` 文档发布单文件 `E0001 unknown variable \`missing\``；definition 返回 `null`（不回退文本同名查找） | 通过 |
+| `lsp_project_failure_keeps_syntax_diagnostics` | HTTP 依赖不可本地恢复：`window/showMessage` type=1 含坐标与 `run \`dc fetch\` and retry`，文档仍发布 `E0001 expected \`}\` after block`；不写 `dolphin.lock`、不产 `target/` | 通过 |
+| `lsp_malformed_frame_terminates_with_error` | 超限 `Content-Length` 终止服务，stderr 含 `exceeds the 16777216 byte limit`，退出码 1 | 通过 |
+
+补充单元测试：
+
+| crate | 测试 | 断言 |
+| --- | --- | --- |
+| dolphin-analysis | `single::tests::lexical_and_syntax_errors_are_collected_without_index` | 词法/语法错误收集且无索引 |
+| dolphin-analysis | `single::tests::semantic_error_keeps_stdlib_sources_without_index` | `unknown variable \`missing\``、无索引、已注入 stdlib 且 `sources[0].id` 保留 |
+| dolphin-analysis | `single::tests::valid_program_yields_index_and_resolutions` | 调用解析为 `helper` 定义、`name_span` 正确、参数 `local_type=i32` |
+| dolphin-analysis | `single::tests::pkg_use_and_missing_main_skip_semantics` | `pkg`/无 `main` 时无诊断且无索引 |
+| dolphin-lsp | `requests_before_initialize_report_not_initialized` / `requests_after_shutdown_report_invalid_request` / `exit_without_shutdown_is_failure` | `-32002`/`-32600` 与退出码状态机 |
+| dolphin-lsp | `unknown_request_returns_method_not_found` | `-32601` 且无 `result`（替换 M17 `unknown_request_returns_null`） |
+| dolphin-lsp | `hover_definition_kinds_use_display_names` | struct hover ``struct `Point` ``；未解析字段访问返回 `null` |
+| dolphin-lsp | `hover_local_reports_type_annotation` | 参数使用 hover ``local `value`: i32`` 与 token range |
+| dolphin-lsp | `initialize_reports_capabilities` | capabilities 含 `positionEncoding=utf-16` |
+
+### 实际运行命令与结果
+
+环境：Linux x86_64（`Linux AppServer 7.2.3-zen1-2-zen`），rustc/cargo 1.97.1，LLVM 22.1.8（`llvm-config` 在 PATH）。
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings` | 通过 |
+| `cargo test --workspace --exclude dolphin-codegen-llvm` | 56 个 test harness 共 437 passed；0 failed |
+| `cargo test -p dolphin-compiler --test m20_lsp` | 10 passed；0 failed（LSP-01..06 + 4 边界） |
+| `cargo test -p dolphin-analysis` | 17 passed；0 failed（含 4 个 `single` 单测） |
+| `cargo test -p dolphin-lsp` | 15 passed；0 failed |
+| `cargo test -p dolphin-compiler --test m20_diag` | 6 passed；0 failed（helper 握手更新，断言不变） |
+| `cargo build --bins --features llvm` | 通过 |
+| `cargo clippy --workspace --all-targets --features llvm -- -D warnings` | 通过 |
+| `DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm` | 58 个 harness 共 444 passed；0 failed |
+| `DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp` | 16 个二进制共 218 passed；0 failed（含 `m20_lsp` 10 passed） |
+| `cargo test -p dolphin-compiler --features llvm --test backend` | 4 passed |
+
+另以临时项目手工核对过跨文件/跨包 definition、依赖 overlay 变更、stale version 忽略与 `documentSymbol` 回读；结果已固化为上述测试断言。
+
+### 行为/兼容变化
+
+- **CLI**：`dc lsp [PROJECT]` 新增可选位置参数（缺省当前目录）；无参数调用与 stdio 传输不变。退出码按 D-M20-2：已 `shutdown` 后 `exit`/EOF 为 0，未 `shutdown` 的 `exit` 为 1；未知方法由 `result:null` 改为 `-32601`，initialize 前请求为 `-32002`，shutdown 后请求为 `-32600`（D-M20-1）。
+- **LSP**：`publishDiagnostics` 只针对打开文档发布，带文档 `version`；`didClose` 立即发空诊断；项目级诊断经 `window/showMessage`（type=1）；发布顺序为 URI 字典序；诊断 `message` 为纯消息文本并带 `code`/`relatedInformation`（D-M20-3，H20-01 已实现字段）。
+- **导航**：hover/definition 使用 `SymbolIndex::resolve`/`definition_of` 与显示名，删除 M17 文本同名顶层查找；项目模式支持 `pkg`/`use`、lib/多 bin、path/缓存依赖源码、局部遮蔽/参数/`for`/match 绑定；无清单时按 §7.1 单文件规则分析，单文件语义成功时仍提供真实索引（M17 单文件导航不退化）。
+- **Rust 库 API（增量）**：`dolphin-hir::modules::load_single_source`；`dolphin-analysis::SingleFileAnalysis`/`analyze_single_file`、`SymbolIndex::display_name`/`local_type`。`dolphin-lsp` 移除对 `dolphin-hir` 的直接依赖（§6.1）。
+- **未改变**：`dolphin.toml`/`dolphin.lock`/`.dlib` 无格式变化；`dc check/build/run/test/fmt` 行为不变；`AnalysisHost`/`AnalysisSnapshot` 与 `lower_sources*` 签名不变。
+
+### 与冻结规格的差异
+
+1. 规格 §6.1 只要求 `dolphin-lsp` 依赖 `dolphin-analysis`；为删除文本同名回退又不让单文件 hover/definition 退化，新增
+   `dolphin-analysis::analyze_single_file` 与 HIR 公开入口 `load_single_source`（规格 §6.6/§7.1 未列类型名）。
+2. `SymbolIndex` 新增 `display_name`/`local_type` 访问器（§6.6 冻结方法列表外），分别供 §7.5 的 hover 显示名与局部类型标注；身份仍是 `SymbolId`。
+3. 项目单元 `partial` 且 `index=None` 时，该文档的 hover/definition 回退到单文件分析（文档含 `pkg`/`use` 时按 §7.1 跳过语义）；规格未明确该回退。
+4. `initialize` 之前的通知（含 didOpen）被忽略（LSP 严格行为）；§7.2 表只约束请求。因此 `tests/m20_diag.rs` 的进程内 helper 增加握手，所有断言文本不变。
+5. `documentSymbol` 仍按当前文件文本解析（保留 M17 `collect_declarations`），未改用 `SymbolIndex::document_symbols`；§7.5 只要求顶层声明与现有 `kind`/`range` 取值。
+6. `AnalysisHost` 单文件模式仍返回空快照（H20-02 差异 #5）；LSP 层按 §7.1 调用 `analyze_single_file`。
+
+### 未验证项（不得当作通过）
+
+1. **Windows/macOS 默认 lane**：本机只跑 Linux；`m20_lsp` 未在 Windows/macOS 运行。`path_to_uri`/`uri_to_path` 的盘符/反斜杠分支仅由 `dolphin-analysis` 单测在 Linux 上断言，不等于真实平台验证。
+2. **远端 CI**：未 push/tag，未运行 GitHub Actions。
+3. **H20-04/05**：`dc fmt` 发现与全有或全无、调试器实测未实现。
+4. **能力文档**：`implemented-features.md`/`roadmap.md` 未更新（按 §11，H20-01..05 完成前不写入）；README 更新了 `dc lsp [项目目录]` 用法、测试列表与本批已实现的 LSP 描述，若需严格维持“不更新能力文档”的字面要求可在复核时回退。
+
+### 剩余问题和下一批输入（H20-04）
+
+1. H20-04 输入：规格 §8、§10.1、§12.4；新增 `tests/m20_fmt.rs` 并加入 CI/README 显式 `--test` 列表。
+2. `dc fmt` 当前 `run_fmt` 仍是默认根 `src`、逐文件读取并写入；D-M20-4 的清单 `[package].source` 发现、排除 `build.output`/`.git`、全有或全无尚未实现。
+3. README LSP 段落已按本批实现更新；复核若要求严格 §11 可回退该段与开发工具表项。
+4. H20-05 前需核实 gdb/lldb 可用性；本机未检查调试器。
+5. 本报告不把 M20 记为完成；H20-03 状态以三平台 CI 结果为准。

@@ -187,7 +187,7 @@ H19-00 应把 H19-05 细分为 `H19-05a` 已批准的库开发/测试目标入�
 | H20-00 | 项目分析与工具协议规格 | M19 | 完成（规格见 [proposal-m20](proposal-m20-project-tools.md)；D-M20-1..4 已确认） |
 | H20-01 | 结构化诊断与有限恢复 | H20-00 | 完成（实现 + Linux 默认/LLVM lane 通过；Windows/macOS 与远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-01 节） |
 | H20-02 | 共享项目分析接口与文件 overlay | H20-01 | 完成（`dolphin-analysis` + `resolve_readonly` + side table；Linux 默认/LLVM lane 通过，Windows/macOS 与远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-02 节） |
-| H20-03 | 项目诊断、符号绑定与定义导航 | H20-02 | 待实施 |
+| H20-03 | 项目诊断、符号绑定与定义导航 | H20-02 | 完成（项目级 LSP、overlay、跨文件/跨包定义、协议状态机；Linux 默认/LLVM lane 通过，Windows/macOS 与远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-03 节） |
 | H20-04 | Formatter 保持性与项目发现 | H20-03 | 待实施 |
 | H20-05 | 实际调试器及整体体验验收 | H20-04 | 待实施 |
 
@@ -198,6 +198,8 @@ H19-00 应把 H19-05 细分为 `H19-05a` 已批准的库开发/测试目标入�
 状态（2026-09-24，H20-01 完成后）：H20-01 已实现结构化 `Diagnostic`/`SourceId`/`SourceMap`、`lex_recovering`/`parse_recovering`、收集式 loader 与声明级 lowering、CLI 多诊断打印与 LSP 结构化映射；`tests/m20_diag.rs` DIAG-01..06 通过。Linux 默认 lane（396 passed）与 Linux LLVM lane（403/202 passed）全绿，clippy/fmt 通过；Windows/macOS 默认 lane 与远端 CI 未验证。`lower_sources_analysis_collecting` 暂返回 `ir::Program`，`LoweredProgram`/side table 留待 H20-02（见 [M20 报告](reports/m20-progress.md) H20-01 节“与冻结规格的差异”）。H20-02 等待人工派发。
 
 状态（2026-09-24，H20-02 完成后）：新增 `dolphin-analysis`（`AnalysisHost`/`AnalysisSnapshot`/`SymbolIndex`/`Resolution`/`file://` URI），`resolve_readonly`（offline、只读锁、`E1001`），HIR `LoweredProgram`/`AnalysisData` side table 与 `lower_sources_analysis(_collecting)` 升级；`tests/m20_analysis.rs` ANALYSIS-01..06 通过（零网络/零写锁/零产物、overlay 影响调用方诊断、lib-only 无误报、多 bin/自定义 source、同名不同包身份、CLI 构建不变）。Linux 默认 lane（418 passed）与 Linux LLVM lane（425/208 passed）全绿，clippy/fmt 通过；Windows/macOS 默认 lane 与远端 CI 未验证。H20-03 等待人工派发。
+
+状态（2026-09-24，H20-03 完成后）：`dc lsp [PROJECT]` 项目级 LSP 落地：`dolphin-lsp` 依赖切换为 `dolphin-analysis`，删除文本同名查找，基于 `SymbolIndex` 的 hover/definition（跨文件/跨包、局部遮蔽/参数）、按 overlay version 发布诊断、`window/showMessage` 项目诊断、URI 字典序发布与协议状态机（-32002/-32601/-32600、D-M20-2 退出码）；单文件模式新增 `analyze_single_file` 保留 M17 导航能力。`tests/support/lsp.rs` + `tests/m20_lsp.rs` LSP-01..06 与 4 个边界用例通过。Linux 默认 lane（437 passed）与 Linux LLVM lane（444/218 passed）全绿，clippy/fmt 通过；Windows/macOS 默认 lane 与远端 CI 未验证。H20-04 等待人工派发。
 
 **H20-01：诊断。** 数据含 code/severity/primary span/labels/notes；CLI 负责终端渲染，LSP 消费结构化字段。保留 Unicode/UTF-16 正确转换和跨文件 related locations。先做词法/语法同步点及互不依赖声明的多错误收集；出错表达式不能伪造正常类型进入 codegen，缺完整分析时声明 partial。验收 DIAG-01：CLI/LSP 相同错误身份与位置；DIAG-02：多文件两个独立错误；DIAG-03：非 BMP 字符/CRLF；DIAG-04：泛型实例链和用户类型名可读；DIAG-05：错误程序不 panic、不产生可执行产物。
 

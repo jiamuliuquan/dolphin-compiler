@@ -691,6 +691,138 @@ fn lsp_non_file_uri_stays_single_file() {
     assert_eq!(session.finish().code(), Some(0));
 }
 
+/// 复制示例目录树（`lsp_07` 使用真实 M19 项目）。
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("destination dir");
+    for entry in fs::read_dir(source).expect("read source dir") {
+        let entry = entry.expect("source entry");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).expect("copy file");
+        }
+    }
+}
+
+/// 整体（§12.5）：真实 `examples/m19/dtext` 项目上的编辑器开发流程——
+/// 打开入口/实现文件 → 跨文件与跨包 definition → 未保存文本引入类型错误 → 修复。
+/// M20 仍缺的功能（补全、references/rename、局部变量值等）在报告列出，不由本测试声称支持。
+#[test]
+fn lsp_07_m19_development_flow() {
+    let base = temp_dir("lsp07");
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    copy_tree(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/m19"),
+        &base.join("m19"),
+    );
+    let app = base.join("m19/dtext");
+    let stats = base.join("m19/textstats");
+    let main = app.join("src/main.do");
+    let lib = app.join("src/app.do");
+    let dep = stats.join("src/lib.do");
+    let main_text = fs::read_to_string(&main).unwrap();
+    let lib_text = fs::read_to_string(&lib).unwrap();
+    let dep_text = fs::read_to_string(&dep).unwrap();
+
+    let mut session = LspSession::start_with_home(&app, &home);
+    initialize(&mut session, &app);
+
+    // 打开入口：项目分析成功，无诊断。
+    open(&mut session, &main, &main_text, 1);
+    let notification = session.recv_notification("textDocument/publishDiagnostics");
+    assert_eq!(notification["params"]["uri"], path_to_uri(&main));
+    assert_eq!(notification["params"]["version"], 1);
+    assert!(diagnostics_of(&notification).is_empty(), "{notification}");
+
+    // 跨文件：main.do 的 `run()` 指向根包 lib 入口 app.do 的定义。
+    let run_use = position_of(&main_text, "run()");
+    let response = position_request(&mut session, 2, "textDocument/definition", &main, run_use);
+    assert_eq!(response["result"]["uri"], path_to_uri(&lib));
+    let run_decl = position_after(&lib_text, "fn run()", 3);
+    assert_eq!(
+        response["result"]["range"]["start"],
+        json!({ "line": run_decl.0, "character": run_decl.1 })
+    );
+    assert_eq!(
+        response["result"]["range"]["end"],
+        json!({ "line": run_decl.0, "character": run_decl.1 + 3 })
+    );
+    let response = position_request(&mut session, 3, "textDocument/hover", &main, run_use);
+    assert_eq!(response["result"]["contents"]["value"], "fn `run`");
+
+    // 打开实现文件：无诊断；跨包 definition 指向 path 依赖 textstats 的源码。
+    open(&mut session, &lib, &lib_text, 1);
+    let notification = session.recv_notification("textDocument/publishDiagnostics");
+    assert_eq!(notification["params"]["uri"], path_to_uri(&lib));
+    assert_eq!(notification["params"]["version"], 1);
+    assert!(diagnostics_of(&notification).is_empty(), "{notification}");
+
+    let analyze_use = position_after(&lib_text, "textstats.analyze(input.view()", 10);
+    let response = position_request(
+        &mut session,
+        4,
+        "textDocument/definition",
+        &lib,
+        analyze_use,
+    );
+    assert_eq!(response["result"]["uri"], path_to_uri(&dep));
+    let analyze_decl = position_after(&dep_text, "fn analyze", 3);
+    assert_eq!(
+        response["result"]["range"]["start"],
+        json!({ "line": analyze_decl.0, "character": analyze_decl.1 })
+    );
+    assert_eq!(
+        response["result"]["range"]["end"],
+        json!({ "line": analyze_decl.0, "character": analyze_decl.1 + 7 })
+    );
+    let response = position_request(&mut session, 5, "textDocument/hover", &lib, analyze_use);
+    assert_eq!(
+        response["result"]["contents"]["value"],
+        "fn `textstats.analyze`"
+    );
+
+    // 未保存文本引入类型错误：该文档发布带 version 的 E0001。
+    let broken = lib_text.replace(
+        "val status = read_all(stream, &input);",
+        "val status: bool = read_all(stream, &input);",
+    );
+    assert_ne!(broken, lib_text, "fixture line must exist");
+    change(&mut session, &lib, &broken, 2);
+    let notification = session.recv_notification("textDocument/publishDiagnostics");
+    assert_eq!(notification["params"]["uri"], path_to_uri(&lib));
+    assert_eq!(notification["params"]["version"], 2);
+    let diagnostics = diagnostics_of(&notification);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0]["code"], "E0001");
+    assert_eq!(diagnostics[0]["message"], "expected `bool`, found `i32`");
+
+    // 修复后诊断清空，导航仍可用。
+    change(&mut session, &lib, &lib_text, 3);
+    let notification = session.recv_notification("textDocument/publishDiagnostics");
+    assert_eq!(notification["params"]["uri"], path_to_uri(&lib));
+    assert_eq!(notification["params"]["version"], 3);
+    assert!(diagnostics_of(&notification).is_empty(), "{notification}");
+    let response = position_request(
+        &mut session,
+        6,
+        "textDocument/definition",
+        &lib,
+        analyze_use,
+    );
+    assert_eq!(response["result"]["uri"], path_to_uri(&dep));
+
+    session.shutdown();
+    assert_eq!(session.finish().code(), Some(0));
+    // 分析路径零副作用：不写锁、不产出构建目录。
+    assert!(!app.join("dolphin.lock").exists());
+    assert!(!app.join("target").exists());
+    assert!(!stats.join("dolphin.lock").exists());
+    assert!(!stats.join("target").exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
 /// 边界：项目依赖不可本地恢复时，`window/showMessage` 报告原因，文档仍发布语法诊断。
 #[test]
 fn lsp_project_failure_keeps_syntax_diagnostics() {

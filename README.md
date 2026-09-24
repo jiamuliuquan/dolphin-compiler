@@ -347,8 +347,11 @@ cargo build --release --bins
 # 可选 LLVM 后端（需要本机 LLVM 开发库）：额外覆盖 `dolphin-codegen-llvm`
 cargo clippy --workspace --features llvm --all-targets -- -D warnings
 DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm
-DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt --test m20_debug
 cargo test -p dolphin-compiler --features llvm --test backend
 ```
+
+`m20_debug`（DBG-01..04）实际加载调试器验证 LLVM Debug：Linux 用 `gdb`、macOS 用 `lldb`；
+调试器缺失时测试失败并提示设置 `DOLPHIN_SKIP_DEBUGGER=1` 显式跳过，跳过即列为未验证。
 
 分支/PR CI 在 Linux x86_64、macOS ARM64 和 Windows x86_64 上执行格式检查、Clippy、测试、格式化器规范和 Release 构建，并解压发行包运行冒烟测试；tag 发布任务依赖同提交的三平台质量门禁与 Linux LLVM lane，发布只消费已通过冒烟的那份归档。默认 CI 不安装 LLVM，LLVM lane 在 Ubuntu 上单独安装 LLVM 22。现有冒烟运行在开发 runner 上，不是无 CRT/SDK 的干净机器证明。新测试文件须加入显式 `--test` 命令，feature 开启不等于所有 fixture 自动使用 LLVM。

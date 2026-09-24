@@ -210,6 +210,8 @@ jobs:
           # 只装 llvm-22-dev 会在 `cargo build --features llvm` 时报
           # `could not find native static library Polly`。
           sudo apt-get install -y llvm-22-dev libpolly-22-dev
+          # H20-05：m20_debug 实际加载 gdb 验证 LLVM Debug 行表/断点/调用栈。
+          sudo apt-get install -y gdb
           echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_221_PREFIX=/usr/lib/llvm-22" >> "$GITHUB_ENV"
 
@@ -231,7 +233,7 @@ jobs:
       - run: cargo build --bins --features llvm
       - run: cargo clippy --workspace --all-targets --features llvm -- -D warnings
       - run: DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm
-      - run: DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt
+      - run: DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt --test m20_debug
       - run: cargo test -p dolphin-compiler --features llvm --test backend
 
   # 发布：仅在 tag 上触发，且必须等三平台质量门禁与 LLVM lane 全部成功。

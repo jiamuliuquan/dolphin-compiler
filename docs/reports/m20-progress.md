@@ -555,3 +555,134 @@ formatted /tmp/dolphin-m20-fmt-fmt03-.../project/src/m_good.do
 2. 派发前核实本机/CI gdb（Linux）与 lldb（macOS）可用性；缺失时按规格让 `m20_debug` 失败并提示 `DOLPHIN_SKIP_DEBUGGER=1`，报告中列为未验证。
 3. H20-05 收尾需在真实/协议 fixture 中走一次 M19 开发流程并列出仍缺功能（`lsp_07_m19_development_flow`），不以 initialize 成功代替。
 4. 本报告不把 M20 记为完成；H20-04 状态以三平台 CI 结果为准。
+
+## H20-05 实际调试器及整体体验验收
+
+- 批次：H20-05
+- 状态：**实现完成；Linux x86_64 本机 GNU gdb 17.2 实测 LLVM Debug（DBG-01..03 + 单步），Linux 默认 lane 与 Linux LLVM lane 通过；macOS lldb、Windows 与远端 CI 未验证**
+  （§12.5 完成标准要求 LLVM Debug 上通过；本机无 lldb，lldb 脚本未实测）
+- 前置批次及报告：H20-04 / 本文件上一节；规格 §9、§10.1、§12.5；D-M20-1..4 已确认
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`64d14bd68ace7040ff37e6cd54e065898052b779`（`v0.3.0-M20-04`）；工作区干净。
+- 无用户未提交改动被覆盖；未 commit/push/tag。
+
+### 本批修改范围（脚本/测试/CI，非编译器语义）
+
+| 范围 | 文件 |
+| --- | --- |
+| gdb 批处理脚本：断点、`info line`、单步（`next`）、`bt`；地址/进程号归一化；`debugger not available`；固定结论行 | `scripts/debug_smoke.sh`（新增） |
+| macOS lldb 等价脚本（`source list`/`next`/`bt`，同样的结论行与退出码） | `scripts/debug_smoke_lldb.sh`（新增） |
+| DBG-01..04 + 单步补充 + 2 个脚本边界用例 | `tests/m20_debug.rs`（新增） |
+| LSP-07：真实 `examples/m19/dtext` 项目开发流程（跨文件/跨包定义、未保存错误→修复） | `tests/m20_lsp.rs` |
+| CI LLVM lane 安装 gdb；显式 `--test` 列表加入 `m20_debug` | `.github/workflows/ci.yml` |
+| README 开发验证命令与调试器缺失行为说明 | `README.md` |
+
+未修改任何编译器、IR、layout、lower、codegen 或 runtime 源码：M17 已交付的 LLVM Debug DWARF
+（每函数 subprogram + 指令级行号）经本批实测满足 DBG-01..03；本批只新增可执行验收、脚本与 CI 接线。
+
+### 验收映射（真实测试名与固定期望）
+
+| 验收 | 测试 | 固定期望（断言内容） | 结果 |
+| --- | --- | --- | --- |
+| DBG-01 | `dbg_01_debugger_loads` | `dc build --backend llvm`（Debug）产物上脚本退出 0，stdout 含 `Breakpoint`/`stop reason` | 通过（gdb） |
+| DBG-02 | `dbg_02_breakpoint_correct_file_line` | stdout 含 `math.do:<DBG-BREAK 扫描行>` 与 `debug smoke: breakpoint hit` | 通过（gdb） |
+| DBG-03 | `dbg_03_cross_function_call_stack` | `bt` 的 `#0` 在 `#1` 之前，`#0` 行含 `add`、`#1` 行含 `main` | 通过（gdb） |
+| DBG-04 | `dbg_04_release_without_debug_boundary` | LLVM Release 与 Cranelift Debug 均退出 0，含 `debug smoke: no line table (breakpoint not hit)`，不含 `breakpoint hit` | 通过（gdb） |
+| 整体 | `lsp_07_m19_development_flow` | 真实 `examples/m19`：打开 main/app 无诊断；`run()`→app.do、`textstats.analyze`→`textstats/src/lib.do` 的 `name_span`；hover ``fn `run` ``/``fn `textstats.analyze` ``；`val status: bool = read_all(...)` 恰 1 条 `E0001 expected \`bool\`, found \`i32\``（version=2）；修复后清空（version=3）；无 `dolphin.lock`/`target/` | 通过 |
+
+补充用例（验收矩阵外）：
+
+| 测试（`tests/m20_debug.rs`） | 固定期望 | 结果 |
+| --- | --- | --- |
+| `dbg_single_step_line_mapping` | 断点后单步，输出含 `math.do:<断点行+1>`（计划 §6“单步、源码行映射”） | 通过（gdb） |
+| `dbg_script_rejects_bad_arguments` | 无参数运行脚本 → 退出 2 + stderr `usage:` | 通过 |
+| `dbg_script_reports_missing_debugger` | 子进程 PATH 指向空目录 → 退出 2 + stderr `debugger not available` | 通过 |
+
+### 修复前复现结果（新增验收先失败）
+
+- 仅新增 `tests/m20_debug.rs`、未新增脚本时：`cargo test -p dolphin-compiler --features llvm --test m20_debug`
+  → 4 failed；失败文本 `bash: .../scripts/debug_smoke.sh: No such file or directory`（exit 127），
+  证明验收确实依赖本批新增脚本。
+- `lsp_07` 首跑失败：测试最初把光标放在 `app.do` 顶部注释里的 `textstats.analyze` 文本上，`definition`
+  返回 `null`；这是测试定位错误（注释不在 AST），修正为调用点 `textstats.analyze(input.view()`
+  后通过。产品行为未变、未放宽断言。
+- 手动复现缺失调试器：受限 PATH 下 `dbg_01` 失败并打印
+  `gdb not found: ... set DOLPHIN_SKIP_DEBUGGER=1 ...`；设置 `DOLPHIN_SKIP_DEBUGGER=1` 后同一测试 ok
+  （跳过即未验证）。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --features llvm --test m20_debug`：7 passed；0 failed。
+- `cargo test -p dolphin-compiler --features llvm --test m20_lsp`：11 passed；0 failed（含 `lsp_07`）。
+- 手工 gdb 会话（`target/debug/dc build ... --backend llvm`）：
+  - Debug：`Breakpoint 1, __dolphin_fn_1_add () at .../math.do:2` → `next` →
+    `Line 3 of ".../math.do"` → `#0 ... math.do:3`、`#1 ... main () at main.do:2`；
+    结论 `debug smoke: breakpoint hit`，exit 0。
+  - Release：`No symbol table is loaded` / `No line number information available` →
+    结论 `debug smoke: no line table (breakpoint not hit)`，exit 0。
+
+### 实际运行命令与结果
+
+环境：Linux x86_64（`Linux AppServer 7.2.3-zen1-2-zen`），rustc/cargo 1.97.1，LLVM 22.1.8（`llvm-config` 在 PATH），GNU gdb 17.2；本机未安装 lldb。
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings` | 通过 |
+| `cargo test --workspace --exclude dolphin-codegen-llvm` | 58 个 harness 共 444 passed；0 failed |
+| `cargo test -p dolphin-compiler --features llvm --test m20_debug` | 7 passed；0 failed |
+| `cargo test -p dolphin-compiler --features llvm --test m20_lsp` | 11 passed；0 failed |
+| `cargo test -p dolphin-compiler --test m20_debug`（无 llvm feature） | 0 tests（按 §9.2 计未运行，不算通过） |
+| `cargo build --bins --features llvm` | 通过 |
+| `cargo clippy --workspace --all-targets --features llvm -- -D warnings` | 通过 |
+| `DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm` | 60 个 harness 共 458 passed；0 failed（含 m20_debug 7 passed） |
+| `DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt --test m20_debug` | 18 个二进制共 232 passed；0 failed（含 m20_debug 7 passed） |
+| `cargo test -p dolphin-compiler --features llvm --test backend` | 4 passed |
+| `cargo build --release --bins` + `./target/release/dc fmt --check examples crates/dolphin-std/src` | 通过（exit 0） |
+
+### 行为/兼容变化
+
+- **新增开发工具脚本**：`scripts/debug_smoke.sh`（gdb）与 `scripts/debug_smoke_lldb.sh`（lldb），
+  契约见脚本头部：输出归一化调试器文本与固定结论行，退出码 0=已给出结论、2=用法/调试器缺失、1=其他错误。
+- **CI**：Linux LLVM lane 安装 `gdb`，显式 `--test` 列表加入 `m20_debug`；三平台默认 lane 不启用 llvm，
+  `m20_debug` 编译为空（0 tests，按未运行计）。
+- **Rust 库 API / CLI / 持久格式**：无变化；未触碰 `dc`、清单、锁、`.dlib`、LSP 协议与编译器语义。
+- **README**：开发验证命令加入 `--test m20_debug` 并说明调试器缺失行为。
+
+### 与冻结规格的差异
+
+1. §9.2 未固定脚本的结论行文本；本批实现为文档化的 `debug smoke: breakpoint hit` /
+   `debug smoke: no line table (breakpoint not hit)`，并在脚本头部声明（DBG-04 的“文档化方式报告”）。
+2. 计划 §6 要求“单步、源码行映射”；冻结 §12.5 矩阵未列单步项。脚本加入 `next` 与单步后 `info line`，
+   并以补充测试 `dbg_single_step_line_mapping` 固定（不改变 DBG-01..04 的断言）。
+3. `dbg_04` 同时覆盖 LLVM Release 与 Cranelift Debug（规格写“Release（或 `--backend cranelift`）”），
+   记录 §9.1 的 Cranelift 边界。
+4. lldb 脚本以 `source list` 作为 gdb `info line` 的等价输出；本机无 lldb，未实测。
+5. 测试按 §9.2 用 `dc build --backend llvm` 子进程构建，不直接调用 driver 库 API。
+
+### 未验证项（不得当作通过）
+
+1. **macOS lldb**：本机（Linux）未安装 lldb，`scripts/debug_smoke_lldb.sh` 与 macOS 上的
+   `dbg_01..04` 从未执行；CI 无 macOS LLVM lane。lldb 路径按规格编写但**未验证**。
+2. **Windows/PDB**：不在本阶段范围；Windows 无 llvm lane，未验证。
+3. **远端 CI**：未 push/tag，未运行 GitHub Actions；CI 中 gdb 安装与 `m20_debug` 尚未实际跑过。
+4. **能力文档**：`implemented-features.md`/`roadmap.md` 未更新（按 §11，需 M20 阶段完成并经用户确认）；
+   README 只更新了开发验证命令。
+5. **调试器能力边界**：LLVM Debug 只有 subprogram 与行号，没有局部变量 DIE；断点/单步/调用栈可用，
+   局部变量值/类型检查不支持（§9.1 不宣称）。
+6. **单步断言仅 gdb**：`dbg_single_step_line_mapping` 只在 Linux gdb 上运行。
+
+### 剩余问题和下一批输入
+
+1. **M20 阶段收尾（需用户确认）**：H20-01..05 的实现与自动化验收、真实 `examples/m19` 流程
+   （`lsp_07`）均已落地；第 12.6 节四种证据中“当前文档”仍需用户确认后更新
+   `implemented-features.md`/`roadmap.md`/README 进度表。本报告不把 M20 记为完成。
+2. **M20 仍缺功能（真实流程中确认，不在本阶段承诺）**：补全/签名帮助/references/rename/语义高亮；
+   表达式级类型与局部变量值；`documentSymbol` 仍按当前文件文本解析；异步/取消（当前同步单线程）；
+   Cranelift/PDB 调试信息；Windows 路径调试。
+3. **若要验证 macOS lldb**：在 macOS 上运行 `cargo test --features llvm --test m20_debug`（需 lldb），
+   或新增 macOS LLVM lane（成本另评）；未验证前不得用 Linux 结果代替。
+4. **H21-00**：M20 经用户验收后按计划派发（`docs/proposal-m21-delivery.md` 冻结交付/性能/兼容决策）；
+   本批不提前实现 M21。

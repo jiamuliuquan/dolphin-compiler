@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
@@ -88,7 +89,7 @@ struct CheckArgs {
 
 #[derive(Args)]
 struct FmtArgs {
-    /// Files or directories to format (defaults to `src`)
+    /// Files or directories to format (defaults to `[package].source`, else `src`)
     paths: Vec<PathBuf>,
 
     /// Check formatting without writing files (non-zero exit if changes are needed)
@@ -656,21 +657,49 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
     }
 }
 
-/// `dc fmt`：格式化文件或目录下的全部 `.do` 文件。
+/// `dc fmt`：按 D-M20-4 冻结规则选择文件并格式化。
+///
+/// 无路径参数时从 cwd 向上发现 `dolphin.toml`：找到则根为 `[package].source`，
+/// 否则为 `src`。递归排除项目 `build.output`（默认 `target`）与 `.git`，不跟随目录
+/// 符号链接；显式文件精确生效。先全部读入内存格式化，任一失败则本次不写任何文件。
 fn run_fmt(args: FmtArgs, color: ColorMode) -> Result<ExitCode, (String, ColorMode)> {
-    let roots = if args.paths.is_empty() {
-        vec![PathBuf::from("src")]
+    let FmtArgs { paths, check } = args;
+    let cwd = std::env::current_dir().map_err(|error| {
+        (
+            format!("could not determine current directory: {error}"),
+            color,
+        )
+    })?;
+    let manifest = discover_manifest(&cwd).map_err(|error| (error.to_string(), color))?;
+
+    let roots = if paths.is_empty() {
+        match &manifest {
+            Some(manifest) => vec![manifest.package.source.clone()],
+            None => vec![PathBuf::from("src")],
+        }
     } else {
-        args.paths
+        paths
     };
+
+    let mut excluded = Vec::new();
+    if let Some(manifest) = &manifest {
+        excluded.push(lexical_normalize(&manifest.build.output));
+    }
+
     let mut files = Vec::new();
     for root in &roots {
-        collect_sources(root, &mut files).map_err(|message| (message, color))?;
+        if root.is_file() {
+            // 显式文件精确生效，即使位于构建输出目录或扩展名不是 `.do`。
+            files.push(root.clone());
+        } else {
+            collect_sources(root, &mut excluded, &mut files).map_err(|message| (message, color))?;
+        }
     }
     files.sort();
     files.dedup();
 
-    let mut needs_format = false;
+    // 全有或全无：先读入并格式化全部文件，任一失败时不写任何文件（§8.2）。
+    let mut planned = Vec::new();
     for file in &files {
         let text = fs::read_to_string(file).map_err(|error| {
             (
@@ -680,49 +709,94 @@ fn run_fmt(args: FmtArgs, color: ColorMode) -> Result<ExitCode, (String, ColorMo
         })?;
         let formatted =
             dolphin_format::format_source(&text).map_err(|error| (error.to_string(), color))?;
-        if formatted == text {
-            continue;
-        }
-        needs_format = true;
-        if args.check {
-            println!("would reformat {}", file.display());
-        } else {
-            fs::write(file, formatted).map_err(|error| {
-                (
-                    format!("could not write `{}`: {error}", file.display()),
-                    color,
-                )
-            })?;
-            println!("formatted {}", file.display());
+        if formatted != text {
+            planned.push((file.clone(), formatted));
         }
     }
-    if args.check && needs_format {
-        return Err(("some files are not formatted".to_string(), color));
+
+    if check {
+        for (file, _) in &planned {
+            println!("would reformat {}", file.display());
+        }
+        if !planned.is_empty() {
+            return Err(("some files are not formatted".to_string(), color));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    for (file, formatted) in &planned {
+        fs::write(file, formatted).map_err(|error| {
+            (
+                format!("could not write `{}`: {error}", file.display()),
+                color,
+            )
+        })?;
+        println!("formatted {}", file.display());
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// 递归收集 `.do` 源文件；单文件直接加入。
-fn collect_sources(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+/// 递归收集目录下的 `.do` 源文件；跳过 `.git` 与被排除的构建输出目录，
+/// 不跟随目录符号链接（防环）；目录内自带清单时其构建输出同样排除。
+fn collect_sources(
+    path: &Path,
+    excluded: &mut Vec<PathBuf>,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
     if path.is_dir() {
+        if path.file_name() == Some(OsStr::new(".git")) {
+            return Ok(());
+        }
+        let normalized = lexical_normalize(path);
+        if excluded.contains(&normalized) {
+            return Ok(());
+        }
+        if path.join("dolphin.toml").is_file()
+            && let Ok(Some(manifest)) = discover_manifest(path)
+        {
+            let output = lexical_normalize(&manifest.build.output);
+            if !excluded.contains(&output) {
+                excluded.push(output);
+            }
+        }
         let entries = fs::read_dir(path)
             .map_err(|error| format!("could not read directory `{}`: {error}", path.display()))?;
         for entry in entries {
             let entry = entry.map_err(|error| format!("could not read source entry: {error}"))?;
             let child = entry.path();
-            if child.is_dir() {
-                collect_sources(&child, out)?;
-            } else if child.extension().is_some_and(|ext| ext == "do") {
-                out.push(child);
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("could not read `{}`: {error}", child.display()))?;
+            if file_type.is_symlink() && child.is_dir() {
+                continue;
             }
+            collect_sources(&child, excluded, out)?;
         }
         Ok(())
     } else if path.is_file() {
-        out.push(path.to_path_buf());
+        if path.extension().is_some_and(|ext| ext == "do") {
+            out.push(path.to_path_buf());
+        }
         Ok(())
     } else {
         Err(format!("`{}` does not exist", path.display()))
     }
+}
+
+/// 纯词法规范化：折叠 `.`/`..`，不解析符号链接，也不要求路径存在。
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// 读取并解析项目清单；未找到时报错。

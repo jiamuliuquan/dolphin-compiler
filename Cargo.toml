@@ -52,6 +52,7 @@ dolphin-lsp.workspace = true
 serde_json.workspace = true
 dolphin-analysis.workspace = true
 dolphin-ir.workspace = true
+dolphin-source.workspace = true
 
 [features]
 default = ["cranelift"]

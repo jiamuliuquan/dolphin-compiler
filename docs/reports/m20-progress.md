@@ -445,3 +445,113 @@
 3. README LSP 段落已按本批实现更新；复核若要求严格 §11 可回退该段与开发工具表项。
 4. H20-05 前需核实 gdb/lldb 可用性；本机未检查调试器。
 5. 本报告不把 M20 记为完成；H20-03 状态以三平台 CI 结果为准。
+
+## H20-04 Formatter 保持性与项目发现
+
+- 批次：H20-04
+- 状态：**实现完成，Linux 本机默认 lane 与 Linux LLVM lane 通过；Windows/macOS 默认 lane 与远端 CI 未验证**
+  （§12.4 完成标准要求三平台，本机只跑 Linux；未验证项见下）
+- 前置批次及报告：H20-03 / 本文件上一节；规格 §8、§10.1、§12.4；D-M20-4 已确认
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`c9ce4ce54ffed177ac0fb4f348f4fed950b8ba09`（`v0.3.0-M20-03`）；工作区干净。
+- 无用户未提交改动被覆盖；未 commit/push/tag。
+
+### 本批修改范围（源码，非文档）
+
+| 范围 | 文件 |
+| --- | --- |
+| `run_fmt`：cwd 向上清单发现、`[package].source` 默认根、构建输出/`.git` 递归排除、目录符号链接不跟随、显式文件精确生效、内存中先全部格式化再写入（全有或全无） | `src/main.rs` |
+| `collect_sources` 增加排除集与嵌套清单输出发现；`lexical_normalize` 纯词法规范化；`FmtArgs` 帮助文本 | `src/main.rs` |
+| FMT-01..06 集成验收（幂等、token/注释保持、全有或全无、`--check` 零写入、发现/排除/CRLF、M1-M19 行为保持） | `tests/m20_fmt.rs`（新增） |
+| 根包 dev-dependency `dolphin-source`（FMT-02 token 比较用） | `Cargo.toml`、`Cargo.lock` |
+| CI/README 显式 `--test` 列表加入 `m20_fmt`；README `dc fmt` 用法与开发工具说明更新 | `.github/workflows/ci.yml`、`README.md` |
+
+未修改 `dolphin-format`：FMT-01/02 在全部仓库示例与源码标准库上未发现 token/注释破坏，无需先修 formatter。
+
+### 验收映射（真实测试名与固定期望）
+
+| 验收 | 测试（`tests/m20_fmt.rs`） | 固定期望（断言内容） | 结果 |
+| --- | --- | --- | --- |
+| FMT-01 | `fmt_01_idempotent_on_examples_and_fixtures` | `examples/**/*.do` + `crates/dolphin-std/src/**/*.do`（37 个文件）与 4 个内联 fixture（泛型/`impl`、`defer`+`extern "C"`+字符串内 `{}`/`//`+字符字面量、trait/match/Vec、CRLF）均 `format(format(x)) == format(x)` | 通过 |
+| FMT-02 | `fmt_02_token_preservation_and_comments` | 同一批文件原文与格式化文本分别 `lex`，非 trivia `TokenKind` 序列（含 Identifier/Number/String/Character 字面值）逐项相等；`//` 与 `/* */` 的次数与内容（逐行去缩进/行尾空白）相等 | 通过 |
+| FMT-03 | `fmt_03_error_file_not_written_all_or_nothing` | 项目含 `src/a_good.do`、`src/m_good.do`（非规范）与 `src/z_bad.do`（未闭合字符串）：`dc fmt` exit 1、stderr 含 `unterminated string literal`、stdout 无 `formatted`、整棵项目文件树逐字节不变；`--check` 同样不写 | 通过 |
+| FMT-04 | `fmt_04_check_writes_nothing` | 非规范项目 `dc fmt --check` exit 1、stdout 恰为 `would reformat <file>`、文件不变；`dc fmt` 后 exit 0、stdout 恰为 `formatted <file>`、内容为规范文本；再次 `--check`/`fmt` 均 exit 0 且 stdout 为空、文件不变 | 通过 |
+| FMT-05 | `fmt_05_project_discovery_and_crlf` | `source="code"`、`output="out"`、`.git/hook.do` 与 `out/generated.do` 非规范、`code/main.do` 为 CRLF：无参数 `dc fmt`（cwd=项目）exit 0，`code/main.do` 变为 LF 规范文本、`code/nested/helper.do` 被格式化、`out`/`.git` 逐字节不变、不产生 `dolphin.lock`；显式目录同样排除；显式单文件 `out/generated.do` 被格式化；`code/loop` 目录符号链接不被跟随（unix） | 通过 |
+| FMT-06 | `fmt_06_m1_m19_examples_behavior_preserved` | 14 个示例目录（m1..m9、m13..m16、m18；15 条运行断言）复制到临时目录并加行尾空白后，`dc fmt` 恢复仓库原文；随后显式 `--debug`（m16 `--release`）`dc run` 断言固定 stdout/exit 且 stderr 为空（m1=28、m2=42、m3=28、m4=120、m5 输出、m6=43、m7=13、m8=64、m9 cli=42/server=26、m13=49、m14 无泄漏、m15 `42 22 true`、m16 `sum = 1799999937, fib = 9227465`、m18 固定输出）；m19 两个包显式 `--debug` `dc test` 各 `5 passed; 0 failed` | 通过 |
+
+内联 fixture（FMT-01/02 的一部分，验收矩阵外）：`generics_and_methods.do`、`ffi_strings_comments.do`、`trait_and_match.do`、`crlf_and_blank_lines.do`。
+
+### 修复前复现结果（新增行为回归先失败）
+
+修复前（仅新增 `tests/m20_fmt.rs`、未改 `src/main.rs`）运行 `cargo test -p dolphin-compiler --test m20_fmt`：4 passed，2 failed。
+
+```text
+---- fmt_05_project_discovery_and_crlf stdout ----
+assertion `left == right` failed: stdout= stderr=`src` does not exist
+  left: Some(1)
+ right: Some(0)
+
+---- fmt_03_error_file_not_written_all_or_nothing stdout ----
+no file may be written: formatted /tmp/dolphin-m20-fmt-fmt03-.../project/src/a_good.do
+formatted /tmp/dolphin-m20-fmt-fmt03-.../project/src/m_good.do
+```
+
+即旧 `run_fmt` 默认根是 `src`（不读清单），且按排序逐文件立即写入：坏文件（`z_bad.do`）之前的好文件已被覆盖。
+
+### 修复后结果
+
+- `cargo test -p dolphin-compiler --test m20_fmt`：6 passed；0 failed。
+- 手工复核（`target/debug/dc`，Linux）：`source="code"`/`output="out"` 项目中 `dc fmt --check` → `would reformat .../code/main.do` + `some files are not formatted`、exit 1；`dc fmt` → `formatted .../code/main.do`、exit 0；重复运行 exit 0 无输出；`code/main.do` 由 CRLF 变为 LF；`out/generated.do` 与 `.git/hook.do` 原样；无 `dolphin.lock`；显式 `dc fmt out/generated.do` 被格式化。
+- 子目录发现：在 `examples/m19/dtext/src` 内 `dc fmt --check` exit 0（向上发现 `dolphin.toml`）；在无清单的 `examples/m19` 内仍回退 `src` 并报 `` `src` does not exist ``（保持现状）。
+- CI 格式化门禁本地复跑：`./target/release/dc fmt --check examples crates/dolphin-std/src` exit 0。
+
+### 实际运行命令与结果
+
+环境：Linux x86_64（`Linux AppServer 7.2.3-zen1-2-zen`），rustc/cargo 1.97.1，LLVM 22.1.8（`llvm-config` 在 PATH）。
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings` | 通过 |
+| `cargo test --workspace --exclude dolphin-codegen-llvm` | 57 个 test harness 共 443 passed；0 failed |
+| `cargo test -p dolphin-compiler --test m20_fmt` | 6 passed；0 failed |
+| `cargo build --release --bins` + `./target/release/dc fmt --check examples crates/dolphin-std/src` | 通过（exit 0） |
+| `cargo build --bins --features llvm` | 通过 |
+| `cargo clippy --workspace --all-targets --features llvm -- -D warnings` | 通过 |
+| `DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm` | 59 个 harness 共 450 passed；0 failed |
+| `DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt` | 17 个二进制共 224 passed；0 failed（含 `m20_fmt` 6 passed） |
+| `cargo test -p dolphin-compiler --features llvm --test backend` | 4 passed |
+
+### 行为/兼容变化
+
+- **CLI `dc fmt`（D-M20-4）**：
+  - 无路径参数：从 cwd 向上发现 `dolphin.toml`，根为 `[package].source`（默认 `src`）；无清单时保持旧 `src`。
+  - 递归排除项目 `build.output`（默认 `target`）与 `.git`，包括显式目录参数；不跟随目录符号链接；目录内自带清单的项目其输出也被排除（保证 `dc fmt --check examples ...` 不进入示例 `target/`）。
+  - 显式文件精确生效（含构建输出目录内的文件与非 `.do` 文件）。
+  - 全部选中文件先读入内存格式化；任一格式化/读取失败则本次不写任何文件并 exit 1。写入失败仍按文件报错并 exit 1。
+  - `--check` 语义、输出文本与退出码不变；`dc fmt` 不读/不写 `dolphin.lock`、不产生产物。
+- **Rust 库 API**：无公开 API 变化；`dolphin-format` 未改动。根包新增 dev-dependency `dolphin-source`（仅测试）。
+- **未改变**：`dolphin.toml`/`dolphin.lock`/`.dlib` 格式；`check/build/run/test/package/fetch/publish/lsp` 行为；`lex`/`parse`/`format_source` 签名与语义。
+
+### 与冻结规格的差异
+
+1. 规格 §8.1 第 3 条只说排除“项目 `build.output`”。本批在递归遇到目录内自带 `dolphin.toml` 时也把该嵌套项目的输出加入排除集；否则 CI 的 `dc fmt --check examples ...` 会进入 `examples/*/target`，违反 §8.4 反例。
+2. cwd 存在但解析失败的 `dolphin.toml` 时，`dc fmt` 报该清单诊断并 exit 1（规格未定义此情形）；不会静默回退到 `src`。
+3. 递归只跳过目录符号链接；指向文件的符号链接仍按文件处理（规格只禁止跟随目录符号链接）。
+4. 显式路径为非 `.do` 文件时仍精确格式化（保持 M17 已有行为；规格未要求按扩展名过滤显式文件）。
+
+### 未验证项（不得当作通过）
+
+1. **Windows/macOS 默认 lane**：本机只跑 Linux；`m20_fmt` 未在 Windows/macOS 运行。目录符号链接用例 `#[cfg(unix)]` 在 macOS 会运行、Windows 跳过；盘符/反斜杠路径与 CRLF 平台差异未做真实平台验证。
+2. **远端 CI**：未 push/tag，未运行 GitHub Actions。
+3. **H20-05**：调试器实测（`scripts/debug_smoke*.sh`、`tests/m20_debug.rs`）与 `lsp_07_m19_development_flow` 未实现。
+4. **能力文档**：`implemented-features.md`/`roadmap.md` 未更新（按 §11，M20 全部批次完成前不写入）；README 更新了 `dc fmt` 用法/开发工具说明与测试列表。
+
+### 剩余问题和下一批输入（H20-05）
+
+1. H20-05 输入：规格 §9、§12.5；新增 `scripts/debug_smoke.sh`（gdb）、`scripts/debug_smoke_lldb.sh`（lldb）与 `tests/m20_debug.rs`；`tests/m20_debug.rs` 需加入 CI/README 显式 `--test` 列表，CI LLVM lane 安装 gdb 后运行。
+2. 派发前核实本机/CI gdb（Linux）与 lldb（macOS）可用性；缺失时按规格让 `m20_debug` 失败并提示 `DOLPHIN_SKIP_DEBUGGER=1`，报告中列为未验证。
+3. H20-05 收尾需在真实/协议 fixture 中走一次 M19 开发流程并列出仍缺功能（`lsp_07_m19_development_flow`），不以 initialize 成功代替。
+4. 本报告不把 M20 记为完成；H20-04 状态以三平台 CI 结果为准。

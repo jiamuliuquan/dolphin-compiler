@@ -23,7 +23,7 @@ Dolphin 是一个用于学习和实践编译器实现的静态类型编程语言
 | 模块 | 递归扫描 `src/`、`pkg`、模块/成员 `use`、`pub` 可见性 |
 | 包管理 | `dolphin.toml` 的 `[lib]`/`[[bin]]`、本地 path 依赖、Maven 风格坐标与仓库、确定性 `.dlib`、内容寻址缓存、`dolphin.lock`、`--locked`/`--offline`、条件 PUT 发布 |
 | 工具 | `check/build/run/test/package/fetch/publish/info/env/fmt/lsp`、`dc run -- <应用参数>` 原样转发、`dc test`（发现 `tests/*.do` 的 `test_*`、独立子进程执行、`--filter`、固定汇总）、Debug/Release、颜色、帮助和版本 |
-| 开发工具 | `dc fmt` 保守空白格式化、`dc lsp [项目目录]` 项目级诊断/符号/悬停/跳转（未保存 overlay、跨文件/跨包定义；无清单时单文件分析）、LLVM Debug 下的 Unix DWARF 行表与函数调试信息 |
+| 开发工具 | `dc fmt` 保守空白格式化（无路径时按清单 `[package].source` 发现、排除 `build.output`/`.git`、全有或全无写入）、`dc lsp [项目目录]` 项目级诊断/符号/悬停/跳转（未保存 overlay、跨文件/跨包定义；无清单时单文件分析）、LLVM Debug 下的 Unix DWARF 行表与函数调试信息 |
 | 后端 | 类型化 CFG IR、后端无关 `CodegenBackend` 接口、Cranelift（默认）与可选 LLVM 后端、本机目标文件、内嵌最小 C 运行时和 `rust-lld` 链接器 |
 
 尚未实现的主要能力包括嵌套数组、通配符导入、版本范围求解、闭源二进制 Dolphin 包、动态多态、`?` 错误传播、多错误恢复，以及 Cranelift 后端的调试信息和 Windows PDB 调试信息。详细边界见[已实现功能参考](docs/implemented-features.md)和[路线图](docs/roadmap.md)。
@@ -99,9 +99,12 @@ python3 scripts/bench.py
 ### 开发工具（M17）
 
 ```bash
-# 格式化：默认原地写回，--check 只检查并以非零退出
+# 格式化：默认原地写回，--check 只检查并以非零退出。
+# 不传路径时从当前目录向上发现 dolphin.toml，根为 [package].source（默认 src）；
+# 递归排除 build.output（默认 target）与 .git，显式文件仍精确生效。
 ./target/release/dc fmt examples/m8/src
 ./target/release/dc fmt --check examples
+./target/release/dc fmt --check examples/m19/dtext
 
 # 语言服务器：stdio 上的 LSP（诊断/文档符号/悬停/跳转定义）
 ./target/release/dc lsp examples/m19/dtext
@@ -115,7 +118,7 @@ DOLPHIN_BACKEND=llvm ./target/release/dc build examples/m8 --debug
 gdb -batch -ex 'info line main' ./examples/m8/target/m8
 ```
 
-Cranelift 后端暂不生成调试信息，Windows/PDB 也未覆盖。`dc lsp [项目目录]` 在项目模式下使用共享分析快照：含 `pkg`/`use` 的文档获得项目语义诊断，悬停/定义基于符号身份支持未保存 overlay 与跨文件/跨包跳转；无 `dolphin.toml` 时按单文件规则分析（`pkg`/`use` 或缺少 `main` 时跳过语义检查）。formatter 项目发现与调试器验收属 M20 后续批次。格式化器目前主要整理缩进和空白，不是完整 AST 排版器。
+Cranelift 后端暂不生成调试信息，Windows/PDB 也未覆盖。`dc lsp [项目目录]` 在项目模式下使用共享分析快照：含 `pkg`/`use` 的文档获得项目语义诊断，悬停/定义基于符号身份支持未保存 overlay 与跨文件/跨包跳转；无 `dolphin.toml` 时按单文件规则分析（`pkg`/`use` 或缺少 `main` 时跳过语义检查）。调试器验收属 M20 后续批次。格式化器目前主要整理缩进和空白，不是完整 AST 排版器。
 
 ## CLI
 
@@ -129,9 +132,11 @@ dc fetch   <项目目录> [--locked] [--offline]
 dc publish <项目目录> [--repository <id>] [--locked] [--offline]
 dc info  <项目目录>
 dc env
-dc fmt   <文件或目录...> [--check]
+dc fmt   [<文件或目录...>] [--check]
 dc lsp   [项目目录]
 ```
+
+`dc fmt` 不传路径时从当前目录向上发现 `dolphin.toml`，把 `[package].source`（默认 `src`）作为根，并递归排除项目的 `build.output`（默认 `target`）与 `.git`；显式传入的文件精确格式化（即使位于构建输出目录）。递归不跟随目录符号链接；本次选中的文件先全部在内存中格式化，任一失败则不写任何文件（全有或全无），输出统一 LF。
 
 使用 `dc <子命令> --help` 查看子命令参数。`--debug` 与 `--release` 互斥，默认使用 Debug 配置。`--color` 是全局选项，可放在子命令前后。`-o`（`--output`）与 `--bin` 仅对 `build`/`run` 生效；`--bin` 需要 `dolphin.toml` 清单，`-o` 仅在单文件模式下生效。`dc run ... -- <应用参数>` 把 `--` 之后的参数原样传给程序，不经过 shell（空参数、空格、Unicode、前导 `-` 都保留）。`dc test` 需要 `[lib]` 目标，测试二进制写到 `target/test/<包名>-tests`，每个测试在独立子进程中运行并有固定 30 秒超时；`--filter` 按测试名子串选择，汇总格式为 `N passed; M failed; K filtered out`。`dc info` 只接受项目目录（不接受 `.do` 文件），`dc env` 显示宿主/目标平台、ABI、所选链接器与缓存根。
 
@@ -342,7 +347,7 @@ cargo build --release --bins
 # 可选 LLVM 后端（需要本机 LLVM 开发库）：额外覆盖 `dolphin-codegen-llvm`
 cargo clippy --workspace --features llvm --all-targets -- -D warnings
 DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm
-DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp
+DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt
 cargo test -p dolphin-compiler --features llvm --test backend
 ```
 

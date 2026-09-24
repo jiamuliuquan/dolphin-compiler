@@ -439,6 +439,7 @@ dependencies = [
  "dolphin-format",
  "dolphin-ir",
  "dolphin-lsp",
+ "dolphin-source",
  "serde_json",
 ]
 

@@ -27,6 +27,7 @@ dolphin-ir = { path = "crates/dolphin-ir" }
 dolphin-package = { path = "crates/dolphin-package" }
 dolphin-platform = { path = "crates/dolphin-platform" }
 dolphin-hir = { path = "crates/dolphin-hir" }
+dolphin-analysis = { path = "crates/dolphin-analysis" }
 dolphin-backend = { path = "crates/dolphin-backend" }
 dolphin-codegen-cranelift = { path = "crates/dolphin-codegen-cranelift" }
 dolphin-codegen-llvm = { path = "crates/dolphin-codegen-llvm" }
@@ -49,6 +50,8 @@ dolphin-lsp.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+dolphin-analysis.workspace = true
+dolphin-ir.workspace = true
 
 [features]
 default = ["cranelift"]

@@ -383,6 +383,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dolphin-analysis"
+version = "0.3.0"
+dependencies = [
+ "dolphin-hir",
+ "dolphin-ir",
+ "dolphin-package",
+ "dolphin-source",
+ "dolphin-syntax",
+]
+
+[[package]]
 name = "dolphin-backend"
 version = "0.3.0"
 dependencies = [
@@ -423,8 +434,10 @@ name = "dolphin-compiler"
 version = "0.3.0"
 dependencies = [
  "clap",
+ "dolphin-analysis",
  "dolphin-driver",
  "dolphin-format",
+ "dolphin-ir",
  "dolphin-lsp",
  "serde_json",
 ]

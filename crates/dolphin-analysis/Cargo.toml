@@ -1,0 +1,11 @@
+[package]
+name = "dolphin-analysis"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolphin-source.workspace = true
+dolphin-syntax.workspace = true
+dolphin-ir.workspace = true
+dolphin-hir.workspace = true
+dolphin-package.workspace = true

@@ -191,7 +191,7 @@
 3. **真实 stdio LSP 协议会话**：DIAG-01..05 的 LSP 断言使用 `dolphin_lsp::Server::handle` 进程内消息处理；`Content-Length` 帧与退出码协议测试属 H20-03 的 `tests/m20_lsp.rs`。
 4. **H20-02/03/04/05**：`dolphin-analysis`、项目级 LSP、formatter、调试器均未实现。
 
-### 与冻结规格的差异（需 H20-02 处理）
+### 与冻结规格的差异（需 H20-02 处理；已在 H20-02 处理）
 
 1. `lower_sources_analysis_collecting` 本批返回 `Result<ir::Program, Vec<Diagnostic>>`，不是 §5.4 冻结的 `Result<LoweredProgram, Vec<Diagnostic>>`：`LoweredProgram`/`AnalysisData`（§6.7）依赖 `DefinitionData`/`DefKind`/`SymbolIndex`（§6.6，H20-02）。为避免提前实现下一批，本批只做诊断与恢复；H20-02 引入 side table 时升级返回类型。
 2. `parse_recovering` 顶层同步点除规格列出的 `fn/struct/enum/trait/impl/use/pkg/EOF` 外，加入本语法实际顶层项起始 `extern`/`pub`（否则会跳过整个项）。
@@ -204,3 +204,129 @@
 3. H20-03 需把 `dc lsp [PROJECT]` 与协议行为（D-M20-1/2）、`tests/support/lsp.rs` 落地；本批刻意保留 `unknown_request_returns_null` 旧行为。
 4. H20-05 前需核实 gdb/lldb 可用性；本机未检查调试器。
 5. 本报告不把 M20 记为完成；H20-01 状态以三平台 CI 结果为准。
+
+## H20-02 共享项目分析接口与文件 overlay
+
+- 批次：H20-02
+- 状态：**实现完成，Linux 本机默认 lane 与 Linux LLVM lane 通过；Windows/macOS 默认 lane 与远端 CI 未验证**
+  （§12.2 完成标准含 Windows 盘符用例；本机只跑 Linux，盘符分支以平台无关单测覆盖，见下）
+- 前置批次及报告：H20-01 / 本文件上一节；规格 §6、§10.1、§12.2
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`3aaf7696b9da7bd43a2754e20e3091886d531156`（`v0.3.0-M20-01`）；工作区干净。
+- 无用户未提交改动被覆盖；未 commit/push/tag。
+
+### 本批修改范围（源码，非文档）
+
+| 范围 | 文件 |
+| --- | --- |
+| `LoweredProgram`/`AnalysisData`/`DefinitionData`/`DefinitionKind`；`lower_sources_analysis`；`lower_sources_analysis_collecting` 升级返回 side table；`lower_sources`/`lower_library` 只返回 `.program`；定义收集（函数/类型/trait/方法/字段/variant/类型参数） | `crates/dolphin-hir/src/lower.rs` |
+| `MonoState.instance_keys`（与 `FunctionId` 对齐的实例 key） | `crates/dolphin-hir/src/monomorphize.rs` |
+| `package_sources_for_graph`（从 driver 移到 HIR，构建与分析共用，避免选择规则漂移） | `crates/dolphin-hir/src/modules.rs`、`crates/dolphin-driver/src/lib.rs` |
+| `resolve_readonly` + `ReadonlyRemote`（offline、只读锁、缓存恢复、`E1001`/未知仓库 `E1002`） | `crates/dolphin-package/src/resolver.rs` |
+| `TypeId`/`FunctionId` 增加 `PartialOrd`/`Ord`（side table `BTreeMap` 需要；不影响布局/ABI） | `crates/dolphin-ir/src/ir.rs` |
+| 新 crate `dolphin-analysis`：`host.rs`（overlay/revision/快照/单元选择/诊断合并）、`index.rs`（定义/解析/签名/文档符号）、`uri.rs`（`file://` 编解码） | `crates/dolphin-analysis/`（新增） |
+| ANALYSIS-01..06 集成验收 | `tests/m20_analysis.rs`（新增） |
+| CI/README 显式 `--test` 列表加入 `m20_analysis`；workspace/根包 dev-dependency 接线 | `.github/workflows/ci.yml`、`README.md`、`Cargo.toml`、`Cargo.lock` |
+
+### 验收映射（真实测试名与固定期望）
+
+| 验收 | 测试（`tests/m20_analysis.rs`） | 固定期望（断言内容） | 结果 |
+| --- | --- | --- | --- |
+| ANALYSIS-01 | `analysis_01_no_network_no_lock_write_no_artifacts` | HTTP 依赖无锁无缓存 → `partial=true`、`units=[]`、唯一项目诊断 `code=E1001` 且消息含坐标与 `run \`dc fetch\` and retry`；回环 listener `accept()` 为 `WouldBlock`（零连接）；项目文件树逐字节不变、无 `dolphin.lock`、无 `target/`；路径依赖 + `dc fetch` 锁 → 快照成功且锁/文件不变 | 通过 |
+| ANALYSIS-02 | `analysis_02_unsaved_dependency_affects_caller` | overlay 依赖把 `count(): i32` 改为 `bool` → 调用方恰好 1 条 `E0001` `expected \`i32\`, found \`bool\``，primary 路径为 app 的 `main.do`；stale version 返回 `false`；`remove_overlay` 后诊断清空、revision=2 | 通过 |
+| ANALYSIS-03 | `analysis_03_library_without_main` | lib-only 项目：1 个 `UnitKind::Lib`、`partial=false`、无任何诊断、`index=Some`（不误报缺 main）；bin 缺 main → `partial=true` 且项目诊断含 `program does not define \`main\`` | 通过 |
+| ANALYSIS-04 | `analysis_04_multi_bin_and_custom_source` | `[package].source = "code"` + lib + 两 bin：单元顺序 `[Lib, Bin(first), Bin(second)]`；共享文件 `unit_for_path` 取 Lib；lib 排除两 bin 入口，每个 bin 排除另一个；各单元均有符号索引 | 通过 |
+| ANALYSIS-05 | `analysis_05_same_name_different_package_not_confused` | 两个 path 依赖的同名模块 `mod.inner.value`/`Point`：调用点解析为不同 `DefId`（包不同）、签名分别 `fn left.mod.inner.value() -> i32` / `fn right.mod.inner.value() -> i32`、定义 source 不同；`render_type` 为 `left.mod.inner.Point` / `right.mod.inner.Point` | 通过 |
+| ANALYSIS-06 | `analysis_06_cli_build_behavior_unchanged` | 快照零写入/零 `target/`；`dc check` 输出 `Checked g:app:0.1.0`；`dc build` 成功且生成 Debug 产物；`dc run` 退出码 42、stderr 空；显式 `dc build --release` 与 `dc run --release` 同样退出 42 | 通过 |
+
+补充单元测试（验收矩阵外的正反例/边界）：
+
+| crate | 测试 | 断言 |
+| --- | --- | --- |
+| dolphin-analysis | `stale_overlay_is_ignored_and_revision_advances` | 同 version/旧 version 返回 false 且 revision 不变；新 version/remove 各 +1；重复 remove 返回 false |
+| dolphin-analysis | `snapshot_is_cached_per_revision` | 同 revision 返回同一 `Arc`；overlay 后 revision+1 且生成新快照 |
+| dolphin-analysis | `overlay_only_new_file_participates_in_project_analysis` | 仅存在于 overlay 的 `src/helper.do` 参与项目分析并消除 `unknown function`；didClose 后从发现集合移除、诊断恢复 |
+| dolphin-analysis | `missing_manifest_is_single_file_mode` | 无清单 → `AnalysisMode::SingleFile`、无单元、无诊断、非 partial |
+| dolphin-analysis | `unit_selection_prefers_lib_then_manifest_order` | 单元顺序与 Lib > Bin 选择；入口排除 |
+| dolphin-analysis | `decodes_percent_escapes_and_unicode` / `windows_drive_letters_map_to_backslash_paths` / `rejects_non_file_scheme_backslashes_and_bad_escapes` / `path_to_uri_round_trips_spaces_and_unicode` | 空格/中文/盘符解码、反斜杠与非 `file` scheme 拒绝、编码往返（Windows 分支以显式参数在 Linux 上断言） |
+| dolphin-analysis | `resolves_parameters_locals_for_vars_and_shadowing` | 参数/`val`/`for` 变量解析到最近绑定、内层遮蔽外层、限定函数调用解析为定义 |
+| dolphin-analysis | `match_bindings_resolve_to_declaration_spans` | match 绑定解析到模式内绑定 token 的真实 span；模式名解析到枚举定义 |
+| dolphin-analysis | `definitions_signatures_documents_and_instances` | `struct Point`/`fn helper(i32) -> i32`/`x: i32` 签名、`document_symbols` 名称与顺序、`Pair<i32>` 实例 `render_type` |
+| dolphin-analysis | `unresolved_names_stay_unresolved` | 字段访问与函数名声明位置不被猜测为定义 |
+| dolphin-package | `readonly_reports_e1001_without_writing_lock` | 固定完整 `E1001` 文本；不写 `dolphin.lock` |
+| dolphin-package | `readonly_resolves_path_dependencies_without_writing_lock` | 路径依赖图解析成功且不写锁 |
+| dolphin-hir | `analysis_side_table_aligns_with_type_and_function_ids` | `type_names.len()==types.len()`、`function_instances.len()==functions.len()` 且逐项对应；定义含 `Pair`/`Pair.T`/`id`/`main`；`Pair<i32>` 实例 key 正确 |
+
+### 实际运行命令与结果
+
+环境：Linux x86_64（`Linux AppServer 7.2.3-zen1-2-zen`），rustc/cargo 1.97.1，LLVM 22.1.8（`llvm-config` 在 PATH）。
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings` | 通过 |
+| `cargo test --workspace --exclude dolphin-codegen-llvm` | 55 个 test harness（含 doc-tests）共 418 passed；0 failed |
+| `cargo test -p dolphin-compiler --test m20_analysis` | 6 passed；0 failed |
+| `cargo build --bins --features llvm` | 通过 |
+| `cargo clippy --workspace --all-targets --features llvm -- -D warnings` | 通过 |
+| `DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm` | 57 个 test harness（含 doc-tests）共 425 passed；0 failed |
+| `DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis` | 15 个二进制共 208 passed；0 failed（含 `m20_analysis` 6 passed） |
+| `cargo test -p dolphin-compiler --features llvm --test backend` | 4 passed（`debug_backends_agree`/`release_backends_agree`/`llvm_debug_profile_emits_dwarf`/`typed_ir_has_no_backend_types`） |
+
+`TypeId`/`FunctionId` 只增加 derive（无布局/ABI 语义变化），仍按“改 IR 同时检查两个后端”执行了默认与 LLVM 两套 lane 及 `backend` 对照测试。
+
+### 行为/兼容变化
+
+- **新增 Rust 库 API（增量）**：
+  - `dolphin-hir`：`LoweredProgram`/`AnalysisData`/`DefinitionData`/`DefinitionKind`；`lower_sources_analysis`；
+    `lower_sources_analysis_collecting` 返回类型由 `Result<ir::Program, Vec<Diagnostic>>` 升级为
+    `Result<LoweredProgram, Vec<Diagnostic>>`（H20-01 已声明的差异，本批按 §5.4/§6.7 补齐；
+    仓库内调用方均忽略 `Ok` 值，无行为变化）；`modules::package_sources_for_graph`；
+    `MonoState.instance_keys`。
+  - `dolphin-package`：`resolver::resolve_readonly`。
+  - `dolphin-analysis`（新 crate）：`AnalysisHost`/`AnalysisSnapshot`/`AnalysisUnit`/`AnalysisMode`/`UnitKind`；
+    `SymbolIndex`/`SymbolId`/`DefId`/`DefKind`/`Definition`/`DocumentSymbol`/`Resolution`/`ResolutionEntry`；
+    `uri_to_path`/`path_to_uri`；增量 helper `AnalysisHost::with_cache`/`with_cache_root`/`overlay_version`、
+    `AnalysisUnit::source_id_for_path`/`source_for_path`、`AnalysisSnapshot::unit_for_path`（供 H20-03）。
+  - `dolphin-ir`：`TypeId`/`FunctionId` 增加 `PartialOrd`/`Ord`。
+- **CLI/持久格式**：无变化。`dc check/build/run/test/fetch/publish` 仍走现有网络/写锁逻辑（ANALYSIS-06）；
+  `dolphin.toml`/`dolphin.lock`/`.dlib` 无字段或格式变化；分析路径不下载、不写锁、不产生产物。
+- **未改变**：`lex`/`parse`/`load_packages`/`lower_sources`/`lower_library`/`resolve_project` 签名与语义；
+  `dc lsp` 协议行为（H20-03 才改 D-M20-1/2）；`dolphin-lsp` 仍直接依赖 `dolphin-hir`（依赖切换到
+  `dolphin-analysis` 属 H20-03）。
+
+### 与冻结规格的差异
+
+1. `dolphin-analysis` 除规格 §6.1 列出的四个 crate 外还依赖 `dolphin-ir`：冻结的 `SymbolIndex`
+   签名使用 `ir::TypeId`/`ir::FunctionId`/`ir::Type`，必须直接依赖；未违反“不得依赖 driver/codegen/
+   linker/platform”的禁止项。
+2. `DefKind` 无 `Impl` 变体（规格 §6.6 冻结集合）；`document_symbols` 因此只返回函数/结构体/枚举/trait，
+   impl 的文档符号显示留待 H20-03 按现有 LSP 行为处理（§7.5）。
+3. `Resolution::Instance` 变体已实现但当前解析遍历不会产生：表达式级类型推断不在 M20 范围；
+   泛型实例身份通过 `type_names`/`function_instances` 暴露。
+4. 合并 AST 不保留 `uses`（`merge_units` 现状），因此 `use` 声明路径 token 本身不产生 `ResolutionEntry`；
+   使用点的函数/类型/模块路径按 loader 已限定名解析（`modules::resolve_modules` 产物）。
+5. `AnalysisHost::snapshot` 的单文件模式只返回 `mode=SingleFile` 空快照；打开文档的单文件语法分析
+   仍由 LSP 层执行（§7.1，H20-03）。
+
+### 未验证项（不得当作通过）
+
+1. **Windows/macOS 默认 lane**：本机只跑 Linux；`analysis_01..06` 未在 Windows/macOS 运行。
+   盘符/反斜杠 URI 分支以 `uri_to_path_impl(..., windows)` 单测在 Linux 上断言，但不等于真实平台验证。
+2. **远端 CI**：未 push/tag，未运行 GitHub Actions。
+3. **真实 stdio LSP 会话**：本批只提供分析 API；协议层（`tests/m20_lsp.rs`、`tests/support/lsp.rs`）属 H20-03。
+4. **H20-03/04/05**：项目级 LSP、formatter、调试器均未实现。
+5. 能力声明未更新：`implemented-features.md` 未新增 `dolphin-analysis`/`resolve_readonly` 条目，README 只更新了开发验证命令列表；按 §11，M20 全部批次完成前不把这些 API 写入当前能力文档。
+
+### 剩余问题和下一批输入（H20-03）
+
+1. H20-03 输入：规格 §7、§10.1、§12.3；`dc lsp [PROJECT]` 与 D-M20-1/2 协议行为；新增
+   `tests/support/lsp.rs` 与 `tests/m20_lsp.rs` 并加入 CI/README 显式 `--test` 列表。
+2. H20-03 需把 `dolphin-lsp` 依赖从 `dolphin-hir` 切换为 `dolphin-analysis`，删除文本同名查找回退，
+   使用 `SymbolIndex::resolve`/`definition_of`/`document_symbols`/`render_type`；发布诊断带 overlay version
+   （`AnalysisHost::overlay_version`/`AnalysisSnapshot.revision`）。
+3. 单文件模式（无清单）与打开文档的单文件诊断、`window/showMessage` 项目诊断发布规则见 §7.1/§7.3/§7.4。
+4. H20-05 前需核实 gdb/lldb 可用性；本机未检查调试器。
+5. 本报告不把 M20 记为完成；H20-02 状态以三平台 CI 结果为准。

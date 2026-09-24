@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use dolphin_package::package::{PackageId, qualify_module};
+use dolphin_package::package::{PackageGraph, PackageId, qualify_module};
 use dolphin_source::diagnostic::Diagnostic;
 use dolphin_source::lexer;
 use dolphin_source::source::{SourceFile, SourceId};
@@ -98,6 +98,47 @@ pub struct PackageSources {
 pub struct ExtraSource {
     pub path: PathBuf,
     pub text: String,
+}
+
+/// 把包图中的各包源码根转为模块加载配置（M20/H20-02；driver 与共享分析共用）。
+///
+/// 根包排除调用方给定的入口文件并可注入额外源码；依赖包只贡献库源码
+/// （自己的 `[[bin]]` 入口永远排除），与构建层 `compile_bin`/`compile_library`
+/// 的选择一致。
+pub fn package_sources_for_graph(
+    graph: &PackageGraph,
+    root_exclude: HashSet<PathBuf>,
+    root_extra: Vec<ExtraSource>,
+) -> Vec<PackageSources> {
+    graph
+        .packages
+        .iter()
+        .map(|package| PackageSources {
+            id: package.id,
+            prefix: package.prefix.clone(),
+            aliases: package
+                .aliases
+                .iter()
+                .map(|(alias, target)| (alias.clone(), graph.get(*target).prefix.clone()))
+                .collect(),
+            source_root: package.source_root.clone(),
+            exclude: if package.id == graph.root {
+                root_exclude.clone()
+            } else {
+                package
+                    .manifest
+                    .bins
+                    .iter()
+                    .map(|bin| bin.path.clone())
+                    .collect()
+            },
+            extra: if package.id == graph.root {
+                root_extra.clone()
+            } else {
+                Vec::new()
+            },
+        })
+        .collect()
 }
 
 struct Unit {

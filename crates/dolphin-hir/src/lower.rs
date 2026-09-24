@@ -2,8 +2,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::monomorphize::{
-    EnumTemplate, FunctionTemplate, InstanceStatus, MethodTemplate, MonoContext, MonoState,
-    Signature, StructTemplate, TemplateTables, TraitImplTemplate, TraitTemplate, TypeEnv,
+    EnumTemplate, FunctionTemplate, GenericKey, InstanceStatus, MethodTemplate, MonoContext,
+    MonoState, Signature, StructTemplate, TemplateTables, TraitImplTemplate, TraitTemplate,
+    TypeEnv,
 };
 use dolphin_ir::ir::{
     self, BasicBlock, BlockId, EnumVariant, Expr, FunctionId, Instruction, LocalId, Location,
@@ -28,7 +29,9 @@ pub fn lower_sources(
     program: &ast::Program,
     packages: &[PackageId],
 ) -> Result<ir::Program, Diagnostic> {
-    ProgramLowerer::new(sources, program, packages)?.lower(true)
+    Ok(ProgramLowerer::new(sources, program, packages)?
+        .lower(true)?
+        .program)
 }
 
 /// 库构建：与 `lower_sources` 相同，但不要求 `main`，也不生成入口。
@@ -37,17 +40,28 @@ pub fn lower_library(
     program: &ast::Program,
     packages: &[PackageId],
 ) -> Result<ir::Program, Diagnostic> {
-    ProgramLowerer::new(sources, program, packages)?.lower(false)
+    Ok(ProgramLowerer::new(sources, program, packages)?
+        .lower(false)?
+        .program)
 }
 
-/// 收集式 lowering（M20/H20-01）：与 `lower_sources`/`lower_library` 相同，
-/// 但声明级错误全部收集；函数体 lowering 仍首错即停。
+/// 分析路径 lowering（M20/H20-02）：与 `lower_sources` 相同，但附带 side table。
+pub fn lower_sources_analysis(
+    sources: &[SourceFile],
+    program: &ast::Program,
+    packages: &[PackageId],
+) -> Result<LoweredProgram, Diagnostic> {
+    ProgramLowerer::new(sources, program, packages)?.lower(true)
+}
+
+/// 收集式 lowering（M20/H20-01，H20-02 升级返回 side table）：与
+/// `lower_sources_analysis` 相同，但声明级错误全部收集；函数体 lowering 仍首错即停。
 pub fn lower_sources_analysis_collecting(
     sources: &[SourceFile],
     program: &ast::Program,
     packages: &[PackageId],
     require_main: bool,
-) -> Result<ir::Program, Vec<Diagnostic>> {
+) -> Result<LoweredProgram, Vec<Diagnostic>> {
     ProgramLowerer::new_collecting(sources, program, packages)?
         .lower(require_main)
         .map_err(|diagnostic| vec![diagnostic])
@@ -61,12 +75,54 @@ pub fn lower_collecting(
     let loaded =
         crate::modules::inject_stdlib(source, program).map_err(|diagnostic| vec![diagnostic])?;
     lower_sources_analysis_collecting(&loaded.sources, &loaded.program, &loaded.packages, true)
+        .map(|lowered| lowered.program)
+}
+
+/// 定义种类（M20/H20-02 side table）；`dolphin-analysis` 映射为公开的 `DefKind`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DefinitionKind {
+    Function,
+    Struct,
+    Enum,
+    Trait,
+    Method,
+    Field,
+    Variant,
+    TypeParam,
+}
+
+/// lowering side table 中的一条定义（M20/H20-02）。
+#[derive(Clone, Debug)]
+pub struct DefinitionData {
+    pub package: PackageId,
+    pub qualified: String,
+    pub kind: DefinitionKind,
+    pub source_id: usize,
+    pub name_span: Span,
+}
+
+/// lowering side table（M20/H20-02）：定义、类型实例名与函数实例名。
+///
+/// `type_names` 的下标是 `TypeId`，`function_instances` 的下标是 `FunctionId`。
+#[derive(Debug, Default)]
+pub struct AnalysisData {
+    pub definitions: Vec<DefinitionData>,
+    pub type_names: Vec<GenericKey>,
+    pub function_instances: Vec<GenericKey>,
+}
+
+/// 带 side table 的 lowering 结果（M20/H20-02）。
+#[derive(Debug)]
+pub struct LoweredProgram {
+    pub program: ir::Program,
+    pub analysis: AnalysisData,
 }
 
 struct ProgramLowerer<'a> {
     sources: &'a [SourceFile],
     ast: &'a ast::Program,
     tables: TemplateTables,
+    definitions: Vec<DefinitionData>,
     state: RefCell<MonoState>,
 }
 
@@ -76,7 +132,8 @@ impl<'a> ProgramLowerer<'a> {
         ast: &'a ast::Program,
         packages: &'a [PackageId],
     ) -> Result<Self, Diagnostic> {
-        let (tables, mut diagnostics) = build_templates_collecting(sources, ast, packages);
+        let (tables, definitions, mut diagnostics) =
+            build_templates_collecting(sources, ast, packages);
         if !diagnostics.is_empty() {
             return Err(diagnostics.remove(0));
         }
@@ -84,6 +141,7 @@ impl<'a> ProgramLowerer<'a> {
             sources,
             ast,
             tables,
+            definitions,
             state: RefCell::new(MonoState::default()),
         })
     }
@@ -94,7 +152,7 @@ impl<'a> ProgramLowerer<'a> {
         ast: &'a ast::Program,
         packages: &'a [PackageId],
     ) -> Result<Self, Vec<Diagnostic>> {
-        let (tables, diagnostics) = build_templates_collecting(sources, ast, packages);
+        let (tables, definitions, diagnostics) = build_templates_collecting(sources, ast, packages);
         if !diagnostics.is_empty() {
             return Err(diagnostics);
         }
@@ -102,6 +160,7 @@ impl<'a> ProgramLowerer<'a> {
             sources,
             ast,
             tables,
+            definitions,
             state: RefCell::new(MonoState::default()),
         })
     }
@@ -113,7 +172,7 @@ impl<'a> ProgramLowerer<'a> {
         }
     }
 
-    fn lower(mut self, require_main: bool) -> Result<ir::Program, Diagnostic> {
+    fn lower(mut self, require_main: bool) -> Result<LoweredProgram, Diagnostic> {
         // 1. 先实例化非泛型类型，保持 M13/M14 的既有布局与 ABI。
         {
             let ctx = self.context();
@@ -185,6 +244,12 @@ impl<'a> ProgramLowerer<'a> {
         if require_main && state.main.is_none() {
             return Err(Diagnostic::plain("program does not define `main`"));
         }
+        let definitions = std::mem::take(&mut self.definitions);
+        let analysis = AnalysisData {
+            definitions,
+            type_names: state.type_keys.clone(),
+            function_instances: state.instance_keys.clone(),
+        };
         let main = state.main;
         let mut functions = Vec::with_capacity(state.lowered.len());
         for (index, slot) in state.lowered.into_iter().enumerate() {
@@ -207,7 +272,7 @@ impl<'a> ProgramLowerer<'a> {
         dolphin_ir::verify::verify_program(&program).map_err(|error| {
             Diagnostic::plain(format!("internal IR verification failed: {error}"))
         })?;
-        Ok(program)
+        Ok(LoweredProgram { program, analysis })
     }
 
     fn next_pending(&self) -> Option<FunctionId> {
@@ -281,23 +346,43 @@ impl<'a> ProgramLowerer<'a> {
     }
 }
 
+/// 记录一条定义到分析 side table（M20/H20-02）。
+fn push_definition(
+    definitions: &mut Vec<DefinitionData>,
+    package: PackageId,
+    qualified: String,
+    kind: DefinitionKind,
+    source_id: usize,
+    name_span: Span,
+) {
+    definitions.push(DefinitionData {
+        package,
+        qualified,
+        kind,
+        source_id,
+        name_span,
+    });
+}
+
 /// 收集所有声明为模板：泛型/普通结构体、枚举与函数。
 ///
 /// M20/H20-01 收集式版本：失败声明报一条诊断并从模板表跳过，后续独立声明继续
 /// 校验；每个顶层声明至多贡献一条声明级诊断，达到 100 条后追加 `E0002` 并停止。
+/// M20/H20-02 起同时为成功声明收集分析 side table 的定义。
 fn build_templates_collecting(
     sources: &[SourceFile],
     ast: &ast::Program,
     packages: &[PackageId],
-) -> (TemplateTables, Vec<Diagnostic>) {
+) -> (TemplateTables, Vec<DefinitionData>, Vec<Diagnostic>) {
     let package_of_source = |source_id: usize| -> PackageId {
         packages.get(source_id).copied().unwrap_or(PackageId::ROOT)
     };
     let mut tables = TemplateTables::default();
+    let mut definitions: Vec<DefinitionData> = Vec::new();
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     for structure in &ast.structs {
         if diagnostics.len() >= DIAGNOSTIC_LIMIT {
-            return (tables, diagnostics);
+            return (tables, definitions, diagnostics);
         }
         let source = &sources[structure.source_id];
         let type_params = match type_param_names(&structure.type_params, source) {
@@ -320,10 +405,11 @@ fn build_templates_collecting(
             );
             continue;
         }
+        let package = package_of_source(structure.source_id);
         tables.structs.insert(
             structure.name.clone(),
             StructTemplate {
-                package: package_of_source(structure.source_id),
+                package,
                 source_id: structure.source_id,
                 name_span: structure.name_span,
                 type_params,
@@ -332,10 +418,38 @@ fn build_templates_collecting(
                 extern_c: structure.extern_c,
             },
         );
+        for param in &structure.type_params {
+            push_definition(
+                &mut definitions,
+                package,
+                format!("{}.{}", structure.name, param.name),
+                DefinitionKind::TypeParam,
+                structure.source_id,
+                param.name_span,
+            );
+        }
+        push_definition(
+            &mut definitions,
+            package,
+            structure.name.clone(),
+            DefinitionKind::Struct,
+            structure.source_id,
+            structure.name_span,
+        );
+        for field in &structure.fields {
+            push_definition(
+                &mut definitions,
+                package,
+                format!("{}.{}", structure.name, field.name),
+                DefinitionKind::Field,
+                structure.source_id,
+                field.name_span,
+            );
+        }
     }
     for enumeration in &ast.enums {
         if diagnostics.len() >= DIAGNOSTIC_LIMIT {
-            return (tables, diagnostics);
+            return (tables, definitions, diagnostics);
         }
         let source = &sources[enumeration.source_id];
         let type_params = match type_param_names(&enumeration.type_params, source) {
@@ -358,10 +472,11 @@ fn build_templates_collecting(
             );
             continue;
         }
+        let package = package_of_source(enumeration.source_id);
         tables.enums.insert(
             enumeration.name.clone(),
             EnumTemplate {
-                package: package_of_source(enumeration.source_id),
+                package,
                 source_id: enumeration.source_id,
                 name_span: enumeration.name_span,
                 type_params,
@@ -369,10 +484,38 @@ fn build_templates_collecting(
                 variants: enumeration.variants.clone(),
             },
         );
+        for param in &enumeration.type_params {
+            push_definition(
+                &mut definitions,
+                package,
+                format!("{}.{}", enumeration.name, param.name),
+                DefinitionKind::TypeParam,
+                enumeration.source_id,
+                param.name_span,
+            );
+        }
+        push_definition(
+            &mut definitions,
+            package,
+            enumeration.name.clone(),
+            DefinitionKind::Enum,
+            enumeration.source_id,
+            enumeration.name_span,
+        );
+        for variant in &enumeration.variants {
+            push_definition(
+                &mut definitions,
+                package,
+                format!("{}.{}", enumeration.name, variant.name),
+                DefinitionKind::Variant,
+                enumeration.source_id,
+                variant.name_span,
+            );
+        }
     }
     for function in &ast.functions {
         if diagnostics.len() >= DIAGNOSTIC_LIMIT {
-            return (tables, diagnostics);
+            return (tables, definitions, diagnostics);
         }
         let source = &sources[function.source_id];
         if matches!(function.name.as_str(), "print" | "println" | "length") {
@@ -426,22 +569,41 @@ fn build_templates_collecting(
             continue;
         }
         let bounds = type_param_bounds(&function.type_params);
+        let package = package_of_source(function.source_id);
         tables.functions.insert(
             function.name.clone(),
             FunctionTemplate {
-                package: package_of_source(function.source_id),
+                package,
                 module: module_of(&function.name).to_string(),
                 source_id: function.source_id,
                 function: function.clone(),
                 bounds,
             },
         );
+        for param in &function.type_params {
+            push_definition(
+                &mut definitions,
+                package,
+                format!("{}.{}", function.name, param.name),
+                DefinitionKind::TypeParam,
+                function.source_id,
+                param.name_span,
+            );
+        }
+        push_definition(
+            &mut definitions,
+            package,
+            function.name.clone(),
+            DefinitionKind::Function,
+            function.source_id,
+            function.name_span,
+        );
     }
 
     // trait 声明。
     for item in &ast.traits {
         if diagnostics.len() >= DIAGNOSTIC_LIMIT {
-            return (tables, diagnostics);
+            return (tables, definitions, diagnostics);
         }
         let source = &sources[item.source_id];
         if let Err(diagnostic) = type_param_names(&item.type_params, source) {
@@ -479,6 +641,7 @@ fn build_templates_collecting(
             push_capped(&mut diagnostics, diagnostic);
             continue;
         }
+        let package = package_of_source(item.source_id);
         tables.traits.insert(
             item.name.clone(),
             TraitTemplate {
@@ -486,12 +649,51 @@ fn build_templates_collecting(
                 methods: item.methods.clone(),
             },
         );
+        for param in &item.type_params {
+            push_definition(
+                &mut definitions,
+                package,
+                format!("{}.{}", item.name, param.name),
+                DefinitionKind::TypeParam,
+                item.source_id,
+                param.name_span,
+            );
+        }
+        push_definition(
+            &mut definitions,
+            package,
+            item.name.clone(),
+            DefinitionKind::Trait,
+            item.source_id,
+            item.name_span,
+        );
+        for method in &item.methods {
+            let method_key = format!("{}::{}", item.name, method.name);
+            for param in &method.type_params {
+                push_definition(
+                    &mut definitions,
+                    package,
+                    format!("{method_key}.{}", param.name),
+                    DefinitionKind::TypeParam,
+                    method.source_id,
+                    param.name_span,
+                );
+            }
+            push_definition(
+                &mut definitions,
+                package,
+                method_key,
+                DefinitionKind::Method,
+                method.source_id,
+                method.name_span,
+            );
+        }
     }
 
     // impl 块。
     'impls: for item in &ast.impls {
         if diagnostics.len() >= DIAGNOSTIC_LIMIT {
-            return (tables, diagnostics);
+            return (tables, definitions, diagnostics);
         }
         let source = &sources[item.source_id];
         if let Some(diagnostic) = validate_impl_header(&tables, source, item) {
@@ -653,6 +855,17 @@ fn build_templates_collecting(
             push_capped(&mut diagnostics, diagnostic);
             continue;
         }
+        let package = package_of_source(item.source_id);
+        for param in &item.type_params {
+            push_definition(
+                &mut definitions,
+                package,
+                format!("{}::{}", item.type_name, param.name),
+                DefinitionKind::TypeParam,
+                item.source_id,
+                param.name_span,
+            );
+        }
         for method in &item.methods {
             let key = format!("{}::{}", item.type_name, method.name);
             if let Some(existing) = tables.methods.get(&key) {
@@ -670,10 +883,28 @@ fn build_templates_collecting(
                 );
                 continue 'impls;
             }
+            for param in &method.type_params {
+                push_definition(
+                    &mut definitions,
+                    package,
+                    format!("{key}.{}", param.name),
+                    DefinitionKind::TypeParam,
+                    method.source_id,
+                    param.name_span,
+                );
+            }
+            push_definition(
+                &mut definitions,
+                package,
+                key.clone(),
+                DefinitionKind::Method,
+                method.source_id,
+                method.name_span,
+            );
             tables.methods.insert(
                 key,
                 MethodTemplate {
-                    package: package_of_source(item.source_id),
+                    package,
                     module: item.module.clone(),
                     type_name: item.type_name.clone(),
                     trait_name: item.trait_name.clone(),
@@ -688,7 +919,7 @@ fn build_templates_collecting(
             );
         }
     }
-    (tables, diagnostics)
+    (tables, definitions, diagnostics)
 }
 
 /// H18-05：在声明处校验 impl 头。
@@ -4600,6 +4831,64 @@ mod tests {
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].message().contains("unknown type `Missing0`"));
         assert!(errors[1].message().contains("unknown type `Missing1`"));
+    }
+
+    #[test]
+    fn analysis_side_table_aligns_with_type_and_function_ids() {
+        let source = SourceFile::new(
+            PathBuf::from("main.do"),
+            "struct Pair<T> { first: T, second: T }\nfn id<T>(value: T): T { return value; }\nfn main() { val p = Pair<i32>(1, 2); return id<i32>(p.first); }\n"
+                .to_string(),
+        );
+        let tokens = lexer::lex(&source).unwrap();
+        let ast = parser::parse(&source, tokens).unwrap();
+        let loaded = crate::modules::inject_stdlib(&source, &ast).unwrap();
+        let lowered = lower_sources_analysis(&loaded.sources, &loaded.program, &loaded.packages)
+            .expect("analysis lowering");
+
+        // side table 下标与 IR 编号一一对应。
+        assert_eq!(
+            lowered.analysis.type_names.len(),
+            lowered.program.types.len()
+        );
+        assert_eq!(
+            lowered.analysis.function_instances.len(),
+            lowered.program.functions.len()
+        );
+        for (index, key) in lowered.analysis.type_names.iter().enumerate() {
+            let ty = &lowered.program.types[index];
+            assert!(!key.name.is_empty());
+            let _ = ty;
+        }
+        for (index, key) in lowered.analysis.function_instances.iter().enumerate() {
+            let ir_name = &lowered.program.functions[index].name;
+            assert!(
+                key.name == *ir_name || key.name.ends_with(&format!("::{ir_name}")),
+                "function_instances[{index}] `{}` 必须对应 IR 函数 `{ir_name}`",
+                key.name
+            );
+        }
+
+        // 定义表含类型、泛型函数与类型参数，且限定名可读。
+        let definition = |qualified: &str| {
+            lowered
+                .analysis
+                .definitions
+                .iter()
+                .find(|definition| definition.qualified == qualified)
+                .unwrap_or_else(|| panic!("missing definition `{qualified}`"))
+        };
+        assert_eq!(definition("Pair").kind, DefinitionKind::Struct);
+        assert_eq!(definition("Pair.T").kind, DefinitionKind::TypeParam);
+        assert_eq!(definition("id").kind, DefinitionKind::Function);
+        assert_eq!(definition("main").kind, DefinitionKind::Function);
+        assert!(
+            lowered
+                .analysis
+                .type_names
+                .iter()
+                .any(|key| key.name == "Pair" && key.args == vec![ir::Type::I32])
+        );
     }
 
     #[test]

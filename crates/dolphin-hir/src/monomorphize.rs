@@ -205,6 +205,8 @@ pub struct MonoState {
     pub type_spans: Vec<Span>,
     pub type_ids: HashMap<GenericKey, TypeId>,
     pub instances: Vec<InstanceInfo>,
+    /// 与 `instances` 对齐的实例 key（下标 = `FunctionId`）；M20/H20-02 side table。
+    pub instance_keys: Vec<GenericKey>,
     pub instance_ids: HashMap<GenericKey, FunctionId>,
     pub pending: Vec<FunctionId>,
     pub lowered: Vec<Option<ir::Function>>,
@@ -885,6 +887,7 @@ impl MonoState {
             extern_c: external,
             link_name: template.function.link_name.clone(),
         });
+        self.instance_keys.push(key.clone());
         self.instance_ids.insert(key, id);
         self.pending.push(id);
         self.lowered.push(None);
@@ -994,6 +997,7 @@ impl MonoState {
             extern_c: false,
             link_name: None,
         });
+        self.instance_keys.push(key.clone());
         self.instance_ids.insert(key, id);
         self.pending.push(id);
         self.lowered.push(None);

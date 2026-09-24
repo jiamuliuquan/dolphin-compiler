@@ -1161,41 +1161,14 @@ fn load_graph_sources_collecting(
     modules::load_packages_collecting(&package_sources(graph, root_exclude, root_extra))
 }
 
-/// 把包图中的各包源码根转为模块加载配置。
+/// 把包图中的各包源码根转为模块加载配置（M20/H20-02 起由 `dolphin-hir` 提供，
+/// 与共享分析路径共用，避免选择规则漂移）。
 fn package_sources(
     graph: &PackageGraph,
     root_exclude: HashSet<PathBuf>,
     root_extra: Vec<modules::ExtraSource>,
 ) -> Vec<modules::PackageSources> {
-    graph
-        .packages
-        .iter()
-        .map(|package| modules::PackageSources {
-            id: package.id,
-            prefix: package.prefix.clone(),
-            aliases: package
-                .aliases
-                .iter()
-                .map(|(alias, target)| (alias.clone(), graph.get(*target).prefix.clone()))
-                .collect(),
-            source_root: package.source_root.clone(),
-            exclude: if package.id == graph.root {
-                root_exclude.clone()
-            } else {
-                package
-                    .manifest
-                    .bins
-                    .iter()
-                    .map(|bin| bin.path.clone())
-                    .collect()
-            },
-            extra: if package.id == graph.root {
-                root_extra.clone()
-            } else {
-                Vec::new()
-            },
-        })
-        .collect()
+    modules::package_sources_for_graph(graph, root_exclude, root_extra)
 }
 
 pub fn build_with_profile(

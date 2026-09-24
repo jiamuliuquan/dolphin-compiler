@@ -37,7 +37,9 @@ pub enum Type {
 }
 
 /// 用户自定义类型的全局编号（M13）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// `Ord`/`PartialOrd` 供 M20 分析 side table 的 `BTreeMap` 使用；不影响布局或 ABI。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TypeId(pub usize);
 
 /// 用户自定义类型定义（M13）。
@@ -174,7 +176,7 @@ impl Type {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FunctionId(pub usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

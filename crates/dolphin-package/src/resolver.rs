@@ -12,8 +12,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use crate::cache::Cache;
+use crate::lockfile;
 use crate::manifest::{Dependency, DependencyKind, Manifest, parse_coordinate};
 use crate::package::{PackageGraph, PackageId, PackageInfo, PackageSource};
+use crate::registry::Registry;
 use dolphin_source::diagnostic::Diagnostic;
 
 /// 解析选项（`--locked` / `--offline`）。
@@ -68,6 +71,65 @@ pub fn resolve(
 /// 只解析路径依赖（远程依赖报错）；供不涉及仓库的测试与早期批次使用。
 pub fn resolve_paths_only(manifest: &Manifest) -> Result<PackageGraph, Diagnostic> {
     resolve(manifest, ResolveOptions::default(), &mut NoRemote)
+}
+
+/// 只读依赖解析（M20/H20-02）：读现有 `dolphin.lock` 与缓存，绝不下载、不写锁/索引。
+///
+/// - 路径依赖照常从磁盘解析；`file://` 仓库允许（本地读，不算网络）；
+/// - HTTP(S) 一律不访问，只能从已有锁摘要或缓存索引恢复；
+/// - 远程依赖不可本地恢复时返回 `E1001`，提示用户运行 `dc fetch`。
+/// - CLI 构建路径继续使用 [`resolve`] 的网络/写锁逻辑（ANALYSIS-06）。
+pub fn resolve_readonly(manifest: &Manifest, cache: &Cache) -> Result<PackageGraph, Diagnostic> {
+    let lock = lockfile::load(&manifest.root)?;
+    let options = ResolveOptions {
+        offline: true,
+        locked: false,
+    };
+    let mut remote = ReadonlyRemote {
+        repositories: manifest.repositories.clone(),
+        registry: Registry::new(
+            &manifest.repositories,
+            options,
+            cache.clone(),
+            lock.as_ref(),
+        ),
+    };
+    resolve(manifest, options, &mut remote)
+}
+
+/// 分析路径的远程源：复用 `Registry` 的缓存恢复，但把网络/恢复失败转成 `E1001`。
+struct ReadonlyRemote {
+    repositories: BTreeMap<String, String>,
+    registry: Registry,
+}
+
+impl RemoteSource for ReadonlyRemote {
+    fn acquire(
+        &mut self,
+        coordinate: &str,
+        repository: &str,
+    ) -> Result<AcquiredPackage, Diagnostic> {
+        if !self
+            .repositories
+            .contains_key(&repository.to_ascii_lowercase())
+        {
+            return Err(Diagnostic::error(
+                "E1002",
+                format!(
+                    "unknown repository `{repository}`; declare it under `[repositories]` in the root `dolphin.toml`"
+                ),
+            ));
+        }
+        self.registry.acquire(coordinate, repository).map_err(|error| {
+            Diagnostic::error(
+                "E1001",
+                format!(
+                    "dependency `{coordinate}` is not available locally: {}; run `dc fetch` and retry",
+                    error.message()
+                ),
+            )
+        })
+    }
 }
 
 struct NoRemote;
@@ -368,5 +430,79 @@ impl Resolver<'_> {
             packages: self.packages,
             order,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "dolphin-resolver-readonly-{tag}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn write(path: &Path, text: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent");
+        }
+        fs::write(path, text).expect("write");
+    }
+
+    #[test]
+    fn readonly_reports_e1001_without_writing_lock() {
+        let root = temp_dir("missing");
+        write(
+            &root.join("dolphin.toml"),
+            "[package]\ngroup = \"g\"\nname = \"app\"\nversion = \"0.1.0\"\n\n[[bin]]\nname = \"app\"\npath = \"src/main.do\"\n\n[repositories]\ndefault = \"http://127.0.0.1:1/repo\"\n\n[dependencies]\nmath = \"org.example:mathlib:1.0.0\"\n",
+        );
+        write(&root.join("src/main.do"), "fn main() { return 0; }\n");
+        let manifest = crate::manifest::load(&root).unwrap();
+        let cache = Cache::at(root.join("home"));
+        let error = resolve_readonly(&manifest, &cache).unwrap_err();
+        assert_eq!(error.code(), "E1001");
+        assert_eq!(
+            error.message(),
+            "dependency `org.example:mathlib:1.0.0` is not available locally: cannot resolve `org.example:mathlib:1.0.0` offline: it is not in the cache index; run `dc fetch` and retry"
+        );
+        assert!(!root.join("dolphin.lock").exists(), "只读解析不得写锁");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn readonly_resolves_path_dependencies_without_writing_lock() {
+        let base = temp_dir("path");
+        let dep = base.join("dep");
+        write(
+            &dep.join("dolphin.toml"),
+            "[package]\ngroup = \"org.example\"\nname = \"dep\"\nversion = \"1.0.0\"\n\n[lib]\npath = \"src/lib.do\"\n",
+        );
+        write(
+            &dep.join("src/lib.do"),
+            "pub fn value(): i32 { return 1; }\n",
+        );
+        let app = base.join("app");
+        write(
+            &app.join("dolphin.toml"),
+            "[package]\ngroup = \"g\"\nname = \"app\"\nversion = \"0.1.0\"\n\n[[bin]]\nname = \"app\"\npath = \"src/main.do\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n",
+        );
+        write(&app.join("src/main.do"), "fn main() { return 0; }\n");
+        let manifest = crate::manifest::load(&app).unwrap();
+        let cache = Cache::at(app.join("home"));
+        let graph = resolve_readonly(&manifest, &cache).expect("path-only project resolves");
+        assert_eq!(graph.packages.len(), 2);
+        assert!(!app.join("dolphin.lock").exists(), "只读解析不得写锁");
+        fs::remove_dir_all(base).unwrap();
     }
 }

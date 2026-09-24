@@ -31,10 +31,14 @@ lldb -b \
     -o "bt" \
     -- "$exe" >"$raw" 2>&1 || true
 
-# 归一化：地址与进程号换成稳定占位符，去掉机器相关的启动噪声。
+# 归一化：地址与进程号换成稳定占位符，去掉机器相关的启动噪声；
+# 再把 lldb 的 `frame #N:`/`thread #N` 文本折成与 gdb 脚本一致的 `#N` 帧格式，
+# 供共享断言（`bt` 的 `#0`/`#1`）在 macOS 上直接复用。
 sed -E \
     -e 's/0x[0-9a-fA-F]+/0xADDR/g' \
     -e 's/process [0-9]+/process PID/g' \
+    -e 's/thread #[0-9]+/thread/g' \
+    -e 's/frame #([0-9]+): /#\1  /' \
     "$raw" \
     | grep -v -E '^(\(lldb\) )' \
     >"$normalized" || true

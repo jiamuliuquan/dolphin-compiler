@@ -2,9 +2,9 @@
 
 Dolphin 是一个用于学习和实践编译器实现的静态类型编程语言，语法参考 Rust、Kotlin、Java 和 C。编译器使用 Rust 编写，通过默认 Cranelift 或可选 LLVM 后端生成目标代码，并链接为当前操作系统可直接运行的本机可执行文件。
 
-项目已完成 M0-M19：语言核心覆盖标量、函数、控制流、字符串、定长数组、模块、结构体/枚举与 `match`、手动内存与 C 互操作、泛型与方法/trait；工具链覆盖源码标准库、`.dlib` 库包、可选 LLVM 与格式化器/LSP。M19 补齐了真实 CLI 所需的参数/环境、标准流与文件 I/O、文本处理、用户测试命令 `dc test`，并附带 `examples/m19` 的 `dtext` 文本统计工具。
+项目已完成 M0-M20：语言核心覆盖标量、函数、控制流、字符串、定长数组、模块、结构体/枚举与 `match`、手动内存与 C 互操作、泛型与方法/trait；工具链覆盖源码标准库、`.dlib` 库包、可选 LLVM 与格式化器/LSP。M19 补齐了真实 CLI 所需的参数/环境、标准流与文件 I/O、文本处理、用户测试命令 `dc test`，并附带 `examples/m19` 的 `dtext` 文本统计工具。M20 交付项目级诊断（结构化 code、多错误收集）与开发工具：无副作用的共享项目分析、未保存文件 overlay、项目级 LSP 诊断/悬停/跨文件跨包定义、`dc fmt` 清单发现与全有或全无写入，以及 gdb/lldb 实测的 LLVM Debug 调试验收。
 
-下一步是 M20（项目级诊断与开发工具），逐批规划见 [M18-M21 交接指南](docs/plan-m18-plus.md)。当前能力、明确限制与已知问题以[已实现功能参考](docs/implemented-features.md)为准。
+下一步是 M21（规模与可靠交付），逐批规划见 [M18-M21 交接指南](docs/plan-m18-plus.md)。当前能力、明确限制与已知问题以[已实现功能参考](docs/implemented-features.md)为准。
 
 ## 当前能力
 
@@ -26,7 +26,7 @@ Dolphin 是一个用于学习和实践编译器实现的静态类型编程语言
 | 开发工具 | `dc fmt` 保守空白格式化（无路径时按清单 `[package].source` 发现、排除 `build.output`/`.git`、全有或全无写入）、`dc lsp [项目目录]` 项目级诊断/符号/悬停/跳转（未保存 overlay、跨文件/跨包定义；无清单时单文件分析）、LLVM Debug 下的 Unix DWARF 行表与函数调试信息 |
 | 后端 | 类型化 CFG IR、后端无关 `CodegenBackend` 接口、Cranelift（默认）与可选 LLVM 后端、本机目标文件、内嵌最小 C 运行时和 `rust-lld` 链接器 |
 
-尚未实现的主要能力包括嵌套数组、通配符导入、版本范围求解、闭源二进制 Dolphin 包、动态多态、`?` 错误传播、多错误恢复，以及 Cranelift 后端的调试信息和 Windows PDB 调试信息。详细边界见[已实现功能参考](docs/implemented-features.md)和[路线图](docs/roadmap.md)。
+尚未实现的主要能力包括嵌套数组、通配符导入、版本范围求解、闭源二进制 Dolphin 包、动态多态、`?` 错误传播、函数体内的表达式级多错误收集，以及 Cranelift 后端的调试信息和 Windows PDB 调试信息。详细边界见[已实现功能参考](docs/implemented-features.md)和[路线图](docs/roadmap.md)。
 
 ## 快速开始
 
@@ -118,7 +118,7 @@ DOLPHIN_BACKEND=llvm ./target/release/dc build examples/m8 --debug
 gdb -batch -ex 'info line main' ./examples/m8/target/m8
 ```
 
-Cranelift 后端暂不生成调试信息，Windows/PDB 也未覆盖。`dc lsp [项目目录]` 在项目模式下使用共享分析快照：含 `pkg`/`use` 的文档获得项目语义诊断，悬停/定义基于符号身份支持未保存 overlay 与跨文件/跨包跳转；无 `dolphin.toml` 时按单文件规则分析（`pkg`/`use` 或缺少 `main` 时跳过语义检查）。调试器验收属 M20 后续批次。格式化器目前主要整理缩进和空白，不是完整 AST 排版器。
+Cranelift 后端暂不生成调试信息，Windows/PDB 也未覆盖。`dc lsp [项目目录]` 在项目模式下使用共享分析快照：含 `pkg`/`use` 的文档获得项目语义诊断，悬停/定义基于符号身份支持未保存 overlay 与跨文件/跨包跳转；无 `dolphin.toml` 时按单文件规则分析（`pkg`/`use` 或缺少 `main` 时跳过语义检查）。调试器验收（DBG-01..04）已在 Linux gdb 与 macOS lldb 上实测 LLVM Debug 的断点/单步/调用栈。格式化器目前主要整理缩进和空白，不是完整 AST 排版器。
 
 ## CLI
 
@@ -320,7 +320,7 @@ UTF-8 源文件
 | M17 | 已完成 | DWARF 调试信息（LLVM Debug）、`dc fmt` 格式化器、`dc lsp` 语言服务器 |
 | M18 | 已完成 | 组合语义正确性、泛型约束、IR 校验、项目/包回归、LLVM CI 与发布门禁（证据见 [M18 进度报告](docs/reports/m18-progress.md)） |
 | M19 | 已完成 | 真实 CLI 与用户测试：`std.process`/`std.io`/`std.fs`/`std.text`/`std.test`、`dc run --` 转发、`dc test` 发现/执行/汇总、`examples/m19` 的 `dtext` 工具（三平台默认后端 + Linux LLVM 验收；证据见 [M19 进度报告](docs/reports/m19-progress.md)） |
-| M20 | 待设计冻结 | 结构化诊断、共享项目分析、文件 overlay、项目级 LSP 与工具验收 |
+| M20 | 已完成 | 项目级开发工具：结构化诊断与前端多错误收集、共享项目分析与未保存 overlay、项目级 LSP 诊断/悬停/跨文件跨包定义、`dc fmt` 清单发现与全有或全无、gdb/lldb 实测调试（三平台默认后端 + Linux/macOS LLVM Debug；证据见 [M20 进度报告](docs/reports/m20-progress.md)） |
 | M21 | 条件规划 | 性能测量、按证据优化、包兼容身份与干净环境交付 |
 
 ## 文档和示例
@@ -328,9 +328,10 @@ UTF-8 源文件
 - [语言设计说明](docs/language-design.md)：语法、类型、模块和运行时规则。
 - [已实现功能参考](docs/implemented-features.md)：当前编译器的准确行为与限制。
 - [安装与发行](docs/installation.md)：发行包获取、安装、升级、卸载、兼容政策与许可证。
-- [实现路线图](docs/roadmap.md)：M0-M19 完成记录与 M20-M21 后续方向。
+- [实现路线图](docs/roadmap.md)：M0-M20 完成记录与 M21 后续方向。
 - [M18-M21 交接指南](docs/plan-m18-plus.md)：逐批任务、验收要求和交接提示词。
 - [M19 规格](docs/proposal-m19-cli-stdlib.md)：M19 API/目标程序/测试矩阵冻结记录。
+- [M20 规格](docs/proposal-m20-project-tools.md)：M20 项目级诊断与开发工具冻结规格与验收矩阵。
 - [M18 正确性合同](docs/plan-m18-correctness.md)：已完成的 M18 批次与验收矩阵（历史证据）。
 - [M14](docs/proposal-m14-memory-model.md)、[M15](docs/proposal-m15-generics-stdlib.md) 实现规格与[分步实施指南](docs/plan-m14-m15-rework.md)：历史设计记录，不能据此重做当前项目。
 - [编译器实现指南](docs/compiler-implementation.md)：历史架构建议，不是当前待办。
@@ -351,7 +352,8 @@ DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build
 cargo test -p dolphin-compiler --features llvm --test backend
 ```
 
-`m20_debug`（DBG-01..04）实际加载调试器验证 LLVM Debug：Linux 用 `gdb`、macOS 用 `lldb`；
-调试器缺失时测试失败并提示设置 `DOLPHIN_SKIP_DEBUGGER=1` 显式跳过，跳过即列为未验证。
+`m20_debug`（DBG-01..04）实际加载调试器验证 LLVM Debug：Linux 用 `gdb`、macOS 用 `lldb`
+（两条路径已分别在 H20-05/H20-M 实测）；调试器缺失时测试失败并提示设置
+`DOLPHIN_SKIP_DEBUGGER=1` 显式跳过，跳过即列为未验证。
 
 分支/PR CI 在 Linux x86_64、macOS ARM64 和 Windows x86_64 上执行格式检查、Clippy、测试、格式化器规范和 Release 构建，并解压发行包运行冒烟测试；tag 发布任务依赖同提交的三平台质量门禁与 Linux LLVM lane，发布只消费已通过冒烟的那份归档。默认 CI 不安装 LLVM，LLVM lane 在 Ubuntu 上单独安装 LLVM 22。现有冒烟运行在开发 runner 上，不是无 CRT/SDK 的干净机器证明。新测试文件须加入显式 `--test` 命令，feature 开启不等于所有 fixture 自动使用 LLVM。

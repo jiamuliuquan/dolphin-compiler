@@ -173,6 +173,34 @@ fn same_remote_repository(source: &PackageSource, repository: &str) -> bool {
     )
 }
 
+/// 词法绝对路径：先 `std::path::absolute`（相对路径按 cwd 补全），再折叠 `.`/`..`、
+/// 统一分隔符；**不解析符号链接**、不要求路径存在。
+///
+/// 依赖包根用它而不是 `fs::canonicalize`：分析 overlay 键、LSP `file://` URI 与
+/// 诊断路径都按词法绝对路径比较（规格 §5.3/§6.3），`fs::canonicalize` 会把
+/// macOS 的 `/var` 解析成 `/private/var`、把 Windows 路径加上 `\\?\`，导致
+/// 未保存文本不匹配、definition URI 与编辑器打开路径不一致（H20 Windows/macOS 复验缺陷）。
+fn lexical_absolute(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut result = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if result.file_name().is_some() {
+                    result.pop();
+                } else if !result.has_root() {
+                    result.push("..");
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                result.push(component.as_os_str());
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// 去掉 Windows `fs::canonicalize` 产生的扩展长度前缀：`\\?\C:\x` 变为 `C:\x`，
 /// `\\?\UNC\server\share\x` 变为 `\\server\share\x`。其余前缀与非 Windows 路径不变。
 ///
@@ -349,9 +377,18 @@ impl Resolver<'_> {
             }
             return Ok(existing);
         }
-        // 身份键与锁文件来源仍用规范化路径；包根/源码路径去掉 `\\?\` 前缀，
-        // 以免该平台产物泄漏进诊断、overlay 键与 LSP URI。
-        let root = strip_verbatim_prefix(&canonical);
+        // 身份键（`by_path`）与 `PackageSource::Path`、锁文件来源仍用 canonical；
+        // 包根/源码路径用词法绝对路径（规格 §5.3/§6.3：不解析符号链接），
+        // 以免 canonical 路径泄漏进诊断、overlay 键与 LSP URI。
+        let root = lexical_absolute(path)
+            .map(|root| strip_verbatim_prefix(&root))
+            .map_err(|error| {
+                Diagnostic::plain(format!(
+                    "path dependency `{}` of `{}` could not be resolved: {error}",
+                    dependency.alias,
+                    self.packages[parent.0 as usize].name()
+                ))
+            })?;
         let manifest = crate::manifest::load(&root)?;
         let key = (
             manifest.package.group.clone(),
@@ -552,6 +589,53 @@ mod tests {
         assert!(
             source.ends_with("dep\\src") || source.ends_with("dep/src"),
             "源码根必须指向 `../dep/src`：{source}"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// 非 Windows 回归：路径依赖的包根/源码根用词法绝对路径，不解析符号链接。
+    ///
+    /// 分析 overlay 键与 LSP `file://` URI 是词法路径；`fs::canonicalize` 会把
+    /// 符号链接（macOS `/var`→`/private/var`、用户符号链接目录）解析成另一条路径，
+    /// 导致未保存依赖文本不命中、definition URI 与编辑器打开路径不一致（H20 macOS 复验）。
+    #[cfg(unix)]
+    #[test]
+    fn path_dependency_roots_are_lexical_without_symlink_resolution() {
+        let base = temp_dir("lexical");
+        let real = base.join("real/dep");
+        write(
+            &real.join("dolphin.toml"),
+            "[package]\ngroup = \"org.example\"\nname = \"dep\"\nversion = \"1.0.0\"\n\n[lib]\npath = \"src/lib.do\"\n",
+        );
+        write(
+            &real.join("src/lib.do"),
+            "pub fn value(): i32 { return 1; }\n",
+        );
+        std::os::unix::fs::symlink(&real, base.join("alias")).expect("symlink");
+
+        let app = base.join("app");
+        write(
+            &app.join("dolphin.toml"),
+            "[package]\ngroup = \"g\"\nname = \"app\"\nversion = \"0.1.0\"\n\n[[bin]]\nname = \"app\"\npath = \"src/main.do\"\n\n[dependencies]\ndep = { path = \"../alias\" }\n",
+        );
+        write(&app.join("src/main.do"), "fn main() { return value(); }\n");
+
+        let manifest = crate::manifest::load(&app).unwrap();
+        let graph = resolve_paths_only(&manifest).expect("path-only graph resolves");
+        let package = graph
+            .packages
+            .iter()
+            .find(|package| package.name() == "dep")
+            .expect("dep package");
+        let expected_root = base.join("alias");
+        assert_eq!(
+            package.manifest.root, expected_root,
+            "包根必须是词法路径（保留符号链接分量）"
+        );
+        assert_eq!(
+            package.source_root,
+            expected_root.join("src"),
+            "源码根必须是词法路径（保留符号链接分量）"
         );
         fs::remove_dir_all(base).unwrap();
     }

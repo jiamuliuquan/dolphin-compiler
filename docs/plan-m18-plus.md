@@ -1,8 +1,8 @@
 # M18-M21 后续任务与人工交接指南
 
-> 状态：后续计划，尚未实施。M1-M17 的完成记录保留；它们不等于所有功能组合、所有后端和所有平台均无缺陷。
+> 状态：M18、M19、M20 已完成（含三平台复验）；M21 为条件规划，尚未实施。完成记录保留；它们不等于所有功能组合、所有后端和所有平台均无缺陷。
 >
-> 当前执行入口：[M18 正确性执行合同](plan-m18-correctness.md)。建议首次只派发 `H18-00`，收到报告后再派发下一批。
+> 当前执行入口：M21 设计冻结批次 `H21-00`（须在 M20 验收后由人工派发；见第 7 节与[包仓库设计输入](design-package-registry.md)）。
 >
 > 本文适用于手动交接给 DeepSeek V4.1 Flash 或其他编码助手，不依赖助手记得此前聊天。真实基线是接手时的源码和已完成批次报告，不是某个模型的口头“已完成”。
 
@@ -14,12 +14,12 @@
 | --- | --- | --- | --- |
 | M18 | 已有语义正确、结果可信 | 组合语义反例修复，双后端回归和发布门禁持续执行 | 完成（H18-00..11，见 [M18 报告](reports/m18-progress.md)） |
 | M19 | 能编写、测试真实 CLI | 一个纯 Dolphin 文件处理工具能接收输入、报告错误、自测 | 完成（H19-00..07；`examples/m19` + `dc test`；三平台与 CI 通过，见 [M19 报告](reports/m19-progress.md)） |
-| M20 | 项目级开发体验 | 使用 stdlib/依赖的未保存代码有正确诊断和跨文件导航 | 待设计冻结，然后实施 |
+| M20 | 项目级开发体验 | 使用 stdlib/依赖的未保存代码有正确诊断和跨文件导航 | 完成（H20-00..05 + Windows H20-W + macOS H20-M，见 [M20 报告](reports/m20-progress.md)） |
 | M21 | 规模与可靠交付 | 有性能证据、工具链兼容规则和干净环境交付验收 | 条件规划，不提前实施 |
 
 默认顺序 M18 -> M19 -> M20 -> M21。不要同时推进异步、宏、自托管和交叉编译。后续里程碑若因真实应用证据改变，应先改合同及验收，再改代码；不能为了迁就实现困难自行删验收项。
 
-M18 已给出小批次合同；M19/M20/M21 下文是设计输入与实施拆分，不代表 API 和持久格式已经全部冻结。每阶段的 `HNN-00` 负责补足规格及决策记录；该批完成前不得凭下面的模块名称自行实现一套 API。
+M18/M19/M20 已按小批次合同完成并各有冻结规格（M19/M20）；M21 下文仍是设计输入与实施拆分，不代表 API 和持久格式已经冻结。`H21-00` 负责补足规格及决策记录；该批完成前不得凭下面的模块名称自行实现一套 API。
 
 ## 2. 接手规则
 
@@ -174,7 +174,7 @@ H19-00 应把 H19-05 细分为 `H19-05a` 已批准的库开发/测试目标入�
 
 **H19-07：最终应用。** 用新 API 完成第 5.1 节工具，禁止为了漂亮示例跳过错误处理或硬编码输入。应用有自己的 dc test；编译器集成测试实际调用命令行并断言三路结果；三平台默认后端和 Linux LLVM 均验证。标准库公开条目逐项记录拥有权/失效/错误规则；发布包可构建该项目。测试含空输入、正常 UTF-8、无末尾换行、无匹配、非法参数、缺失文件、可控读写失败、重复运行无资源累积。完成报告链接 ARGS/IO/FS/TEXT/TEST/ERR 编号和真实测试名。
 
-## 6. M20：项目级诊断与开发工具
+## 6. M20：项目级诊断与开发工具（已完成）
 
 ### 6.1 当前限制与目标
 
@@ -185,11 +185,11 @@ H19-00 应把 H19-05 细分为 `H19-05a` 已批准的库开发/测试目标入�
 | 编号 | 工作 | 前置 | 状态 |
 | --- | --- | --- | --- |
 | H20-00 | 项目分析与工具协议规格 | M19 | 完成（规格见 [proposal-m20](proposal-m20-project-tools.md)；D-M20-1..4 已确认） |
-| H20-01 | 结构化诊断与有限恢复 | H20-00 | 完成（实现 + Linux 默认/LLVM lane 通过；Windows 默认 lane 复验通过（H20-W 节）；macOS 与远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-01 节） |
-| H20-02 | 共享项目分析接口与文件 overlay | H20-01 | 完成（`dolphin-analysis` + `resolve_readonly` + side table；Linux 默认/LLVM lane 通过，Windows 默认 lane 复验通过（H20-W 节）；macOS 与远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-02 节） |
-| H20-03 | 项目诊断、符号绑定与定义导航 | H20-02 | 完成（项目级 LSP、overlay、跨文件/跨包定义、协议状态机；Linux 默认/LLVM lane 通过，Windows 默认 lane 复验通过（H20-W 节）；macOS 与远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-03 节） |
-| H20-04 | Formatter 保持性与项目发现 | H20-03 | 完成（`dc fmt` 清单发现/排除/全有或全无 + FMT-01..06；Linux 默认/LLVM lane 通过，Windows 默认 lane 复验通过（H20-W 节）；macOS 与远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-04 节） |
-| H20-05 | 实际调试器及整体体验验收 | H20-04 | 完成（gdb/lldb 脚本 + DBG-01..04 + `lsp_07`；Linux gdb 实测与 Linux lane 通过，macOS lldb/远端 CI 未验证；Windows 默认 lane 的 M20 套件与 `lsp_07` 由 H20-W 节复验通过（DBG/LLVM 未在 Windows 运行），见 [M20 报告](reports/m20-progress.md) H20-05 节） |
+| H20-01 | 结构化诊断与有限恢复 | H20-00 | 完成（实现 + Linux 默认/LLVM lane 通过；Windows 默认 lane 由 H20-W 复验；macOS 由 H20-M 复验；远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-01/H20-M 节） |
+| H20-02 | 共享项目分析接口与文件 overlay | H20-01 | 完成（`dolphin-analysis` + `resolve_readonly` + side table；Linux 默认/LLVM lane 通过，Windows 默认 lane 由 H20-W 复验，macOS 由 H20-M 复验（含 overlay 词法路径修复）；远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-02/H20-M 节） |
+| H20-03 | 项目诊断、符号绑定与定义导航 | H20-02 | 完成（项目级 LSP、overlay、跨文件/跨包定义、协议状态机；Linux 默认/LLVM lane 通过，Windows 默认 lane 由 H20-W 复验，macOS 由 H20-M 复验；远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-03/H20-M 节） |
+| H20-04 | Formatter 保持性与项目发现 | H20-03 | 完成（`dc fmt` 清单发现/排除/全有或全无 + FMT-01..06；Linux 默认/LLVM lane 通过，Windows 默认 lane 由 H20-W 复验，macOS 由 H20-M 复验；远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-04/H20-M 节） |
+| H20-05 | 实际调试器及整体体验验收 | H20-04 | 完成（gdb/lldb 脚本 + DBG-01..04 + `lsp_07`；Linux gdb 实测与 Linux lane 通过，macOS lldb 由 H20-M 实测通过；Windows 默认 lane 的 M20 套件与 `lsp_07` 由 H20-W 复验（DBG/LLVM 未在 Windows 运行）；远端 CI 未验证，见 [M20 报告](reports/m20-progress.md) H20-05/H20-M 节） |
 
 **H20-00：规格。** 新建 `docs/proposal-m20-project-tools.md`，冻结 SourceId/Span 身份、诊断数据、分析快照生命周期、依赖缺失行为、取消/版本规则、lib/bin 选择与 LSP 测试协议。不强制引入数据库式增量框架，也不要求一次拆开全部 lower；共享分析产物要能提供符号身份、类型与定义位置，而不是重新按名字猜。
 
@@ -205,7 +205,9 @@ H19-00 应把 H19-05 细分为 `H19-05a` 已批准的库开发/测试目标入�
 
 状态（2026-09-24，H20-05 完成后）：新增 `scripts/debug_smoke.sh`（gdb）与 `scripts/debug_smoke_lldb.sh`（lldb）批处理脚本与 `tests/m20_debug.rs`：在临时两文件项目上用 `dc build --backend llvm`（Dolphin Debug）实测调试器加载、断点命中 `math.do` 正确行、单步行映射、`bt` 调用链（DBG-01..03），并固定 LLVM Release 与 Cranelift Debug 的“无行表/未命中”边界（DBG-04）与脚本用法/调试器缺失行为；`tests/m20_lsp.rs` 新增 `lsp_07_m19_development_flow`，在真实 `examples/m19/dtext`（path 依赖 textstats）上走通打开/跨文件与跨包定义/未保存错误→修复流程。Linux 本机 GNU gdb 17.2 实测通过；默认 lane（444 passed）与 Linux LLVM lane（458/232 passed）全绿，clippy/fmt 通过；macOS lldb（本机无 lldb）与远端 CI 未验证；Windows 默认 lane 的 M20 套件与 `lsp_07` 由 H20-W 节复验通过（`m20_debug`/LLVM 未在 Windows 运行）。CI LLVM lane 安装 gdb 并运行 `--test m20_debug`。M20 阶段完成仍需用户确认并按 §12.6 更新当前能力文档；H20-05 报告不把 M20 记为完成。H21-00 需在 M20 验收后另行派发。
 
-状态（2026-09-24，H20-W Windows 复验后）：Windows 11 本机默认 Cranelift lane 复验通过（58 harness 444 passed；显式 `m20_diag`/`m20_analysis`/`m20_lsp`/`m20_fmt` 全绿，门禁 fmt/clippy/Release/`dc fmt --check` 通过）；发现并修复 1 个 Windows 产品缺陷（路径依赖源码根带 `fs::canonicalize` 的 `\\?\` 前缀，导致 overlay 不命中、LSP definition URI 变 `file:////%3F/...`）与 3 处平台测试期望缺陷，新增 2 个 Windows 回归单测。LLVM lane、`m20_debug`（Windows/PDB 不在 §9.1 范围）、macOS 与远端 CI 仍未验证；M20 阶段收尾（§12.6 当前文档）仍需用户确认（见 [M20 报告](reports/m20-progress.md) H20-W 节）。
+状态（2026-09-24，H20-W Windows 复验后）：Windows 11 本机默认 Cranelift lane 复验通过（58 harness 444 passed；显式 `m20_diag`/`m20_analysis`/`m20_lsp`/`m20_fmt` 全绿，门禁 fmt/clippy/Release/`dc fmt --check` 通过）；发现并修复 1 个 Windows 产品缺陷（路径依赖源码根带 `fs::canonicalize` 的 `\\?\` 前缀，导致 overlay 不命中、LSP definition URI 变 `file:////%3F/...`）与 3 处平台测试期望缺陷，新增 2 个 Windows 回归单测。LLVM lane、`m20_debug`（Windows/PDB 不在 §9.1 范围）、macOS 与远端 CI 仍未验证（见 [M20 报告](reports/m20-progress.md) H20-W 节）。
+
+状态（2026-09-24，H20-M macOS 复验与 M20 验收后）：macOS 26.6.2 arm64 本机默认 Cranelift lane（58 harness 447 passed）、`--features llvm` cranelift lane（60 harness 461 passed，含 lldb 实测 `m20_debug` 7 passed）与 `DOLPHIN_BACKEND=llvm` 显式套件（18 二进制 233 passed）全绿；fmt/clippy/Release 构建/`dc fmt --check`/发行包归档冒烟通过。发现并修复 4 个同根因产品缺陷（路径依赖根 `fs::canonicalize` 解析 macOS `/var`→`/private/var` 等符号链接，导致 overlay 不命中、definition URI 与编辑器路径不一致；经用户确认按规格 §5.3/§6.3 改为词法绝对路径，身份键/锁输出不变）与 1 个 lldb 脚本输出解析缺陷（`thread #N` 与帧号冲突），新增 1 个非 Windows 回归单测；`analysis_02`、`lsp_02/04/07`、`dbg_03` 修复后通过。该修复跨平台，Windows 默认 lane 未在本批重跑（须在 Windows 复跑既有 `path_dependency_roots_avoid_windows_verbatim_prefix` 回归）；远端 CI 仍未验证。第 12.6 节四种证据（实现、自动化验收、真实 `examples/m19` 流程、当前文档）均已成立，M20 阶段验收完成（见 [M20 报告](reports/m20-progress.md) H20-M 节）。H21-00 待人工派发。
 
 **H20-01：诊断。** 数据含 code/severity/primary span/labels/notes；CLI 负责终端渲染，LSP 消费结构化字段。保留 Unicode/UTF-16 正确转换和跨文件 related locations。先做词法/语法同步点及互不依赖声明的多错误收集；出错表达式不能伪造正常类型进入 codegen，缺完整分析时声明 partial。验收 DIAG-01：CLI/LSP 相同错误身份与位置；DIAG-02：多文件两个独立错误；DIAG-03：非 BMP 字符/CRLF；DIAG-04：泛型实例链和用户类型名可读；DIAG-05：错误程序不 panic、不产生可执行产物。
 

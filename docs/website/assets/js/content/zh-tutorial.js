@@ -63,6 +63,8 @@ echo $?   # 42</code></pre>
     <tr><td><code>dc run &lt;项目&gt;</code></td><td>构建后立即运行，并透传程序退出码</td></tr>
     <tr><td><code>dc test &lt;项目&gt;</code></td><td>运行项目的 <code>tests/*.do</code> 测试</td></tr>
     <tr><td><code>dc info &lt;项目&gt;</code></td><td>显示包坐标、目标、依赖与锁文件状态</td></tr>
+    <tr><td><code>dc fmt &lt;文件或目录...&gt;</code></td><td>按规范整理格式；<code>--check</code> 只检查不写入</td></tr>
+    <tr><td><code>dc lsp [项目目录]</code></td><td>启动 stdio 语言服务器（诊断、悬停与跳转定义）</td></tr>
     <tr><td><code>dc env</code></td><td>显示宿主/目标平台与工具链信息</td></tr>
   </tbody>
 </table>
@@ -634,8 +636,9 @@ dc publish &lt;项目目录&gt; [--repository &lt;id&gt;] [--locked] [--offline]
 dc info &lt;项目目录&gt;
 dc env
 dc fmt &lt;文件或目录...&gt; [--check]
-dc lsp</code></pre>
+dc lsp [项目目录]</code></pre>
 <p>使用 <code>dc &lt;子命令&gt; --help</code> 查看子命令参数。<code>--color</code> 是全局选项，可放在子命令前后。<code>dc run</code> 中 <code>--</code> 之后的参数原样转发给程序，不经过 shell。<code>dc test</code> 为每个测试启动独立进程，见<a href="#/tutorial/testing">测试代码</a>。<code>dc info</code> 只接受项目目录，<code>dc env</code> 显示宿主/目标平台、ABI、所选链接器与缓存根。</p>
+<p><code>dc check/build/run/test</code> 会一次打印全部词法、语法与声明级诊断（每文件最多 100 条），有错误就不产出对象或可执行文件。<code>dc fmt</code> 不传路径时从当前目录向上发现 <code>dolphin.toml</code>，按 <code>[package].source</code>（默认 <code>src</code>）递归格式化并排除 <code>build.output</code>（默认 <code>target</code>）与 <code>.git</code>；本次选中的文件先全部在内存中格式化，任一失败不写任何文件，显式传入的文件仍精确生效。<code>dc lsp [项目目录]</code> 在项目模式下使用无副作用的共享分析快照：含 <code>pkg</code>/<code>use</code> 的文档获得项目语义诊断，悬停与跳转定义基于符号身份支持未保存 overlay 与跨文件/跨包跳转；没有 <code>dolphin.toml</code> 时按单文件规则分析。</p>
 
 <h2>6. 一个多目标项目</h2>
 <pre><code>[package]
@@ -1110,6 +1113,7 @@ echo $?</code></pre>
   <li>阅读<a href="#/std/overview">标准库参考</a>，掌握 <code>Vec</code>、<code>String</code>、<code>Option</code>、<code>Result</code> 的完整 API。</li>
   <li>阅读<a href="#/std/mem">std.mem</a> 理解内存布局与视图构造，阅读<a href="#/std/io">进程、流与文件</a>了解 M19 的 I/O 模块。</li>
   <li>用<a href="#/tutorial/testing">dc test</a> 与 <code>std.test</code> 为统计模块补上测试。</li>
+  <li>把项目接入编辑器：<code>dc lsp report</code> 提供跨文件/跨包诊断、悬停与跳转定义（支持未保存文本），用 <code>dc fmt --check</code> 纳入 CI。</li>
   <li>尝试把统计逻辑抽成通用库，通过 <code>dolphin.toml</code> 的 <code>[lib]</code> 与 path 依赖复用。</li>
 </ul>
 

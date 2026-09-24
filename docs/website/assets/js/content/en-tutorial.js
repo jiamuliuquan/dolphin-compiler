@@ -63,6 +63,8 @@ echo $?   # 42</code></pre>
     <tr><td><code>dc run &lt;project&gt;</code></td><td>Build then run, propagating the program's exit code</td></tr>
     <tr><td><code>dc test &lt;project&gt;</code></td><td>Run the project's <code>tests/*.do</code> suite</td></tr>
     <tr><td><code>dc info &lt;project&gt;</code></td><td>Show package coordinates, targets, dependencies and lock status</td></tr>
+    <tr><td><code>dc fmt &lt;file-or-dir...&gt;</code></td><td>Reformat in place; <code>--check</code> only reports</td></tr>
+    <tr><td><code>dc lsp [project]</code></td><td>Start the stdio language server (diagnostics, hover, go-to-definition)</td></tr>
     <tr><td><code>dc env</code></td><td>Show host/target platform and toolchain details</td></tr>
   </tbody>
 </table>
@@ -634,8 +636,9 @@ dc publish &lt;dir&gt; [--repository &lt;id&gt;] [--locked] [--offline]
 dc info &lt;dir&gt;
 dc env
 dc fmt &lt;file-or-dir...&gt; [--check]
-dc lsp</code></pre>
+dc lsp [project]</code></pre>
 <p>Use <code>dc &lt;subcommand&gt; --help</code> for subcommand options. <code>--color</code> is global and may appear before or after the subcommand. Arguments after <code>--</code> in <code>dc run</code> are forwarded to the program unchanged, without shell processing. <code>dc test</code> runs each test in its own process; see <a href="#/tutorial/testing">testing your code</a>. <code>dc info</code> accepts only a project directory; <code>dc env</code> shows the host/target platform, ABI, selected linker and cache root.</p>
+<p><code>dc check/build/run/test</code> print all lexical, syntax and declaration-level diagnostics at once (at most 100 per file) and refuse to emit objects or executables when any error is present. Without path arguments, <code>dc fmt</code> discovers <code>dolphin.toml</code> upward from the current directory, formats under <code>[package].source</code> (default <code>src</code>) while excluding <code>build.output</code> (default <code>target</code>) and <code>.git</code>, formats every selected file in memory first and writes nothing if any file fails; explicit file arguments still apply exactly. <code>dc lsp [project]</code> uses a side-effect-free shared analysis snapshot in project mode: documents with <code>pkg</code>/<code>use</code> get project semantic diagnostics, and hover/go-to-definition resolve by symbol identity across unsaved overlays and file/package boundaries; without a <code>dolphin.toml</code> it falls back to single-file analysis.</p>
 
 <h2>6. A multi-target project</h2>
 <pre><code>[package]
@@ -1110,6 +1113,7 @@ echo $?</code></pre>
   <li>Read the <a href="#/std/overview">standard library reference</a> for the complete <code>Vec</code>, <code>String</code>, <code>Option</code> and <code>Result</code> APIs.</li>
   <li>Read <a href="#/std/mem">std.mem</a> to understand layout and view construction, and <a href="#/std/io">process, streams and files</a> for the M19 I/O modules.</li>
   <li>Add tests for the stats module with <a href="#/tutorial/testing">dc test</a> and <code>std.test</code>.</li>
+  <li>Wire the project into an editor: <code>dc lsp report</code> serves cross-file/package diagnostics, hover and go-to-definition (including unsaved text), and <code>dc fmt --check</code> fits CI.</li>
   <li>Extract the statistics logic into a reusable library and depend on it through <code>[lib]</code> and a path dependency.</li>
 </ul>
 

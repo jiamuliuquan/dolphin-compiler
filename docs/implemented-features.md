@@ -1,12 +1,12 @@
 # 已实现功能参考
 
-> 对应实现记录：M0-M19 已完成；批次与平台证据见 [M18](reports/m18-progress.md)、
-> [M19](reports/m19-progress.md) 进度报告
+> 对应实现记录：M0-M20 已完成；批次与平台证据见 [M18](reports/m18-progress.md)、
+> [M19](reports/m19-progress.md)、[M20](reports/m20-progress.md) 进度报告
 >
 > 编译器目录：[`仓库根目录`](../)  
 > 可运行示例：[`examples`](../examples/)
 
-本文记录当前能力、明确限制与已知缺陷；完成标记不等于所有组合都无缺陷。后续任务见 [M18-M21 交接指南](plan-m18-plus.md)（M20/M21 待实施），历史合同与旧实施指南仅作证据保留。
+本文记录当前能力、明确限制与已知缺陷；完成标记不等于所有组合都无缺陷。后续任务见 [M18-M21 交接指南](plan-m18-plus.md)（M21 待实施），历史合同与旧实施指南仅作证据保留。
 
 ## 1. 功能状态
 
@@ -32,10 +32,11 @@
 | M17 | 最小版本已完成 | LLVM Unix DWARF、保守格式化器、单文件最小 LSP |
 | M18 | 已完成 | 组合语义正确性、泛型约束、IR 校验、项目/包回归、LLVM CI 与发布门禁 |
 | M19 | 已完成 | 真实 CLI 与用户测试：`std.process`/`std.error`/`std.io`/`std.fs`/`std.text`/`std.test`、`dc run --` 转发、`dc test` 发现/执行/汇总、`examples/m19` `dtext`（三平台默认后端 + Linux LLVM 验收） |
+| M20 | 已完成 | 项目级开发工具：结构化诊断（`E0000`/`E0001`/`E0002`/`E1001`/`E1002`/`E2001`）与前端多错误收集、无副作用共享项目分析（`dolphin-analysis`）与未保存 overlay、项目级 LSP 诊断/悬停/跨文件跨包定义、`dc fmt` 清单发现与全有或全无、真实 gdb/lldb 调试验收（三平台默认后端 + Linux/macOS LLVM Debug；证据见 [M20 进度报告](reports/m20-progress.md)） |
 
 ### 1.1 当前已知问题与验证边界
 
-M18 审计发现的入口问题已全部修复（见 1.2 节），当前没有遗留的审计缺陷；M19 的三平台复验与平台缺陷修复见 [M19 进度报告](reports/m19-progress.md)。测试全绿只代表已覆盖路径，不代表所有组合都无缺陷。
+M18 审计发现的入口问题已全部修复（见 1.2 节），当前没有遗留的审计缺陷；M19/M20 的三平台复验与平台缺陷修复见 [M19 进度报告](reports/m19-progress.md) 与 [M20 进度报告](reports/m20-progress.md)（Windows H20-W、macOS H20-M）。测试全绿只代表已覆盖路径，不代表所有组合都无缺陷。
 
 ### 1.2 已修复缺陷（M18）
 
@@ -886,7 +887,7 @@ dolphin_runtime_finish
 - 未知字段、未知枚举项、构造参数数量或类型错误。
 - `match` 缺失分支、冗余分支和解构绑定数量错误。
 
-诊断包含稳定类别 `E0000`/`E0001`、文件路径、Unicode 字符列号、多行源码标记。CLI 支持 `--color auto|always|never`。当前编译器通常在第一个错误处停止，多错误恢复明确延后到 MVP 之后。
+诊断包含稳定类别 `E0000`/`E0001`、文件路径、Unicode 字符列号、多行源码标记。CLI 支持 `--color auto|always|never`。M20 起词法/语法与声明级语义错误按同步点收集（见 18.5），函数体内仍首错即停。
 
 ## 16. 泛型、方法与 trait（M15-A，已完成）
 
@@ -1022,7 +1023,7 @@ dolphin_runtime_finish
   `examples/m19` 的 `textstats`（lib）与 `dtext`（lib+bin，path 依赖）演示该闭环；因 D1
   （`dc build --lib` 仍打包且 `.dlib` 拒绝 path 依赖），`dtext` 用 `dc build --bin dtext` 构建。
 
-## 18. 优化后端与开发工具（M16、M17，已完成）
+## 18. 优化后端与开发工具（M16、M17、M20，已完成）
 
 ### 18.1 后端无关 IR 与 LLVM 后端（M16）
 
@@ -1047,7 +1048,7 @@ dolphin_runtime_finish
   `--check` 只检查并以非零退出。
 - `dc lsp`：stdio 上的最小 LSP，提供文档诊断、文档符号、悬停与跳转定义；未实现的方法返回
   `null`，EOF/`exit` 正常退出。
-- LSP 对含 pkg/use 或无 main 的文件跳过语义检查；hover/definition 基于当前文档顶层声明，不支持完整作用域绑定和项目级跨文件/跨包导航。上述扩展及 formatter 保持性、调试器实测由 M20 验收。
+- LSP 对含 pkg/use 或无 main 的文件跳过语义检查；hover/definition 基于当前文档顶层声明，不支持完整作用域绑定和项目级跨文件/跨包导航。上述扩展及 formatter 保持性、调试器实测已由 M20 交付，见 18.5。
 
 ### 18.4 IR 与 LLVM 校验（H18-06）
 
@@ -1062,6 +1063,41 @@ dolphin_runtime_finish
   不 unwrap、不写目标文件。
 - **循环 sret 槽**：聚合返回值调用的 sret 缓冲区提升到函数入口块（每个调用点一个静态槽），
   避免 Debug（无优化）下循环内 alloca 随迭代累积栈；`tests/m18_sret.rs` 以 1e6 次迭代固定回归。
+
+### 18.5 项目级诊断与开发工具（M20）
+
+- **结构化诊断**：`Diagnostic` 在保留 `plain`/`at` 文本渲染的同时提供 `code`/`severity`/
+  `labels`/`notes` 与 `with_label`/`with_note`/`with_code`；`SourceId`/`SourceFile.id`/`SourceMap`
+  提供文件身份与位置换算。code 登记：`E0000`（`plain`）、`E0001`（有位置错误）、`E0002`
+  （诊断数量上限）、`E1001`（依赖不可本地恢复）、`E1002`（清单/源码根加载失败）、`E2001`
+  （分析内部错误）。
+- **前端多错误收集**：`lex_recovering`/`parse_recovering` 在同步点恢复并收集词法/语法错误
+  （每文件最多 100 条 + `E0002`）；`lower_sources_analysis_collecting` 逐声明收集语义错误；
+  函数体内仍首错即停。`dc check/build/run/test` 编译前打印全部诊断并退出 1，错误程序不产出
+  任何对象/可执行/`.dlib`。声明级/函数体错误消息使用可读限定名与泛型实参（无 `TypeId(n)`）。
+- **共享项目分析**：`dolphin-analysis` 的 `AnalysisHost`/`AnalysisSnapshot`/`SymbolIndex` 在
+  无网络、不写 `dolphin.lock`、不产生产物（允许解包已有缓存归档到 `DOLPHIN_HOME`）的前提下
+  分析 lib/多 bin/path/缓存坐标依赖项目；`resolve_readonly` 对不可本地恢复的依赖返回 `E1001`
+  并提示 `dc fetch`。overlay 以词法绝对路径映射未保存文本，`didClose` 恢复磁盘版本或移除
+  仅存在于 overlay 的新文件；旧 version 的 `set_overlay` 被忽略，`revision` 作为发布契约。
+  CLI 构建路径仍使用原有网络/写锁逻辑。
+- **项目级 LSP（`dc lsp [项目目录]`）**：hover/definition 基于 `SymbolIndex` 的符号身份
+  （支持参数、局部遮蔽、`for`/match 绑定、跨文件与跨包 pub 定义），不再按文本同名查找；
+  诊断按 overlay version 发布，项目级诊断经 `window/showMessage`；协议按 LSP 3.17：
+  `initialize` 前请求 `-32002`、未知方法 `-32601`、`shutdown` 后请求 `-32600`、未 `shutdown`
+  的 `exit` 退出码 1（EOF 为 0）。无 `dolphin.toml` 时按单文件规则分析（`pkg`/`use` 或缺少
+  `main` 时跳过语义检查，语义成功仍提供真实索引）。
+- **`dc fmt` 项目发现**：无路径参数时从 cwd 向上发现 `dolphin.toml`，根为 `[package].source`
+  （默认 `src`）；递归排除 `build.output`（默认 `target`）与 `.git`、不跟随目录符号链接；
+  显式文件精确生效；全部选中文件先在内存格式化，任一失败不写任何文件（全有或全无）；
+  `--check` 零写入；输出统一 LF。
+- **调试器验收**：`scripts/debug_smoke.sh`（gdb）与 `scripts/debug_smoke_lldb.sh`（lldb）
+  在 LLVM Debug 产物上实际验证断点命中正确文件行、单步行映射与 `bt` 调用链；Release 与
+  Cranelift 明确报告无行表（DBG-04 边界）。Cranelift/PDB 调试信息不在本阶段。
+- **路径身份**：分析路径、overlay 键与 LSP `file://` URI 使用绝对、纯词法规范化路径，
+  不解析符号链接；路径依赖包根不再带 `fs::canonicalize` 的平台产物（Windows `\\?\` 前缀、
+  macOS `/var`→`/private/var`），因此未保存依赖文本与 definition 跳转在编辑器打开的路径上
+  生效。`by_path` 身份键、`PackageSource::Path` 与 `dolphin.lock` 输出不变。
 
 ## 19. 明确未实现
 
@@ -1083,6 +1119,7 @@ dolphin_runtime_finish
   类型推断：前者按路径解析为函数名而报未知函数，后者报无法推断类型参数；组合错误路径时先
   绑定局部变量（`val x = a.b; x.method()`、`val e = ...; return Result.Err(e)`）即可（H19-06）。
 - 闭源二进制 Dolphin 库包、稳定二进制 ABI、增量编译、交叉编译。
-- Cranelift 后端的调试信息、Windows/PDB 调试信息，以及多错误恢复。
+- Cranelift 后端的调试信息、Windows/PDB 调试信息，以及函数体内的表达式级多错误收集
+  （词法/语法/声明级收集已在 M20 实现，见 18.5）。
 
 实现顺序见[路线图](roadmap.md)，逐批交接与验收见 [M18-M21 计划](plan-m18-plus.md)。

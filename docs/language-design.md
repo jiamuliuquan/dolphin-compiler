@@ -5,7 +5,7 @@
 
 本文档描述目标语言规范，其中包含尚未实现的设计。当前编译器的真实能力以[已实现功能参考](implemented-features.md)为准，后续顺序以[实现路线图](roadmap.md)为准。
 
-> 当前进度：已实现到 M19。M14/M15 的内存模型、泛型与源码标准库、M16 的可选 LLVM 后端、M17 的格式化器/LSP/DWARF、M18 的正确性收敛与 M19 的参数环境、标准流与文件 I/O、文本处理、`dc test` 用户测试均已完成。Cranelift 调试信息、Windows/PDB 和完整变量调试尚未实现。本文保留早期阶段设计，不应把“第一阶段”限制或历史示例当作当前能力清单；准确能力见[已实现功能参考](implemented-features.md)，下一步见 [M20 规划](plan-m18-plus.md)。
+> 当前进度：已实现到 M20。M14/M15 的内存模型、泛型与源码标准库、M16 的可选 LLVM 后端、M17 的格式化器/LSP/DWARF、M18 的正确性收敛、M19 的参数环境/标准流/文件 I/O/文本处理/`dc test` 用户测试、M20 的项目级诊断/共享分析/overlay/跨文件导航/格式化发现与调试器实测均已完成。Cranelift 调试信息、Windows/PDB 和完整变量调试尚未实现。本文保留早期阶段设计，不应把“第一阶段”限制或历史示例当作当前能力清单；准确能力见[已实现功能参考](implemented-features.md)，下一步见 [M21 规划](plan-m18-plus.md)。
 
 本文档描述一门面向学习和实践的静态类型编程语言。该语言参考 Rust、Kotlin、Java 和 C 等语言的部分语法，目标是将源代码编译为可由操作系统直接运行的本机可执行文件。
 
@@ -668,7 +668,7 @@ pub fn max(a: i32, b: i32): i32 {
 
 ## 18. 第三阶段语言草案
 
-> 当前源码已实现到 M19。18.1-18.3 的结构体、枚举与 match、18.4 的内存/C 互操作、18.5 的用户泛型、源码标准库、lib 项目与库包分发（M15-A–F）均已实现。当前行为见[已实现功能参考](implemented-features.md)，[M14](proposal-m14-memory-model.md) / [M15](proposal-m15-generics-stdlib.md) v2 保留为已完成规格；下一步见 [M20 规划](plan-m18-plus.md)。
+> 当前源码已实现到 M20。18.1-18.3 的结构体、枚举与 match、18.4 的内存/C 互操作、18.5 的用户泛型、源码标准库、lib 项目与库包分发（M15-A–F）均已实现；M20 的项目级诊断/共享分析/LSP/格式化发现与调试器实测见[已实现功能参考](implemented-features.md) 18.5。当前行为见[已实现功能参考](implemented-features.md)，[M14](proposal-m14-memory-model.md) / [M15](proposal-m15-generics-stdlib.md) v2 保留为已完成规格；下一步见 [M21 规划](plan-m18-plus.md)。
 
 ### 18.1 结构体（M13 已实现）
 

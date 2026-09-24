@@ -880,3 +880,181 @@ CLI 位置必须是 1:20：error[E0001]: unknown variable `missing`
 3. **远端 CI**：Windows lane 应重跑默认 lane 并保持 `m20_*` 显式列表；LLVM lane（Ubuntu）继续
    覆盖 `m20_debug`。
 4. **H21-00**：M20 经用户验收后按计划派发；本补充节不提前实现 M21。
+
+## H20-M macOS 平台复验与缺陷修复
+
+- 批次：M20（H20-01..05）完成后的 macOS 平台复验补充节（沿用 H20-W 做法，不新增批次编号；
+  含使复验通过所需的最小缺陷修复）
+- 状态：**完成（macOS 26.6.2 build 25G83 arm64 本机：默认 Cranelift lane 58 harness
+  447 passed / 0 failed；`--features llvm` + `DOLPHIN_BACKEND=cranelift` lane 60 harness
+  461 passed / 0 failed（含 lldb 实测 `m20_debug` 7 passed）；`DOLPHIN_BACKEND=llvm`
+  显式 18 二进制 233 passed / 0 failed；`backend` 4 passed；fmt/clippy/Release 构建/
+  `dc fmt --check`/发行包归档冒烟通过。首跑发现的 5 个失败（4 个同一路径根因 + 1 个
+  lldb 输出解析）全部定位并修复；另在首次并行跑中出现 4 个 lldb attach 瞬时失败，
+  随后 6 次运行未复现。远端 CI 未验证）**
+- 前置批次及报告：H20-W / 本文件上一节；规格 §5.3、§6.3、§9.2、§12
+
+### 开始 HEAD 与已有本地改动
+
+- 开始 HEAD：`2ff7fd6f516471bc07a623839f075fb95f985048`（`v0.3.0-M20-05-win`）；工作区干净。
+- 本批修改：
+  - `crates/dolphin-package/src/resolver.rs`：新增词法绝对路径 helper，路径依赖包根/源码根
+    不再用 `fs::canonicalize`（产品修复）+ 1 个非 Windows 回归单测；
+  - `scripts/debug_smoke_lldb.sh`：归一化 lldb 的 `frame #N:`/`thread #N` 输出为共享断言
+    使用的 `#N` 帧格式（macOS 脚本缺陷修复）；
+  - 本报告与 `docs/plan-m18-plus.md`、`docs/implemented-features.md`、`docs/roadmap.md`、
+    `README.md`、`docs/proposal-m20-project-tools.md`、网站教程（zh/en）的 M20 收尾同步。
+- 未 commit/push/tag；未改 `dolphin.toml`/`dolphin.lock`/`.dlib` 格式，未改 IR/layout/lower/
+  codegen/runtime。
+
+### 环境
+
+| 项 | 值 |
+| --- | --- |
+| 平台 | macOS 26.6.2（build 25G83），arm64（Apple Silicon） |
+| rustc / cargo | 1.98.1（host `aarch64-apple-darwin`） |
+| C 工具链 | Xcode Command Line Tools，Apple clang 21.0.0（`Target: arm64-apple-darwin25.6.0`） |
+| LLVM 22 dev | Homebrew `/opt/homebrew/opt/llvm@22`（`llvm-config --version` = 22.1.8），`LLVM_SYS_221_PREFIX` 指向该前缀 |
+| 调试器 | Apple `lldb-2100.0.17.203`（`/usr/bin/lldb`） |
+| 链接 | CI 同款 `DYLD_FALLBACK_LIBRARY_PATH="$(rustc --print sysroot)/lib"`（rust-lld 的 `@rpath/libLLVM.dylib`） |
+| 临时目录 | `std::env::temp_dir()` = `/var/folders/...`（`/var` 为指向 `/private/var` 的符号链接） |
+
+### 复验前失败清单（首跑）
+
+| # | 目标 / 测试 | 固定期望（断言） | 实际 | 类型 |
+| --- | --- | --- | --- | --- |
+| 1 | `m20_analysis::analysis_02_unsaved_dependency_affects_caller` | overlay 依赖后 `partial=true` 且调用方 1 条 `E0001 expected \`i32\`, found \`bool\`` | `partial=false`、0 诊断（overlay 未命中） | **产品缺陷** |
+| 2 | `m20_lsp::lsp_02_cross_file_and_cross_package_definition` | definition URI `file:///var/.../stats/src/lib.do` | `file:///private/var/.../stats/src/lib.do` | **产品缺陷** |
+| 3 | `m20_lsp::lsp_04_open_change_close_dependency_change` | 依赖 overlay 后发布调用方诊断 | 10s 内无通知（overlay 未命中） | **产品缺陷** |
+| 4 | `m20_lsp::lsp_07_m19_development_flow` | 跨包 definition URI 与打开路径一致 | 同 #2（`textstats/src/lib.do`） | **产品缺陷** |
+| 5 | `m20_debug::dbg_03_cross_function_call_stack` | `#0` 在 `#1` 之前且分别为 `add`/`main` | lldb 的 `* thread #1, ...` 先于 `frame #0:`，`find("#1")` 命中线程号 | **脚本/测试期望缺陷** |
+| 6 | `m20_debug` 其余 4 项（首次并行跑） | 断点命中/单步 | `attach failed (attached to process, but could not pause execution)`，74s 超时失败 | 环境瞬时（后续 6 次运行未复现） |
+
+首跑计数：默认 lane 58 harness 442 passed / 4 failed；`--features llvm` cranelift lane
+60 harness 452 passed / 8 failed；`DOLPHIN_BACKEND=llvm` 显式 18 二进制 228 passed / 5 failed。
+失败集合一致：4 个路径缺陷 + `dbg_03`（另含一次性的 4 个 attach）。
+
+### 根因与修复
+
+| # | 位置 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1–4 | `crates/dolphin-package/src/resolver.rs::acquire_path` | 路径依赖根用 `fs::canonicalize`，macOS 上把 `/var` 解析为 `/private/var`（用户符号链接目录同理）；`PackageInfo.root`/`source_root` 因此与 overlay 键、LSP `uri_to_path` 的词法路径不同，overlay 永不命中、definition URI 与编辑器打开路径不一致。H20-W 只剥离了 Windows `\\?\` 前缀，未处理符号链接。 | 新增 `lexical_absolute`（`std::path::absolute` + 折叠 `.`/`..`，不解析符号链接）；`acquire_path` 的包根/源码根改用它（仍经 `strip_verbatim_prefix` 兜底）。`by_path` 身份键、`PackageSource::Path`、锁文件 `relative_path` 仍用 canonical，锁与构建输出格式不变。经用户确认（2026-09-24，“按规格改为词法路径”），依据规格 §5.3/§6.3“绝对 + 纯词法规范化、不解析符号链接”。 |
+| 5 | `scripts/debug_smoke_lldb.sh` | 脚本输出未归一化 lldb 的帧文本；共享断言按 gdb 的 `#N` 格式解析，lldb 的 `* thread #1, queue = ...` 抢先匹配 `#1` | sed 归一化：`thread #N` → `thread`、`frame #N: ` → `#N  `；断言不变，脚本与 gdb 脚本输出格式保持一致（脚本头文档化契约） |
+
+### 修复前复现结果（固定文本）
+
+```text
+# 1 analysis_02（产品缺陷）
+thread 'analysis_02_unsaved_dependency_affects_caller' panicked at tests/m20_analysis.rs:219:5:
+overlay 后必须 partial=true
+
+# 2/4 lsp_02 / lsp_07（产品缺陷）
+assertion `left == right` failed
+  left: String("file:///private/var/folders/.../stats/src/lib.do")
+ right: "file:///var/folders/.../stats/src/lib.do"
+
+# 3 lsp_04（产品缺陷）
+language server did not respond within 10s; stderr:
+
+# 5 dbg_03（脚本缺陷）
+`#0` 必须在 `#1` 之前：... * thread #1, queue = 'com.apple.main-thread', ...
+```
+
+新增回归（先失败后通过）：`dolphin-package` 单测
+`resolver::tests::path_dependency_roots_are_lexical_without_symlink_resolution`（`#[cfg(unix)]`，
+修复前失败文本 `left: "/private/var/.../real/dep"` / `right: "/var/.../alias"`）。
+
+### 修复后结果（固定期望、真实测试名；macOS 本机）
+
+| 验收 | 测试（macOS 实际运行） | 固定期望 | 结果 |
+| --- | --- | --- | --- |
+| DIAG-01..06 | `m20_diag` 6 个 | CLI/LSP 相同错误身份与位置、非 BMP/CRLF、可读类型名、无产物、100 条上限 | 6 passed |
+| ANALYSIS-01..06 | `m20_analysis` 6 个 | 零网络/零写锁/零产物、overlay 影响调用方、lib-only、多 bin/自定义 source、同名不同包、CLI 行为不变 | 6 passed（`analysis_02` 修复后） |
+| LSP-01..07 + 4 边界 | `m20_lsp` 11 个 | 项目诊断、跨文件/跨包 definition、遮蔽、打开/变更/关闭、版本、协议状态机、M19 流程 | 11 passed（`lsp_02/04/07` 修复后） |
+| FMT-01..06 | `m20_fmt` 6 个 | 幂等、token/注释保持、全有或全无、`--check` 零写入、发现/排除/CRLF、M1-M19 行为 | 6 passed |
+| DBG-01..04 + 单步 + 2 边界 | `m20_debug` 7 个（`--features llvm`，lldb） | 断点命中 `math.do` 正确行、单步行映射、`bt` `#0 add`/`#1 main`、Release/Cranelift 无行表、脚本用法/缺失调试器 | 7 passed（`dbg_03` 修复后；默认 lane 0 tests 按未运行计） |
+| 新增单测 | `path_dependency_roots_are_lexical_without_symlink_resolution` | 包根/源码根为词法路径（保留符号链接分量） | passed（修复前失败） |
+
+手工 lldb 会话（`scripts/debug_smoke_lldb.sh`，`dc build --backend llvm` Debug）：
+
+```text
+Breakpoint 1: where = debugsmoke`__dolphin_fn_1_add + 36 at math.do:2:19
+* thread, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    #0  0xADDR debugsmoke`__dolphin_fn_1_add at math.do:2:19
+（next 后）stop reason = step over
+    #0  0xADDR debugsmoke`__dolphin_fn_1_add at math.do:3:12
+    #1  0xADDR debugsmoke`main at main.do:2:26
+debug smoke: breakpoint hit   （exit 0）
+```
+
+### 实际运行命令与结果
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo clippy --workspace --exclude dolphin-codegen-llvm --all-targets -- -D warnings` | 通过 |
+| `cargo test --workspace --exclude dolphin-codegen-llvm --no-fail-fast` | 58 harness 共 447 passed；0 failed；exit 0 |
+| `cargo test -p dolphin-compiler --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt` | 6 + 6 + 11 + 6 passed；0 failed |
+| `cargo build --bins --features llvm` | 通过 |
+| `cargo clippy --workspace --all-targets --features llvm -- -D warnings` | 通过 |
+| `DOLPHIN_BACKEND=cranelift cargo test --workspace --features llvm --no-fail-fast` | 60 harness 共 461 passed；0 failed；exit 0（含 `m20_debug` 7 passed） |
+| `DOLPHIN_BACKEND=llvm cargo test -p dolphin-compiler --features llvm --test build --test ffi --test cli --test manifest --test packages --test doc_examples --test m19_args --test m19_io --test m19_fs --test m19_text --test m19_test_cmd --test m19_errors --test m19_app --test m20_diag --test m20_analysis --test m20_lsp --test m20_fmt --test m20_debug --no-fail-fast` | 18 二进制共 233 passed；0 failed；exit 0 |
+| `cargo test -p dolphin-compiler --features llvm --test backend` | 4 passed（`debug_backends_agree`/`release_backends_agree`/`llvm_debug_profile_emits_dwarf`/`typed_ir_has_no_backend_types`） |
+| `cargo build --release --bins` + `./target/release/dc fmt --check examples crates/dolphin-std/src` | 通过（exit 0） |
+| `python3 scripts/package.py --target aarch64-apple-darwin` + ci.yml 冒烟序列（m8/m14/m15/m18/m19、`dc package`、`file://` 仓库 fetch/`--locked`/`--offline`） | 通过（`SMOKE-OK`） |
+
+归档冒烟会在仓库内构建 `examples/m19/dtext/target`，而 `lsp_07` 断言真实示例项目没有
+`target/`；本批冒烟后已清理该目录并复跑 `m20_lsp` 全绿。CI 在干净 checkout 上运行不受影响。
+
+计数说明：macOS 默认 lane 447 passed 与 Linux 444（H20-05）/Windows 444（H20-W）的差异来自
+平台条件测试：`#[cfg(target_os = "linux")]` 用例（`app_06_write_failure_not_trap`、m19_io/
+m19_fs 的 Linux 专属用例）不在 macOS 运行，`#[cfg(windows)]` 用例不计入，macOS 计入
+`#[cfg(unix)]` 用例与本批新增的 1 个路径回归单测。M20 各套件（DIAG 6、ANALYSIS 6、LSP 11、
+FMT 6）三平台计数一致，`m20_debug` 在 `--features llvm` 下 7 passed。
+
+### 行为/兼容变化
+
+- **产品修复（所有平台）**：路径依赖的 `manifest.root`/`source_root`（及派生的 lib/bin/native
+  源码路径、诊断路径、LSP URI）改为词法绝对路径，不解析符号链接。macOS 上 `/var/...` 不再
+  变成 `/private/var/...`，用户符号链接目录下的依赖也与编辑器/overlay 路径一致；Linux 上
+  含符号链接的路径依赖同样受益。`by_path` 身份键、`PackageSource::Path`、`dolphin.lock`
+  的相对路径输出与 `dc build/package/fetch` 成功路径不变（ANALYSIS-06、归档冒烟通过）。
+- **macOS 调试脚本**：`scripts/debug_smoke_lldb.sh` 的归一化输出把 lldb 帧折成与 gdb 脚本
+  一致的 `#N` 格式（`thread #N` 不再与帧号冲突）；固定结论行与退出码不变。
+- **未改变**：`dolphin.toml`/`dolphin.lock`/`.dlib` 格式；LSP 协议；`dc` 命令输出；
+  IR/layout/lower/codegen/runtime。
+
+### 未验证项（不得当作通过）
+
+1. **远端 CI**：未 push/tag，未运行 GitHub Actions；本机结果为 macOS 默认/LLVM lane 的
+   补充证据，不替代 CI。
+2. **Windows 默认 lane 未在本批重跑**：本批把路径依赖包根/源码根从 `fs::canonicalize`
+   改为词法绝对路径，该实现跨平台；Windows 分支只由既有单测
+   `path_dependency_roots_avoid_windows_verbatim_prefix` 覆盖（须在 Windows 重跑确认），
+   H20-W 的 Windows 444 passed 结论基于修复前的 canonical + 前缀剥离实现。
+3. **Windows LLVM lane**：Windows 本机无 LLVM 22 开发环境（H20-W 已记录），本批未改变该结论。
+4. **lldb 并行瞬时失败**：首次并行跑出现 4 个 attach 失败，随后 6 次（含单线程与并行）未复现；
+   未定位到确定触发条件，测试本身未做串行化改动，保留为已知偶发。
+5. **发行包归档冒烟不是 M20 验收项**：本批作为 macOS 平台补充证据运行通过；H19 报告已有
+   macOS 归档冒烟记录，远端 CI 归档上传仍以 CI 为准。
+6. **能力文档**：本批已按用户指令更新 `implemented-features.md`/`roadmap.md`/README/教程；
+   文档描述以本报告与既有实现为准。
+
+### M20 阶段验收结论
+
+用户于 2026-09-24 指示完成 macOS 复验、更新当前文档并验收 M20。第 12.6 节四种证据在
+macOS 复验后同时成立：
+
+1. **代码实现**：H20-01..05 的全部源码/脚本/测试（本报告与 H20-01..05、H20-W 各节）。
+2. **自动化验收**：DIAG/ANALYSIS/LSP/FMT 三平台默认 lane 通过（Linux H20-01..05、Windows
+   H20-W、macOS 本批）；DBG-01..04 在 Linux gdb（H20-05）与 macOS lldb（本批）通过；
+   Linux LLVM lane 与 macOS LLVM 22 lane 通过。注意 Windows 结论来自 H20-W 的修复前实现，
+   本批路径修复跨平台但未在 Windows 重跑（见“未验证项”第 2 条）。
+3. **真实示例/工具流程**：`examples/m19` 上 `lsp_07_m19_development_flow` 三平台通过；
+   调试脚本在真实两文件项目上命中/单步/调用栈。
+4. **当前文档**：本批按用户指令更新 `implemented-features.md`、`roadmap.md`、`README.md`、
+   网站教程与规格状态；M20 记为完成，M21 待派发。
+
+遗留边界（不阻塞 M20，供 H21/M21 参考）：远端 CI 未跑；Windows LLVM lane 缺失；补全/签名
+帮助/references/rename/语义高亮、表达式级类型与局部变量值、`documentSymbol` 仍按当前文件
+文本解析、异步/取消、Cranelift/PDB 调试信息未实现（H20-05 报告已列）。

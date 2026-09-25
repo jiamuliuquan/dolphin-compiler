@@ -1,10 +1,10 @@
 # 系统链接器默认化进度报告
 
 本报告记录 M20 之后的链接器发行策略调整（无 H 编号批次）。改动已实现并完成 Linux x86_64
-本机验证与文档同步；Windows/macOS 本机复验与远端 CI 未运行，未验证项在下文如实标注。
-所有改动尚未 commit/push/tag。
+本机验证与文档同步；首次 push 后远端 CI 在 Windows 冒烟暴露 `link` 同名工具缺陷，已修复并在
+Windows 本机复验；macOS 与修复后的远端 CI 待复跑，未验证项在下文如实标注。
 
-- 状态：**实现完成；Linux x86_64 默认 lane、打包与冒烟通过；Windows/macOS 与远端 CI 未验证**
+- 状态：**实现完成；Linux x86_64 默认 lane、打包与冒烟通过；Windows 默认 lane 与冒烟经本机复验通过（含 `link` 同名冲突修复）；macOS 与修复后的远端 CI 未验证**
 - 开始 HEAD：`7fc848c62d02a29bc6ce4b2d4f3df58bd836b97b`（`update to v0.4.0`）；改动前工作区干净
 - 决策来源：用户确认「三平台全部切换系统链接器」且「保留 `--bundled-linker` 可选回退」
 - 历史基线：[M20 进度报告](m20-progress.md)（M20 已完成）、[安装说明](../installation.md)
@@ -21,6 +21,7 @@
 | 类别 | 文件 | 内容 |
 | --- | --- | --- |
 | 链接器选择 | `crates/dolphin-linker/src/linker.rs` | `LinkerChoice` 默认改为 `System`，新增 `Bundled`；`resolve_tool` 仅服务 bundled |
+| 链接器定位 | `crates/dolphin-linker/src/linker.rs` | 修复：Windows 上 `link` 解析到 MSVC 工具链（`VCToolsInstallDir` → PATH 过滤 `\vc\`），避免 Git for Windows coreutils `link` 同名冲突 |
 | 平台抽象 | `crates/dolphin-platform/src/platform.rs` | `linker_name` 改指系统链接器、新增 `bundled_linker_name`；`system_link_command` 为共享库补 `-Wl,-rpath,$ORIGIN` / `-Wl,-rpath,@loader_path` |
 | 平台构建 | `crates/dolphin-platform/build.rs` | `link_args.rs` 探测改为 `--bundled-linker` 专用回退，注释更新 |
 | LLD 定位 | `crates/dolphin-linker/build.rs` | `DOLPHIN_LLD` 注入明确为 bundled 专用 |
@@ -60,6 +61,34 @@
 | 格式与静态检查 | `cargo fmt --all -- --check`、clippy `-D warnings` | 通过 |
 | 脚本与 CI 语法 | `python3 -m py_compile scripts/package.py`、YAML 解析 `ci.yml` | 通过 |
 
+## 远端 CI 复验与 Windows `link` 同名冲突修复（2026-09-25）
+
+首次 push（`8f94c7f`）后远端 CI（run `36084667388`）Linux/macOS 全绿，Windows 的
+`Smoke test the release archive` 在 `smoke/dc build examples/m8 --release` 失败：
+
+```
+error[E0000]: linking `examples/m8\target\m8.exe` failed
+link: extra operand 'examples/m8\\target\\m8.obj'
+Try 'link --help' for more information.
+```
+
+原因：`dc` 以 `Command::new("link")` 按名字解析系统链接器，而 GitHub Actions 的
+`shell: bash` 让 Git for Windows 的 `usr\bin\link.exe`（GNU coreutils 的硬链接工具）
+排在 MSVC `link.exe` 之前，实际调用的是错误的同名程序（`--help` 提示与 `extra operand`
+均为 coreutils 特征）。
+
+修复（`crates/dolphin-linker/src/linker.rs`）：Windows 上 `link` 先解析到 MSVC 工具链——
+优先 `VCToolsInstallDir`（vcvars 激活时设置）下的 `bin\Host<x>\x64\link.exe`，否则扫描
+PATH 并只接受包含 `\vc\` 的工具链路径；仍找不到时保持原名交给 `Command` 报错。Unix `cc`
+与 `--bundled-linker` 的 `rust-lld` 行为不变。新增 Windows 单测
+`windows_link_resolves_to_msvc_toolchain` 与 `coreutils_link_is_not_mistaken_for_msvc`。
+
+验证（Windows 11 本机，MSVC 14.44 已激活，并在 PATH 最前放置伪造的 coreutils 同名
+`link.exe` 以复现 CI 条件）：修复前同一条件可复现 CI 的失败；修复后 `dc build
+examples/m8 --release` 成功且产物 exit 64，CI 冒烟的其余步骤（m14/m15/m18/m19、
+`.dlib` 打包、`file://` 仓库 fetch/build/offline 重建）全部通过；`cargo test --workspace
+--exclude dolphin-codegen-llvm`、fmt、clippy 全绿。macOS 与修复后的远端 CI 待复跑。
+
 ## 实际运行命令与测试数量
 
 - `cargo fmt --all -- --check`：通过。
@@ -72,15 +101,15 @@
 
 ## 未运行的检查及原因
 
-- Windows/macOS 本机复验：当前开发机为 Linux；三平台默认 lane 依赖远端 CI（本次未 push/tag）。
-- 远端 CI 三平台门禁与 tag 发布流程：未运行。
+- macOS 本机复验：当前无 macOS 机器；依赖远端 CI 与后续复验。
+- 修复后的远端 CI 三平台门禁与 tag 发布流程：待 push 后复跑；首次运行的 Windows 失败已在本机修复并复验。
 - macOS 打包与冒烟、macOS 上 `--bundled-linker`（需 `DYLD_FALLBACK_LIBRARY_PATH`，CI 已有步骤）：未运行。
-- Windows 上 `link`/`rust-lld` 的打包冒烟：未运行；依赖已激活的 MSVC 环境。
+- Windows 上 `--bundled-linker`（`rust-lld`）的发行包冒烟：未单独运行；`tests/cli.rs::build_with_bundled_linker_runs` 在 Windows 本机全量测试中通过。
 - Linux LLVM lane（`--features llvm`）：本次未改 LLVM 代码生成，未运行。
 
 ## 剩余问题与后续
 
 1. **M21 干净环境验收**：本改动按[路线图](../roadmap.md) M12 后续调整与 [M21 交接](../plan-m18-plus.md) H21-00 的「要求系统 SDK/开发库并检测」方向落地；隔离镜像/虚拟机与三平台干净环境验收仍属 H21-04。
-2. **缺链接器诊断**：Windows 未激活 MSVC 环境时，`link` 缺失只报启动失败；后续可考虑 vswhere 探测或更可操作的诊断（当前文档已说明 Developer Command Prompt 要求）。
+2. **缺链接器诊断**：Windows 上 `link` 现已能避开 Git for Windows 的 coreutils 同名工具并解析到 MSVC 工具链（见上文修复节）；未激活 MSVC 环境且 PATH 无 MSVC 工具链时仍只报启动失败，后续可考虑 vswhere 探测或更可操作的诊断（当前文档已说明 Developer Command Prompt 要求）。
 3. **版本与发布**：改动尚未 commit/tag，未更新版本号；发布前需按发布流程同步归档校验和与许可证清单。
 4. **文档历史口径**：M12 历史记录保留原「随包 LLD」事实，当前行为以 README、[安装说明](../installation.md) 与[已实现功能参考](../implemented-features.md)为准。

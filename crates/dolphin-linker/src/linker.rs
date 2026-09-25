@@ -159,16 +159,33 @@ fn run_command(command: &[OsString], failure: &str) -> Result<(), Diagnostic> {
     }
 }
 
-/// 解析工具名：`--bundled-linker` 的 `rust-lld` 需要定位到完整路径，系统链接器
-/// （`cc`/`link`）保持原样交给 PATH 解析。
+/// 解析工具名：`--bundled-linker` 的 `rust-lld` 需要定位到完整路径，Windows 的
+/// 系统链接器 `link` 需要避开 PATH 上的同名工具；Unix 的 `cc` 保持原样交给
+/// PATH 解析。
 ///
-/// 查找顺序：可执行文件同目录（用户自行放置 `rust-lld` 时）→ `DOLPHIN_LLD`
-/// 环境变量（build.rs 编译期注入的 Rust 工具链路径）→ PATH → 用
-/// `rustc --print sysroot` 动态查询。最终回退到原名，由 `Command` 报错。
+/// `rust-lld` 查找顺序：可执行文件同目录（用户自行放置 `rust-lld` 时）→
+/// `DOLPHIN_LLD` 环境变量（build.rs 编译期注入的 Rust 工具链路径）→ PATH →
+/// 用 `rustc --print sysroot` 动态查询。最终回退到原名，由 `Command` 报错。
+///
+/// Windows 上 Git for Windows / MSYS2 的 `usr\bin\link.exe` 是 GNU coreutils 的
+/// 硬链接工具，与 MSVC 链接器同名；在 Git Bash 里运行 `dc` 时它常排在 PATH 前面，
+/// 直接按名字执行会报 `link: extra operand`（CI 冒烟即因此失败）。因此 `link`
+/// 先尝试解析到 MSVC 工具链的完整路径。
 fn resolve_tool(tool: &OsString) -> OsString {
-    if tool != "rust-lld" {
-        return tool.clone();
+    if tool == "rust-lld" {
+        return resolve_rust_lld(tool);
     }
+    #[cfg(windows)]
+    if tool == "link"
+        && let Some(path) = resolve_msvc_link()
+    {
+        return path;
+    }
+    tool.clone()
+}
+
+/// 解析 `rust-lld`；找不到时回退原名，由 `Command` 报错。
+fn resolve_rust_lld(tool: &OsString) -> OsString {
     // 1. 可执行文件同目录（用户把 `rust-lld` 与 `dc` 放在一起时）。
     if let Some(path) = find_next_to_executable() {
         return path;
@@ -246,6 +263,55 @@ fn rustc_host() -> Option<String> {
         .map(|host| host.trim().to_string())
 }
 
+/// 解析 Windows 系统链接器 `link.exe`，避开 PATH 上同名的 GNU coreutils `link`。
+///
+/// 优先用 `VCToolsInstallDir`（MSVC 开发环境激活时由 vcvars 设置）定位
+/// `<dir>\bin\Host<x>\x64\link.exe`；否则扫描 PATH，只接受 MSVC 工具链路径。
+/// 都找不到时返回 `None`，调用方保持原名交给 `Command` 报错。
+#[cfg(windows)]
+fn resolve_msvc_link() -> Option<OsString> {
+    find_msvc_link_in_vc_tools().or_else(find_msvc_link_in_path)
+}
+
+/// 从 `VCToolsInstallDir` 定位 MSVC 链接器（目标固定为 x64，与
+/// [`WindowsPlatform`](dolphin_platform::platform::WindowsPlatform) 一致）。
+#[cfg(windows)]
+fn find_msvc_link_in_vc_tools() -> Option<OsString> {
+    let tools = env::var_os("VCToolsInstallDir")?;
+    let mut hosts: Vec<PathBuf> = fs::read_dir(Path::new(&tools).join("bin"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    // `Hostx64` 优先于 `Hostx86`（32 位宿主工具集），字典序恰好满足。
+    hosts.sort();
+    hosts
+        .into_iter()
+        .map(|host| host.join("x64").join("link.exe"))
+        .find(|candidate| candidate.is_file())
+        .map(PathBuf::into_os_string)
+}
+
+#[cfg(windows)]
+fn find_msvc_link_in_path() -> Option<OsString> {
+    env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|dir| dir.join("link.exe"))
+        .find(|path| path.is_file() && is_msvc_link_path(path))
+        .map(PathBuf::into_os_string)
+}
+
+/// MSVC 工具链路径特征（如 `...\VC\Tools\MSVC\<版本>\bin\Hostx64\x64`），
+/// 用于排除 Git for Windows / MSYS2 的 coreutils `link.exe`。
+#[cfg(windows)]
+fn is_msvc_link_path(path: &Path) -> bool {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+        .contains("\\vc\\")
+}
+
 /// 运行时目标文件与用户目标文件放在同一目录、同一基名，扩展名取平台规则。
 fn runtime_object_path(object: &Path, object_suffix: &str) -> PathBuf {
     let stem = object.file_stem().unwrap_or_default();
@@ -261,12 +327,42 @@ mod tests {
 
     #[test]
     fn non_lld_tools_are_returned_unchanged() {
-        // `--system-linker` 回退工具（cc/link）原样返回，不做路径解析。
+        // Unix 系统链接器 `cc` 原样返回，不做路径解析。
         assert_eq!(resolve_tool(&OsString::from("cc")), OsString::from("cc"));
-        assert_eq!(
-            resolve_tool(&OsString::from("link")),
-            OsString::from("link")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_link_resolves_to_msvc_toolchain() {
+        // CI 的 `cargo test` 步骤已激活 MSVC 环境（`VCToolsInstallDir`）；此时
+        // `link` 必须解析到 MSVC 的 `link.exe`，而不是 Git Bash 的 coreutils `link`。
+        if env::var_os("VCToolsInstallDir").is_none() {
+            return;
+        }
+        let resolved = resolve_tool(&OsString::from("link"));
+        let text = resolved
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        assert!(
+            text.ends_with("\\link.exe"),
+            "unexpected `link` resolution: `{text}`"
         );
+        assert!(
+            text.contains("\\vc\\"),
+            "`link` should come from the MSVC toolchain: `{text}`"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn coreutils_link_is_not_mistaken_for_msvc() {
+        assert!(!is_msvc_link_path(Path::new(
+            r"C:\Program Files\Git\usr\bin\link.exe"
+        )));
+        assert!(is_msvc_link_path(Path::new(
+            r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\link.exe"
+        )));
     }
 
     #[test]

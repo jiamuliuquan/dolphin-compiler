@@ -101,7 +101,7 @@ export NO_PROXY=127.0.0.1,localhost,.internal.example
 | --- | --- |
 | Linux x86_64 | 默认 `cc` 自行解析 CRT（如 `Scrt1.o`、`crtbeginS.o`）、libc 与动态链接器，需要 GCC 或 Clang。`--bundled-linker` 时 dc 运行时通过 `CC` 或 `cc -print-file-name=...` 探测相同路径，失败回退编译期 `link_args.rs` 常量；这些路径可能包含构建机 GCC 版本目录，目标机缺少对应文件时仍会失败。只有 glibc 运行库不等于具备 CRT/开发链接文件。 |
 | macOS ARM64 | 默认 `cc`（Xcode Command Line Tools）自动使用当前 SDK。`--bundled-linker` 时 dc 运行时通过 `xcrun --show-sdk-path` / `--show-sdk-version` 探测 SDK，失败后回退编译期 `-syslibroot` / 平台版本；发行包未携带完整 macOS SDK，构建机 Xcode/CLT 路径在目标机可能不存在。仅有 libSystem 不足以证明无 SDK 可链接。 |
-| Windows x86_64 | 默认调用系统 `link`，需要已激活的 MSVC 开发环境（`Developer Command Prompt` 或等价 `vcvars`，提供 `link` 与 `LIB`/`PATH`）。`--bundled-linker` 的 `rust-lld -flavor link` 同样需要这些库与搜索环境，只是链接器本身来自 Rust 工具链。系统提供 UCRT DLL 不等于提供全部链接用库。CI 激活了 MSVC 开发环境，不能据此声称无 Visual Studio/SDK 的干净机器已通过。 |
+| Windows x86_64 | 默认调用系统 `link`，需要已激活的 MSVC 开发环境（`Developer Command Prompt` 或等价 `vcvars`，提供 `link` 与 `LIB`/`PATH`）。dc 会优先用 `VCToolsInstallDir`（vcvars 设置）定位 MSVC 工具链，再扫描 PATH 并跳过 Git for Windows / MSYS2 的 coreutils 同名 `link.exe`，因此从 Git Bash 运行也能链接。`--bundled-linker` 的 `rust-lld -flavor link` 同样需要这些库与搜索环境，只是链接器本身来自 Rust 工具链。系统提供 UCRT DLL 不等于提供全部链接用库。CI 激活了 MSVC 开发环境，不能据此声称无 Visual Studio/SDK 的干净机器已通过。 |
 
 `--system-linker` 是默认行为的显式写法；它和 `--bundled-linker` 都不是无 SDK 问题的通用解决办法。第三方 C 源码仍由库作者使用 C 工具链预编译；消费程序需要清单声明的原生链接文件与运行时附件。
 

@@ -1,8 +1,9 @@
 //! 构建脚本：定位 `rust-lld` 完整路径并通过 `DOLPHIN_LLD` 环境变量传给 crate。
 //!
-//! `rust-lld` 位于 Rust sysroot 的 `lib/rustlib/<target>/bin/`，通常不在 PATH。
-//! 这里在编译期确定路径，运行时 `linker` 模块优先用它，找不到时再回退到
-//! PATH 或 `rustc --print sysroot` 动态查询。
+//! 仅供 `--bundled-linker` 使用：默认系统链接器不经过这里。`rust-lld` 位于
+//! Rust sysroot 的 `lib/rustlib/<target>/bin/`，通常不在 PATH。这里在编译期
+//! 确定路径，运行时 `linker` 模块优先用它，找不到时再回退到 PATH 或
+//! `rustc --print sysroot` 动态查询。
 
 use std::env;
 use std::path::Path;

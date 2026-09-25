@@ -24,7 +24,7 @@
 | M9 | 已完成 | `dolphin.toml` 项目清单、包坐标、多可执行目标和清单查找 |
 | M10 | 已完成 | `TargetPlatform` 平台抽象、`dc env`、链接命令可测试且不硬编码 `cc` |
 | M11 | 已完成 | Windows x86_64 原生支持：MSVC ABI、`.obj`/`.exe`、Windows 运行时与 CI |
-| M12 | 已完成 | 自包含工具链：内嵌运行时、`rust-lld` 链接、`--system-linker` 回退、发行包与冒烟测试 |
+| M12 | 已完成 | 内嵌运行时与发行包；当时随包分发 `rust-lld`，后续调整为默认系统链接器、`--bundled-linker` 可选 |
 | M13 | 已完成 | 用户自定义类型：结构体、枚举、`match` 模式匹配和跨模块类型引用 |
 | M14 | 已完成 | 手动内存：`usize/isize`、统一布局、指针/切片、`std.mem` 分配与视图、`defer`、字符串字节视图、`extern "C"` 与原生链接 |
 | M15 | A-F 已完成 | 用户泛型、trait/方法、源码标准库、lib/path/坐标依赖、确定性 `.dlib`、仓库/缓存/锁与发布 |
@@ -89,9 +89,9 @@ my-project/
 
 ```text
 dc check <项目目录或main.do> [--locked] [--offline] [--color auto|always|never]
-dc build <项目目录或main.do> [--bin <名称>|--lib] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
-dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- <应用参数>...]
-dc test  <项目目录> [--filter <子串>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc build <项目目录或main.do> [--bin <名称>|--lib] [-o <输出文件>] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- <应用参数>...]
+dc test  <项目目录> [--filter <子串>] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc package <项目目录> [--locked] [--offline]
 dc fetch <项目目录> [--locked] [--offline]
 dc publish <项目目录> [--repository <id>] [--locked] [--offline]
@@ -812,7 +812,7 @@ UTF-8 源码
   -> 类型化 CFG IR
   -> CodegenBackend（Cranelift 或可选 LLVM）与本机目标文件
   -> 内嵌最小输出运行时目标文件
-  -> rust-lld 链接器（--system-linker 回退到 cc/link）
+  -> 系统链接器 cc/link（--bundled-linker 改用 rust-lld）
   -> 本机可执行文件
 ```
 
@@ -860,7 +860,7 @@ dolphin_test_fail
 dolphin_runtime_finish
 ```
 
-运行时使用系统 `write`（Unix）/`WriteFile`（Windows）输出，不依赖可变参数 `printf`。M12 起运行时源码由 `crates/dolphin-platform/build.rs` 调用 C/C++ 编译器预编译并内嵌，构建 Dolphin 程序时无需现场编译 runtime，默认使用 LLD 链接。链接参数仍可能在运行时通过 `cc`/`xcrun` 探测，失败后回退编译期路径；CRT、SDK 与导入库不因内嵌 runtime 而消失。实际平台依赖与干净环境验证限制见[安装说明](installation.md#6-系统依赖边界)。
+运行时使用系统 `write`（Unix）/`WriteFile`（Windows）输出，不依赖可变参数 `printf`。M12 起运行时源码由 `crates/dolphin-platform/build.rs` 调用 C/C++ 编译器预编译并内嵌，构建 Dolphin 程序时无需现场编译 runtime，链接默认使用系统链接器（Unix `cc`，Windows `link`）。`--bundled-linker` 时改用 Rust 工具链的 `rust-lld`，其链接参数仍可能在运行时通过 `cc`/`xcrun` 探测，失败后回退编译期路径；CRT、SDK 与导入库不因内嵌 runtime 而消失。实际平台依赖与干净环境验证限制见[安装说明](installation.md#6-系统依赖边界)。
 
 ## 15. 当前诊断
 

@@ -1,6 +1,6 @@
 # 实现路线图
 
-> 当前基线：M0-M20 已完成。语言核心（M0-M15）、可选 LLVM 与后端无关 IR（M16）、格式化器/LSP/DWARF（M17）、正确性收敛与发布门禁（M18）、真实 CLI 与用户测试（M19）、项目级诊断与开发工具（M20）均已验收；M21 按实际负载与交付需求规划。
+> 当前基线：M0-M20 已完成，M20 后完成链接器发行策略调整（默认系统链接器，见[进度报告](reports/linker-system-default-progress.md)）。语言核心（M0-M15）、可选 LLVM 与后端无关 IR（M16）、格式化器/LSP/DWARF（M17）、正确性收敛与发布门禁（M18）、真实 CLI 与用户测试（M19）、项目级诊断与开发工具（M20）均已验收；M21 按实际负载与交付需求规划。
 
 路线图以[已实现功能参考](implemented-features.md)为基线，以[语言设计说明](language-design.md)为目标。只有代码、测试、示例和文档全部完成，里程碑才能标记为完成。
 
@@ -270,6 +270,8 @@ http = "me.foxlab:http:0.4.1"
 原验收标准还要求新机器只需操作系统组件与发行包即可 `dc build`。三个目标的打包与开发 runner 冒烟已存在，发布质量门禁已在 M18 补齐，但无开发环境承诺仍未通过隔离 CRT/SDK 的验收；M21 冻结系统依赖策略并验证干净环境，当前要求以[安装说明](installation.md)为准。
 
 注意：LLVM 是代码生成后端，LLD 是链接器。M12 不要求改用 LLVM；现有 Cranelift 后端可以继续生成目标文件，再交给 LLD 链接。
+
+后续调整（M20 之后）：为缩减发行包体积（`rust-lld` 加 `libLLVM` 约 108 MB），默认链接器改为系统链接器（Unix `cc`，Windows `link`），发行包不再携带 `rust-lld`；原 LLD 路径保留为 `--bundled-linker`，需要本机 Rust 工具链。原 `--system-linker` 作为默认行为的显式写法继续兼容。M21 的系统 SDK/sysroot 策略与干净环境验收据此更新。实现、验证范围与未验证项见[系统链接器默认化进度报告](reports/linker-system-default-progress.md)。
 
 ## 6. 第三阶段目标：实用语言与优化（M13-M17）
 

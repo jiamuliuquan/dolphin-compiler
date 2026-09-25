@@ -35,9 +35,9 @@
       "why.card2.title": "显式且安全的内存",
       "why.card2.body":
         "Zig 式手动内存模型：没有 GC、RC 与隐式析构，分配与释放显式可见，defer 是唯一的作用域清理语法。",
-      "why.card3.title": "自包含工具链",
+      "why.card3.title": "开箱即用的工具链",
       "why.card3.body":
-        "发行包内置预编译运行时与 rust-lld 链接器，解压即可构建；链接仍使用系统自带的 CRT/SDK。",
+        "发行包内置预编译运行时；链接默认调用系统链接器（Unix cc，Windows link），装有 Rust 工具链时可用 --bundled-linker 改用 rust-lld。",
       "why.card4.title": "泛型与 trait",
       "why.card4.body":
         "用户泛型经工作队列单态化，trait 提供静态分派，标准库的 Vec、String、Option、Result 全部由 Dolphin 源码写成。",
@@ -65,7 +65,7 @@
       "quickstart.step1.title": "1. 获取编译器",
       "quickstart.step1.body": "从发行页下载对应平台的归档，解压到任意目录。",
       "quickstart.step2.title": "2. 加入 PATH",
-      "quickstart.step2.body": "把解压目录加入 PATH，确保 dc 与 rust-lld 位于同一目录。",
+      "quickstart.step2.body": "把解压目录加入 PATH；链接需要本机开发工具链（Unix cc，Windows 已激活的 MSVC link）。",
       "quickstart.step3.title": "3. 测试并运行",
       "quickstart.step3.body": "dc test 运行库测试，dc build 构建应用；产物写入项目的 target/ 目录。",
       "quickstart.link": "阅读安装指南",
@@ -94,29 +94,29 @@
       "install.eyebrow": "安装",
       "install.title": "安装 Dolphin",
       "install.lead":
-        "Dolphin 以自包含发行包发布：解压后即可使用，不需要 Rust 或编译器源码；链接仍使用系统自带的 CRT/SDK。",
+        "Dolphin 以发行包发布：解压后即可使用，不需要 Rust 或编译器源码；链接默认使用系统链接器，需要本机开发工具链与系统 CRT/SDK。",
       "install.tabs.linux": "Linux",
       "install.tabs.macos": "macOS",
       "install.tabs.windows": "Windows",
       "install.requirements": "系统要求",
       "install.requirements.body":
-        "Linux x86_64、macOS ARM64（Apple Silicon）与 Windows x86_64 为一级支持平台，均在 CI 中完成构建与端到端测试。",
+        "Linux x86_64、macOS ARM64（Apple Silicon）与 Windows x86_64 为一级支持平台，均在 CI 中完成构建与端到端测试。链接需要本机开发工具链（Unix cc，Windows 已激活的 MSVC link）；装有 Rust 工具链时可用 --bundled-linker 改用 rust-lld。",
       "install.step.download": "1. 下载归档",
       "install.step.verify": "2. 校验完整性",
       "install.step.extract": "3. 解压并加入 PATH",
       "install.step.verifyenv": "4. 验证安装",
       "install.package.title": "发行包内容",
       "install.package.body":
-        "dc 与 rust-lld 必须位于同一目录；macOS 与 Linux 包还携带 rust-lld 依赖的 LLVM 动态库，请勿拆分。",
+        "发行包只包含 dc、dolphin-compiler、LICENSE 与 README，不含链接器；链接默认使用系统链接器（Unix cc，Windows link）。",
       "install.offline.title": "离线使用",
       "install.offline.body":
-        "在不声明远程依赖时，dc check/build/run/test 不会访问网络。运行时目标文件内嵌于 dc，链接器为同目录的 rust-lld。使用 Maven 风格依赖时，dc 会通过 HTTPS 下载 .dlib 到内容寻址缓存（DOLPHIN_HOME，默认 ~/.dolphin），并写入 dolphin.lock。",
+        "在不声明远程依赖时，dc check/build/run/test 不会访问网络。运行时目标文件内嵌于 dc，链接由本机系统链接器完成。使用 Maven 风格依赖时，dc 会通过 HTTPS 下载 .dlib 到内容寻址缓存（DOLPHIN_HOME，默认 ~/.dolphin），并写入 dolphin.lock。",
       "install.upgrade.title": "升级与卸载",
       "install.upgrade.body":
         "升级：用新版本覆盖旧目录，或解压到新目录后替换 PATH。卸载：删除发行目录并从 PATH 移除对应条目即可，Dolphin 不写注册表、不创建系统服务。",
       "install.notes.title": "说明",
       "install.notes.1": "构建程序时仍会动态链接操作系统自带组件（Linux glibc、macOS libSystem、Windows UCRT）。",
-      "install.notes.2": "从源码构建编译器自身才需要 Rust 与本机 C 编译器。",
+      "install.notes.2": "构建程序默认使用系统链接器（Unix cc，Windows link），需要本机开发工具链；从源码构建编译器自身还需要 Rust。",
       "install.notes.3": "当前不支持交叉编译，编译器只生成宿主平台的本机程序。",
       "install.next": "安装完成后，继续阅读入门教程。",
       "install.next.btn": "进入入门教程",
@@ -161,9 +161,9 @@
       "why.card2.title": "Explicit, safe memory",
       "why.card2.body":
         "A Zig-style manual memory model: no GC, RC or implicit destruction. Allocation is visible, and defer is the only scope cleanup syntax.",
-      "why.card3.title": "Self-contained toolchain",
+      "why.card3.title": "Ready-to-use toolchain",
       "why.card3.body":
-        "Release archives bundle a precompiled runtime and the rust-lld linker, so you can build right after unpacking. Linking still uses the system CRT/SDK.",
+        "Release archives bundle a precompiled runtime; linking uses the system linker (cc on Unix, link on Windows), with --bundled-linker to use rust-lld from a Rust toolchain.",
       "why.card4.title": "Generics and traits",
       "why.card4.body":
         "User generics are monomorphized with a work queue, traits give static dispatch, and Vec, String, Option and Result are all written in Dolphin.",
@@ -191,7 +191,7 @@
       "quickstart.step1.title": "1. Get the compiler",
       "quickstart.step1.body": "Download the archive for your platform from the releases page and unpack it anywhere.",
       "quickstart.step2.title": "2. Add it to PATH",
-      "quickstart.step2.body": "Add the unpacked directory to PATH, keeping dc and rust-lld in the same folder.",
+      "quickstart.step2.body": "Add the unpacked directory to PATH; linking needs a native toolchain (cc on Unix, an activated MSVC link on Windows).",
       "quickstart.step3.title": "3. Test and run",
       "quickstart.step3.body": "dc test runs the library tests and dc build compiles the app; artifacts land in that project's target/ folder.",
       "quickstart.link": "Read the installation guide",
@@ -220,29 +220,29 @@
       "install.eyebrow": "Install",
       "install.title": "Install Dolphin",
       "install.lead":
-        "Dolphin ships as a self-contained archive: unpack it and go, with no Rust toolchain or compiler checkout. Linking still uses the platform CRT/SDK.",
+        "Dolphin ships as a release archive: unpack it and go, with no Rust toolchain or compiler checkout. Linking uses the system linker and needs a native toolchain plus the platform CRT/SDK.",
       "install.tabs.linux": "Linux",
       "install.tabs.macos": "macOS",
       "install.tabs.windows": "Windows",
       "install.requirements": "System requirements",
       "install.requirements.body":
-        "Linux x86_64, macOS ARM64 (Apple Silicon) and Windows x86_64 are tier-1 platforms, all built and tested end to end in CI.",
+        "Linux x86_64, macOS ARM64 (Apple Silicon) and Windows x86_64 are tier-1 platforms, all built and tested end to end in CI. Linking needs a native toolchain (cc on Unix, an activated MSVC link on Windows); with a Rust toolchain, --bundled-linker uses rust-lld instead.",
       "install.step.download": "1. Download the archive",
       "install.step.verify": "2. Verify integrity",
       "install.step.extract": "3. Unpack and add to PATH",
       "install.step.verifyenv": "4. Verify the installation",
       "install.package.title": "What's in the archive",
       "install.package.body":
-        "dc and rust-lld must stay in the same directory; macOS and Linux archives also ship the LLVM shared library that rust-lld needs, so keep them together.",
+        "The archive contains only dc, dolphin-compiler, LICENSE and README; no linker is bundled. Linking uses the system linker (cc on Unix, link on Windows).",
       "install.offline.title": "Offline use",
       "install.offline.body":
-        "dc check/build/run/test never touch the network unless you declare remote dependencies. The runtime object is embedded in dc and the linker is the rust-lld beside it. With Maven-style dependencies, dc downloads .dlib files over HTTPS into a content-addressed cache (DOLPHIN_HOME, ~/.dolphin by default) and writes dolphin.lock.",
+        "dc check/build/run/test never touch the network unless you declare remote dependencies. The runtime object is embedded in dc and linking is done by the native system linker. With Maven-style dependencies, dc downloads .dlib files over HTTPS into a content-addressed cache (DOLPHIN_HOME, ~/.dolphin by default) and writes dolphin.lock.",
       "install.upgrade.title": "Upgrade and uninstall",
       "install.upgrade.body":
         "To upgrade, overwrite the old directory with a new release, or unpack elsewhere and repoint PATH. To uninstall, delete the archive directory and remove its PATH entry — Dolphin writes no registry keys and creates no services.",
       "install.notes.title": "Notes",
       "install.notes.1": "Built programs still link OS-provided components dynamically (glibc on Linux, libSystem on macOS, UCRT on Windows).",
-      "install.notes.2": "Only building the compiler from source requires Rust and a native C compiler.",
+      "install.notes.2": "Building programs uses the system linker (cc on Unix, link on Windows) and needs a native toolchain; building the compiler from source additionally needs Rust.",
       "install.notes.3": "Cross-compilation is not supported; the compiler emits host-native programs only.",
       "install.next": "Once installed, continue with the getting-started tutorial.",
       "install.next.btn": "Open the tutorial",

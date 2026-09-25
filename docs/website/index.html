@@ -124,9 +124,10 @@
           </article>
           <article class="card">
             <div class="card-icon">⬡</div>
-            <h3 data-i18n="why.card3.title">自包含工具链</h3>
+            <h3 data-i18n="why.card3.title">开箱即用的工具链</h3>
             <p data-i18n="why.card3.body">
-              发行包内置预编译运行时与 rust-lld 链接器，解压即可构建；链接仍使用系统自带的 CRT/SDK。
+              发行包内置预编译运行时；链接默认调用系统链接器（Unix cc，Windows link），装有 Rust 工具链时可用
+              --bundled-linker 改用 rust-lld。
             </p>
           </article>
           <article class="card">
@@ -212,7 +213,7 @@ fn main() {
           </div>
           <div class="panel">
             <h3 data-i18n="quickstart.step2.title">2. 加入 PATH</h3>
-            <p data-i18n="quickstart.step2.body">把解压目录加入 PATH，确保 dc 与 rust-lld 位于同一目录。</p>
+            <p data-i18n="quickstart.step2.body">把解压目录加入 PATH；链接需要本机开发工具链（Unix cc，Windows 已激活的 MSVC link）。</p>
             <pre><code>export PATH="$HOME/.local/dolphin:$PATH"
 dc --version && dc env</code></pre>
           </div>
@@ -226,7 +227,7 @@ printf 'alpha\nbeta\n' | ./examples/m19/dtext/target/dtext --filter beta</code><
           <div class="panel">
             <h3 data-i18n="install.package.title">发行包内容</h3>
             <p data-i18n="install.package.body">
-              dc 与 rust-lld 必须位于同一目录；macOS 与 Linux 包还携带 rust-lld 依赖的 LLVM 动态库，请勿拆分。
+              发行包只包含 dc、dolphin-compiler、LICENSE 与 README，不含链接器；链接默认使用系统链接器（Unix cc，Windows link）。
             </p>
             <p><a href="install.html" data-i18n="quickstart.link">阅读安装指南 →</a></p>
           </div>

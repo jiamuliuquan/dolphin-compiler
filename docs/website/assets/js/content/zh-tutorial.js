@@ -9,14 +9,14 @@ window.DolphinDocsContent["zh-CN"].groups.push({
       title: "安装与第一个程序",
       body: `
 <h1>安装与第一个程序</h1>
-<p>本章带你完成 Dolphin 工具链的安装，并编译运行第一个程序。Dolphin 以自包含发行包发布，解压即用，不需要 Rust 或编译器源码；链接仍会用到系统的 CRT/SDK，详见<a href="../install.html">安装说明</a>。</p>
+<p>本章带你完成 Dolphin 工具链的安装，并编译运行第一个程序。Dolphin 以发行包发布，解压即用，不需要 Rust 或编译器源码；链接默认使用系统链接器（Unix <code>cc</code>，Windows <code>link</code>），需要本机开发工具链与系统 CRT/SDK，详见<a href="../install.html">安装说明</a>。</p>
 
 <h2>1. 安装编译器</h2>
 <p>发行包提供三个一级平台的归档：Linux x86_64、macOS ARM64 与 Windows x86_64。下载后解压到任意目录，并把该目录加入 <code>PATH</code>：</p>
 <pre><code>mkdir -p ~/.local/dolphin
 tar xzf dolphin-0.4.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
 export PATH="$HOME/.local/dolphin:$PATH"</code></pre>
-<p>解压目录中的 <code>dc</code> 是编译器主命令，<code>rust-lld</code> 是随包分发的链接器，二者必须位于同一目录。完整的平台说明、校验和与卸载方式见 <a href="../install.html">安装指南</a>。</p>
+<p>解压目录中的 <code>dc</code> 是编译器主命令。发行包不含链接器，链接由本机系统链接器完成；装有 Rust 工具链时可用 <code>--bundled-linker</code> 改用 <code>rust-lld</code>。完整的平台说明、校验和与卸载方式见 <a href="../install.html">安装指南</a>。</p>
 <p>验证安装：</p>
 <pre><code>dc --version
 dc env</code></pre>
@@ -130,7 +130,7 @@ fn main() {
   -&gt; 类型化 CFG IR
   -&gt; Cranelift IR
   -&gt; 本机目标文件
-  -&gt; 内嵌运行时与 rust-lld 链接器
+  -&gt; 内嵌运行时与系统链接器（--bundled-linker 改用 rust-lld）
   -&gt; 本机可执行文件</code></pre>
 <p>Dolphin 程序在 Linux 上动态链接 glibc、在 macOS 上动态链接 libSystem、在 Windows 上动态链接 UCRT，这些都是操作系统自带组件。</p>
 
@@ -627,9 +627,9 @@ dc publish my-project --repository default</code></pre>
 
 <h2>5. 命令行参考</h2>
 <pre><code>dc check &lt;项目目录或main.do&gt; [--locked] [--offline] [--color auto|always|never]
-dc build &lt;项目目录或main.do&gt; [--bin &lt;名称&gt;] [--lib] [-o &lt;输出文件&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
-dc run   &lt;项目目录或main.do&gt; [--bin &lt;名称&gt;] [-o &lt;输出文件&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- &lt;应用参数&gt;...]
-dc test  &lt;项目目录&gt; [--filter &lt;子串&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc build &lt;项目目录或main.do&gt; [--bin &lt;名称&gt;] [--lib] [-o &lt;输出文件&gt;] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc run   &lt;项目目录或main.do&gt; [--bin &lt;名称&gt;] [-o &lt;输出文件&gt;] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- &lt;应用参数&gt;...]
+dc test  &lt;项目目录&gt; [--filter &lt;子串&gt;] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc package &lt;项目目录&gt; [--locked] [--offline]
 dc fetch   &lt;项目目录&gt; [--locked] [--offline]
 dc publish &lt;项目目录&gt; [--repository &lt;id&gt;] [--locked] [--offline]

@@ -32,14 +32,14 @@ fn main() {
 }
 
 /// 探测 Unix 目标（Linux ELF / macOS Mach-O）链接所需的参数，生成
-/// `OUT_DIR/link_args.rs` 供 crate `include!`，使 `rust-lld` 无需系统 `cc`
-/// 即可链接出可执行文件。
+/// `OUT_DIR/link_args.rs` 供 crate `include!`，作为 `--bundled-linker` 场景
+/// （`rust-lld`）在运行时探测失败时的回退。
 ///
-/// Windows 的 COFF 由 `rust-lld -flavor link` 自动解析默认库，无需这些参数；
-/// Linux 的 GNU flavor 需显式提供 CRT 启动对象、`-L` 与 `-dynamic-linker`；
-/// macOS 的 darwin flavor 需 `-arch`、`-platform_version` 与 `-syslibroot`。
-/// 这些值在构建编译器时用系统 `cc`/`xcrun` 探测（最终用户构建 Dolphin 程序时
-/// 不再需要 C 编译器）。
+/// 默认系统链接器（`cc`）自行处理这些参数，不需要该回退。Windows 的 COFF 由
+/// `rust-lld -flavor link` 自动解析默认库，无需这些参数；Linux 的 GNU flavor
+/// 需显式提供 CRT 启动对象、`-L` 与 `-dynamic-linker`；macOS 的 darwin flavor
+/// 需 `-arch`、`-platform_version` 与 `-syslibroot`。这些值在构建编译器时用
+/// 系统 `cc`/`xcrun` 探测。
 fn probe_unix_link_args(target: &str, out_dir: &Path) {
     let mut prefix: Vec<String> = Vec::new();
     let mut lib: Vec<String> = Vec::new();

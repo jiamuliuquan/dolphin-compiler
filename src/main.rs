@@ -165,9 +165,13 @@ struct BuildArgs {
     #[arg(long, conflicts_with = "debug")]
     release: bool,
 
-    /// Fall back to the system linker (cc/link) instead of the bundled rust-lld
-    #[arg(long)]
+    /// Use the system linker (cc/link); this is the default
+    #[arg(long, conflicts_with = "bundled_linker")]
     system_linker: bool,
+
+    /// Use the rust-lld shipped with the Rust toolchain instead of the system linker
+    #[arg(long, conflicts_with = "system_linker")]
+    bundled_linker: bool,
 
     /// Select the code generation backend (defaults to $DOLPHIN_BACKEND or cranelift)
     #[arg(long, value_enum)]
@@ -211,9 +215,13 @@ struct TestArgs {
     #[arg(long, conflicts_with = "debug")]
     release: bool,
 
-    /// Fall back to the system linker (cc/link) instead of the bundled rust-lld
-    #[arg(long)]
+    /// Use the system linker (cc/link); this is the default
+    #[arg(long, conflicts_with = "bundled_linker")]
     system_linker: bool,
+
+    /// Use the rust-lld shipped with the Rust toolchain instead of the system linker
+    #[arg(long, conflicts_with = "system_linker")]
+    bundled_linker: bool,
 
     /// Select the code generation backend (defaults to $DOLPHIN_BACKEND or cranelift)
     #[arg(long, value_enum)]
@@ -240,11 +248,15 @@ fn explicit_profile(release: bool, debug: bool) -> Option<BuildProfile> {
     }
 }
 
-fn compile_settings(system_linker: bool, backend: Option<BackendArg>) -> BuildSettings {
-    let linker = if system_linker {
-        LinkerChoice::System
-    } else {
-        LinkerChoice::default()
+fn compile_settings(
+    system_linker: bool,
+    bundled_linker: bool,
+    backend: Option<BackendArg>,
+) -> BuildSettings {
+    // 系统链接器是默认；`--system-linker` 只是它的显式写法，保留以满足 CLI 兼容政策。
+    let linker = match (system_linker, bundled_linker) {
+        (_, true) => LinkerChoice::Bundled,
+        _ => LinkerChoice::System,
     };
     let backend = match backend {
         Some(BackendArg::Cranelift) => BackendChoice::Cranelift,
@@ -264,7 +276,7 @@ impl BuildArgs {
     }
 
     fn settings(&self) -> BuildSettings {
-        compile_settings(self.system_linker, self.backend)
+        compile_settings(self.system_linker, self.bundled_linker, self.backend)
     }
 
     fn resolve_options(&self) -> ResolveOptions {
@@ -278,7 +290,7 @@ impl TestArgs {
     }
 
     fn settings(&self) -> BuildSettings {
-        compile_settings(self.system_linker, self.backend)
+        compile_settings(self.system_linker, self.bundled_linker, self.backend)
     }
 
     fn resolve_options(&self) -> ResolveOptions {
@@ -636,10 +648,10 @@ fn execute(cli: Cli) -> Result<ExitCode, (String, ColorMode)> {
             println!("host: {}", platform.triple());
             println!("target: {}", platform.triple());
             println!("abi: {}", platform.abi().name());
-            println!("linker: {}", platform.linker_name());
+            println!("linker: {} (system; default)", platform.linker_name());
             println!(
-                "system linker: {} (--system-linker fallback)",
-                platform.system_linker_name()
+                "bundled linker: {} (--bundled-linker)",
+                platform.bundled_linker_name()
             );
             println!(
                 "backend: {} (default; --backend overrides)",

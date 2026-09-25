@@ -36,9 +36,9 @@ jobs:
 
       # Rust 1.96+ 的 rustup `rust-lld`/`rust-objcopy` 动态依赖 `@rpath/libLLVM.dylib`，
       # 但 rustup 工具链的 rpath 不指向 `$SYSROOT/lib`（指向官方构建机路径），
-      # 导致 macOS 上 `cargo test` 的链接与 build.rs 的 strip 失败。
-      # 这里为后续步骤补上 dyld 回退路径；发行包侧由 package.py 复制 libLLVM 并
-      # 改写 rust-lld rpath，不依赖本步骤。
+      # 导致 macOS 上 `cargo test` 的链接、`--bundled-linker` 端到端测试与
+      # build.rs 的 strip 失败。这里为后续步骤补上 dyld 回退路径；发行包不再
+      # 携带 rust-lld，打包步骤不依赖本步骤。
       - name: Allow rust-lld to load libLLVM (macOS)
         if: runner.os == 'macOS'
         run: echo "DYLD_FALLBACK_LIBRARY_PATH=$(rustc --print sysroot)/lib" >> "$GITHUB_ENV"
@@ -56,11 +56,12 @@ jobs:
           [ -f "$dc" ] || dc=./target/release/dc.exe
           "$dc" fmt --check examples crates/dolphin-std/src
 
-      # 打包自包含发行包（dc + dolphin-compiler + rust-lld + 许可证 + 文档）。
+      # 打包发行包（dc + dolphin-compiler + 许可证 + 文档，不再携带链接器）。
       - name: Package release archive
         run: python scripts/package.py --target ${{ matrix.target }}
 
-      # 冒烟测试：解压发行包，从空目录构建并运行示例（不依赖系统 C 编译器）。
+      # 冒烟测试：解压发行包，从空目录构建并运行示例。默认系统链接器要求
+      # runner 具备本机工具链（Linux/macOS 的 cc、Windows 已激活的 MSVC）。
       # M14/M15 的“无泄漏”必须显式检查 stderr：exit=0 不能证明没有泄漏报告。
       - name: Smoke test the release archive
         shell: bash
@@ -77,6 +78,9 @@ jobs:
             echo "no release archive found in dist/" >&2
             exit 1
           fi
+          # 发行包不再携带链接器（体积目标与默认系统链接器策略的回归守卫）。
+          test ! -e smoke/rust-lld
+          test ! -e smoke/rust-lld.exe
           smoke/dc build examples/m8 --release
           set +e
           ./examples/m8/target/m8 >m8.stdout 2>m8.stderr

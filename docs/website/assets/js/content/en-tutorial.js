@@ -9,14 +9,14 @@ window.DolphinDocsContent["en-US"].groups.push({
       title: "Installation and your first program",
       body: `
 <h1>Installation and your first program</h1>
-<p>This chapter gets the Dolphin toolchain installed and compiles your first program. Dolphin ships as a self-contained archive: unpack it and go, with no Rust toolchain or compiler checkout. Linking still uses the platform's CRT/SDK, as described in the <a href="../install.html">installation guide</a>.</p>
+<p>This chapter gets the Dolphin toolchain installed and compiles your first program. Dolphin ships as a release archive: unpack it and go, with no Rust toolchain or compiler checkout. Linking uses the system linker (<code>cc</code> on Unix, <code>link</code> on Windows) and needs a native toolchain plus the platform's CRT/SDK, as described in the <a href="../install.html">installation guide</a>.</p>
 
 <h2>1. Install the compiler</h2>
 <p>Releases cover three tier-1 platforms: Linux x86_64, macOS ARM64 and Windows x86_64. Download the archive, unpack it anywhere, and add the directory to <code>PATH</code>:</p>
 <pre><code>mkdir -p ~/.local/dolphin
 tar xzf dolphin-0.4.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/dolphin
 export PATH="$HOME/.local/dolphin:$PATH"</code></pre>
-<p>Inside the archive, <code>dc</code> is the compiler command and <code>rust-lld</code> is the bundled linker; they must stay in the same directory. See the <a href="../install.html">installation guide</a> for checksums and uninstall steps.</p>
+<p>Inside the archive, <code>dc</code> is the compiler command. No linker is bundled: linking uses the native system linker, and with a Rust toolchain installed, <code>--bundled-linker</code> switches to <code>rust-lld</code>. See the <a href="../install.html">installation guide</a> for checksums and uninstall steps.</p>
 <p>Verify the installation:</p>
 <pre><code>dc --version
 dc env</code></pre>
@@ -130,7 +130,7 @@ fn main() {
   -&gt; typed CFG IR
   -&gt; Cranelift IR
   -&gt; native object
-  -&gt; embedded runtime + rust-lld linker
+  -&gt; embedded runtime + system linker (or rust-lld with --bundled-linker)
   -&gt; native executable</code></pre>
 <p>Dolphin programs link glibc on Linux, libSystem on macOS and UCRT on Windows. These are operating-system components.</p>
 
@@ -627,9 +627,9 @@ dc publish my-project --repository default</code></pre>
 
 <h2>5. Command-line reference</h2>
 <pre><code>dc check &lt;dir-or-main.do&gt; [--locked] [--offline] [--color auto|always|never]
-dc build &lt;dir-or-main.do&gt; [--bin &lt;name&gt;] [--lib] [-o &lt;file&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
-dc run   &lt;dir-or-main.do&gt; [--bin &lt;name&gt;] [-o &lt;file&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- &lt;app args&gt;...]
-dc test  &lt;dir&gt; [--filter &lt;text&gt;] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc build &lt;dir-or-main.do&gt; [--bin &lt;name&gt;] [--lib] [-o &lt;file&gt;] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc run   &lt;dir-or-main.do&gt; [--bin &lt;name&gt;] [-o &lt;file&gt;] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- &lt;app args&gt;...]
+dc test  &lt;dir&gt; [--filter &lt;text&gt;] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc package &lt;dir&gt; [--locked] [--offline]
 dc fetch   &lt;dir&gt; [--locked] [--offline]
 dc publish &lt;dir&gt; [--repository &lt;id&gt;] [--locked] [--offline]

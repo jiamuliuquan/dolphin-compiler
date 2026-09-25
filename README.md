@@ -24,7 +24,7 @@ Dolphin 是一个用于学习和实践编译器实现的静态类型编程语言
 | 包管理 | `dolphin.toml` 的 `[lib]`/`[[bin]]`、本地 path 依赖、Maven 风格坐标与仓库、确定性 `.dlib`、内容寻址缓存、`dolphin.lock`、`--locked`/`--offline`、条件 PUT 发布 |
 | 工具 | `check/build/run/test/package/fetch/publish/info/env/fmt/lsp`、`dc run -- <应用参数>` 原样转发、`dc test`（发现 `tests/*.do` 的 `test_*`、独立子进程执行、`--filter`、固定汇总）、Debug/Release、颜色、帮助和版本 |
 | 开发工具 | `dc fmt` 保守空白格式化（无路径时按清单 `[package].source` 发现、排除 `build.output`/`.git`、全有或全无写入）、`dc lsp [项目目录]` 项目级诊断/符号/悬停/跳转（未保存 overlay、跨文件/跨包定义；无清单时单文件分析）、LLVM Debug 下的 Unix DWARF 行表与函数调试信息 |
-| 后端 | 类型化 CFG IR、后端无关 `CodegenBackend` 接口、Cranelift（默认）与可选 LLVM 后端、本机目标文件、内嵌最小 C 运行时和 `rust-lld` 链接器 |
+| 后端 | 类型化 CFG IR、后端无关 `CodegenBackend` 接口、Cranelift（默认）与可选 LLVM 后端、本机目标文件、内嵌最小 C 运行时和系统链接器（`--bundled-linker` 可选 rust-lld） |
 
 尚未实现的主要能力包括嵌套数组、通配符导入、版本范围求解、闭源二进制 Dolphin 包、动态多态、`?` 错误传播、函数体内的表达式级多错误收集，以及 Cranelift 后端的调试信息和 Windows PDB 调试信息。详细边界见[已实现功能参考](docs/implemented-features.md)和[路线图](docs/roadmap.md)。
 
@@ -32,13 +32,13 @@ Dolphin 是一个用于学习和实践编译器实现的静态类型编程语言
 
 环境要求（按目标平台）：
 
-| 平台 | 支持架构 | 构建编译器时的依赖 |
+| 平台 | 支持架构 | 构建与链接依赖 |
 | --- | --- | --- |
 | macOS | ARM64（Apple Silicon） | 系统 `cc`（Xcode Command Line Tools） |
 | Linux | x86_64 | 支持 C11 的系统 `cc`（GCC 或 Clang） |
-| Windows | x86_64 | MSVC 的 `cl`（Visual Studio 2022 生成工具，或 Build Tools） |
+| Windows | x86_64 | MSVC 的 `cl` 与 `link`（Visual Studio 2022 生成工具，或 Build Tools） |
 
-从源码构建**编译器自身**需要 Rust/Cargo 和上述 C/C++ 工具链，用于预编译并内嵌 Dolphin 运行时。官方发行包携带 `dc`、`rust-lld` 及其所需附件，使用发行包不需要 Rust/Cargo，但链接程序仍需要平台 CRT/SDK 等文件；当前尚未完成任意无开发工具链机器的可用性验收，具体见[系统依赖边界](docs/installation.md#6-系统依赖边界)。生成程序仍依赖 glibc、libSystem 或 UCRT。运行时对明确支持的溢出、除零、越界等错误检查并终止，不保证检测悬垂指针、未初始化读取等所有内存错误。
+从源码构建**编译器自身**需要 Rust/Cargo 和上述 C/C++ 工具链，用于预编译并内嵌 Dolphin 运行时。官方发行包只携带 `dc` 与 `dolphin-compiler`，使用发行包不需要 Rust/Cargo，但默认的系统链接器要求本机具备开发工具链：Unix 是 `cc`，Windows 是已激活 MSVC 开发环境的 `link`（`Developer Command Prompt`）。装有 Rust 工具链时可用 `--bundled-linker` 改用 `rust-lld`。当前尚未完成任意无开发工具链机器的可用性验收，具体见[系统依赖边界](docs/installation.md#6-系统依赖边界)。生成程序仍依赖 glibc、libSystem 或 UCRT。运行时对明确支持的溢出、除零、越界等错误检查并终止，不保证检测悬垂指针、未初始化读取等所有内存错误。
 
 构建编译器并查看帮助：
 
@@ -124,9 +124,9 @@ Cranelift 后端暂不生成调试信息，Windows/PDB 也未覆盖。`dc lsp [�
 
 ```text
 dc check <项目目录或main.do> [--locked] [--offline] [--color auto|always|never]
-dc build <项目目录或main.do> [--bin <名称>] [--lib] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
-dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- <应用参数>...]
-dc test  <项目目录> [--filter <子串>] [--debug|--release] [--system-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc build <项目目录或main.do> [--bin <名称>] [--lib] [-o <输出文件>] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline]
+dc run   <项目目录或main.do> [--bin <名称>] [-o <输出文件>] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline] [-- <应用参数>...]
+dc test  <项目目录> [--filter <子串>] [--debug|--release] [--system-linker|--bundled-linker] [--backend cranelift|llvm] [--locked] [--offline]
 dc package <项目目录> [--locked] [--offline]
 dc fetch   <项目目录> [--locked] [--offline]
 dc publish <项目目录> [--repository <id>] [--locked] [--offline]
@@ -158,7 +158,7 @@ target/test/<包名>-tests.o            测试目标文件
 target/test/<包名>-tests.entry.do     生成的测试入口（不写入 src/）
 ```
 
-默认使用 Rust 工具链自带的 `rust-lld` 链接器；`--system-linker` 可回退到系统链接器（`cc`/`link`）以便诊断。
+链接默认使用系统链接器（Unix `cc`，Windows `link`）；`--system-linker` 是默认行为的显式写法，`--bundled-linker` 改用 Rust 工具链自带的 `rust-lld`（发行包不携带该链接器，需要本机装有 Rust）。`dc env` 显示两者。
 
 也可以直接编译不含 `pkg` 和 `use` 的单个 `.do` 文件：
 
@@ -238,7 +238,7 @@ UTF-8 源文件
   -> 类型化 CFG IR
   -> CodegenBackend（默认 Cranelift 或可选 LLVM）
   -> 本机目标文件
-  -> 内嵌运行时与 rust-lld 链接器
+  -> 内嵌运行时与系统链接器（或 --bundled-linker 的 rust-lld）
   -> 本机可执行文件
 ```
 
@@ -312,7 +312,7 @@ UTF-8 源文件
 | M9 | 已完成 | `dolphin.toml` 包坐标、多可执行目标、清单查找和 `dc info` |
 | M10 | 已完成 | `TargetPlatform` 平台抽象、`dc env`、链接命令可测试且不硬编码 `cc` |
 | M11 | 已完成 | Windows x86_64 原生支持：MSVC ABI、`.obj`/`.exe`、Windows 运行时与 CI |
-| M12 | 已完成 | 自包含工具链：内嵌运行时、`rust-lld` 链接、`--system-linker` 回退、发行包与冒烟测试 |
+| M12 | 已完成 | 内嵌运行时与发行包；当时随包分发 `rust-lld`，后续调整为默认系统链接器、`--bundled-linker` 可选（见[安装说明](docs/installation.md)） |
 | M13 | 已完成 | 用户自定义类型：结构体、枚举、`match` 模式匹配和跨模块类型引用 |
 | M14 | 已完成 | 手动内存管理：`std.mem`、指针/切片、`defer`、字符串字节视图、`extern "C"` |
 | M15 | 已完成 | 泛型、方法与 trait；源码标准库 `Vec`/`String`/`CString`、`Option`/`Result`/`Iterator`；lib 目标、path/坐标依赖、确定性 `.dlib`、仓库/缓存/锁与条件发布 |
@@ -332,6 +332,7 @@ UTF-8 源文件
 - [M18-M21 交接指南](docs/plan-m18-plus.md)：逐批任务、验收要求和交接提示词。
 - [M19 规格](docs/proposal-m19-cli-stdlib.md)：M19 API/目标程序/测试矩阵冻结记录。
 - [M20 规格](docs/proposal-m20-project-tools.md)：M20 项目级诊断与开发工具冻结规格与验收矩阵。
+- [系统链接器默认化进度报告](docs/reports/linker-system-default-progress.md)：M20 后链接器策略调整的实现、验证与未验证项。
 - [M18 正确性合同](docs/plan-m18-correctness.md)：已完成的 M18 批次与验收矩阵（历史证据）。
 - [M14](docs/proposal-m14-memory-model.md)、[M15](docs/proposal-m15-generics-stdlib.md) 实现规格与[分步实施指南](docs/plan-m14-m15-rework.md)：历史设计记录，不能据此重做当前项目。
 - [编译器实现指南](docs/compiler-implementation.md)：历史架构建议，不是当前待办。

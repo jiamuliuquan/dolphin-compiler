@@ -6,8 +6,8 @@
 //!
 //! M12 起运行时不再由构建时用系统 C 编译器现场编译，而是在编译编译器时
 //! （`build.rs`）预编译成目标文件并以 [`include_bytes!`] 内嵌。链接默认使用
-//! 可再分发的 `rust-lld`，统一 ELF、Mach-O 与 COFF；系统链接器仅作为
-//! `--linker` 的受控回退保留。
+//! 平台系统链接器（Unix `cc`，Windows `link`），`--bundled-linker` 可改用
+//! Rust 工具链自带的 `rust-lld`；发行包因此不再携带约 108 MB 的链接器。
 //!
 //! 当前只支持宿主即目标（交叉编译延后），但对未知宿主三元组会在编译器侧
 //! 给出诊断，而不是等外部链接器失败。
@@ -84,17 +84,20 @@ pub trait TargetPlatform {
     /// 必须经过它，保证代码生成与平台 C 工具链的命名规则一致。
     fn c_symbol(&self, name: &str) -> String;
 
-    /// `rust-lld` 的目标 flavor：`gnu`（ELF）、`darwin`（Mach-O）、`link`（COFF）。
+    /// `--bundled-linker` 的 `rust-lld` 目标 flavor：`gnu`（ELF）、`darwin`
+    /// （Mach-O）、`link`（COFF）。
     fn link_flavor(&self) -> &'static str;
 
-    /// 默认（自包含）链接器名称，用于 `dc env` 显示，M12 起为 `rust-lld`。
+    /// 默认系统链接器名称，用于 `dc env` 显示，例如 `"cc"` 或 `"link"`。
     fn linker_name(&self) -> &'static str;
 
-    /// 系统链接器名称，用于 `--linker` 回退，例如 `"cc"` 或 `"link"`。
-    fn system_linker_name(&self) -> &'static str;
+    /// `--bundled-linker` 使用的自带链接器名称，用于 `dc env` 显示。
+    fn bundled_linker_name(&self) -> &'static str {
+        "rust-lld"
+    }
 
-    /// 生成把 `object`（及 `runtime` 运行时目标文件、用户 `native` 输入）链接成
-    /// `output` 的默认自包含链接命令参数列表（不含 argv[0]，以 `rust-lld` 开头）。
+    /// 生成 `--bundled-linker` 场景的 `rust-lld` 命令参数列表（不含 argv[0]）：
+    /// 把 `object`、`runtime` 运行时目标文件与用户 `native` 输入链接成 `output`。
     ///
     /// 返回 `Vec<OsString>` 便于测试直接断言，真正执行由 `linker` 模块负责。
     fn link_command(
@@ -105,7 +108,7 @@ pub trait TargetPlatform {
         output: &Path,
     ) -> Vec<OsString>;
 
-    /// 生成使用系统链接器的回退命令参数列表（`--linker` 场景，不含 argv[0]）。
+    /// 生成默认的系统链接器命令参数列表（不含 argv[0]）。
     ///
     /// 返回 `Vec<OsString>` 便于测试直接断言，真正执行由 `linker` 模块负责。
     fn system_link_command(
@@ -117,7 +120,8 @@ pub trait TargetPlatform {
     ) -> Vec<OsString>;
 }
 
-/// Unix 系平台（macOS 与 Linux 共用运行时与自包含 LLD 链接器）。
+/// Unix 系平台（macOS 与 Linux 共用运行时；默认 `cc` 驱动系统链接器，
+/// `--bundled-linker` 时改用 `rust-lld`）。
 ///
 /// 运行时目标文件由 `build.rs` 用系统 `cc` 预编译并内嵌（M12）。
 #[derive(Debug, Clone)]
@@ -174,10 +178,6 @@ impl TargetPlatform for UnixPlatform {
     }
 
     fn linker_name(&self) -> &'static str {
-        "rust-lld"
-    }
-
-    fn system_linker_name(&self) -> &'static str {
         "cc"
     }
 
@@ -189,7 +189,7 @@ impl TargetPlatform for UnixPlatform {
         output: &Path,
     ) -> Vec<OsString> {
         let mut command = vec![
-            self.linker_name().into(),
+            self.bundled_linker_name().into(),
             OsString::from("-flavor"),
             self.link_flavor().into(),
         ];
@@ -271,7 +271,7 @@ impl TargetPlatform for UnixPlatform {
         output: &Path,
     ) -> Vec<OsString> {
         let mut command = vec![
-            self.system_linker_name().into(),
+            self.linker_name().into(),
             object.as_os_str().to_owned(),
             runtime.as_os_str().to_owned(),
         ];
@@ -293,17 +293,28 @@ impl TargetPlatform for UnixPlatform {
                 .iter()
                 .map(|path| path.clone().into_os_string()),
         );
+        // 共享库按路径链接时，DT_NEEDED/LC_LOAD_DYLIB 记录库自身的 soname 或
+        // install_name；可执行文件必须带 rpath 才能在运行时从自身目录找到它们。
+        if !native.shared_libs.is_empty() {
+            let rpath = if self.triple.operating_system.is_like_darwin() {
+                "-Wl,-rpath,@loader_path"
+            } else {
+                "-Wl,-rpath,$ORIGIN"
+            };
+            command.push(OsString::from(rpath));
+        }
         command.push(OsString::from("-o"));
         command.push(output.as_os_str().to_owned());
         command
     }
 }
 
-/// Windows x86_64 平台（M11 引入，M12 内嵌运行时与 LLD）。
+/// Windows x86_64 平台（M11 引入，M12 内嵌运行时）。
 ///
 /// 采用 MSVC x64 ABI 与 COFF 对象格式：目标文件 `.obj`、可执行文件 `.exe`，
 /// C 符号不带前导下划线（x64 约定）。运行时由 `build.rs` 用 MSVC `cl` 预编译
-/// 并内嵌；链接默认使用 `rust-lld -flavor link`，`link` 作为 `--linker` 回退。
+/// 并内嵌；链接默认使用系统 `link`（需已激活的 MSVC 开发环境），
+/// `--bundled-linker` 时改用 `rust-lld -flavor link`。
 #[derive(Debug, Clone)]
 pub struct WindowsPlatform {
     triple: Triple,
@@ -352,10 +363,6 @@ impl TargetPlatform for WindowsPlatform {
     }
 
     fn linker_name(&self) -> &'static str {
-        "rust-lld"
-    }
-
-    fn system_linker_name(&self) -> &'static str {
         "link"
     }
 
@@ -369,7 +376,7 @@ impl TargetPlatform for WindowsPlatform {
         let mut out = OsString::from("/OUT:");
         out.push(output);
         let mut command = vec![
-            self.linker_name().into(),
+            self.bundled_linker_name().into(),
             OsString::from("-flavor"),
             self.link_flavor().into(),
             out,
@@ -408,7 +415,7 @@ impl TargetPlatform for WindowsPlatform {
         let mut out = OsString::from("/OUT:");
         out.push(output);
         let mut command = vec![
-            self.system_linker_name().into(),
+            self.linker_name().into(),
             OsString::from("/nologo"),
             out,
             object.as_os_str().to_owned(),
@@ -588,7 +595,7 @@ mod link_args {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     fn triple(target: &str) -> Triple {
         target.parse().expect("test triple should parse")
@@ -714,6 +721,40 @@ mod tests {
                 OsString::from("/tmp/app"),
             ]
         );
+    }
+
+    #[test]
+    fn unix_system_link_command_adds_rpath_for_shared_libs() {
+        let object = Path::new("/tmp/app.o");
+        let runtime = Path::new("/tmp/app.runtime.o");
+        let output = Path::new("/tmp/app");
+
+        let linux = unix_platform(triple("x86_64-unknown-linux-gnu"));
+        let native = NativeInputs {
+            shared_libs: vec![PathBuf::from("/tmp/libdemo.so")],
+            ..NativeInputs::default()
+        };
+        let command = linux.system_link_command(object, runtime, &native, output);
+        assert!(command.contains(&OsString::from("-Wl,-rpath,$ORIGIN")));
+
+        let darwin = unix_platform(triple("aarch64-apple-darwin"));
+        let native = NativeInputs {
+            shared_libs: vec![PathBuf::from("/tmp/libdemo.dylib")],
+            ..NativeInputs::default()
+        };
+        let command = darwin.system_link_command(object, runtime, &native, output);
+        assert!(command.contains(&OsString::from("-Wl,-rpath,@loader_path")));
+    }
+
+    #[test]
+    fn linker_names_follow_platform() {
+        let unix = unix_platform(triple("x86_64-unknown-linux-gnu"));
+        assert_eq!(unix.linker_name(), "cc");
+        assert_eq!(unix.bundled_linker_name(), "rust-lld");
+
+        let windows = windows_platform();
+        assert_eq!(windows.linker_name(), "link");
+        assert_eq!(windows.bundled_linker_name(), "rust-lld");
     }
 
     #[test]

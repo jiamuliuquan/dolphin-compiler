@@ -2,7 +2,8 @@
 //!
 //! M12 起运行时不再是构建时用系统 C 编译器现场编译，而是在编译编译器时
 //! （`build.rs`）预编译并内嵌。这里把内嵌的运行时目标文件字节落盘，再执行
-//! 平台的链接命令（默认 `rust-lld`，也可用 `--linker` 回退到系统链接器）。
+//! 平台的链接命令（默认系统链接器 `cc`/`link`，`--bundled-linker` 可改用
+//! Rust 工具链自带的 `rust-lld`）。
 //!
 //! 「生成目标文件」与「链接可执行文件」仍拆成两个可独立测试的步骤。
 
@@ -15,14 +16,17 @@ use std::process::Command;
 use dolphin_platform::platform::{NativeInputs, TargetPlatform};
 use dolphin_source::diagnostic::Diagnostic;
 
-/// 链接器选择：默认自包含（`rust-lld`），或回退到系统链接器（`cc`/`link`）。
+/// 链接器选择：默认系统链接器（`cc`/`link`），或显式使用 `rust-lld`。
+///
+/// 发行包不再携带 `rust-lld`，默认系统链接器让发行包从约 114 MB 降到约 9 MB；
+/// `--bundled-linker` 保留给装有 Rust 工具链的开发/诊断场景。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LinkerChoice {
-    /// 默认：内嵌的 `rust-lld`。
+    /// 默认：平台系统链接器（Unix `cc`，Windows `link`）。
     #[default]
-    Default,
-    /// `--linker` 回退：使用平台系统链接器。
     System,
+    /// `--bundled-linker`：Rust 工具链自带的 `rust-lld`。
+    Bundled,
 }
 
 /// 把用户目标文件、运行时与原生输入链接成可执行文件。
@@ -42,8 +46,8 @@ pub fn link(
     let runtime = runtime_object_path(object, platform.object_suffix());
     write_runtime(&runtime, platform.runtime_object_bytes(debug))?;
     let command = match linker {
-        LinkerChoice::Default => platform.link_command(object, &runtime, native, output),
         LinkerChoice::System => platform.system_link_command(object, &runtime, native, output),
+        LinkerChoice::Bundled => platform.link_command(object, &runtime, native, output),
     };
     let result = run_link_command(&command, output);
     // 运行时目标文件是本次链接的临时产物，链接结束后清理，避免污染输出目录。
@@ -155,20 +159,17 @@ fn run_command(command: &[OsString], failure: &str) -> Result<(), Diagnostic> {
     }
 }
 
-/// 解析工具名：`rust-lld` 需要定位到完整路径，其他工具（`cc`/`link`）保持原样。
+/// 解析工具名：`--bundled-linker` 的 `rust-lld` 需要定位到完整路径，系统链接器
+/// （`cc`/`link`）保持原样交给 PATH 解析。
 ///
-/// 查找顺序：可执行文件同目录（发行包自带 `rust-lld`）→ `DOLPHIN_LLD` 环境变量
-/// （build.rs 编译期注入）→ PATH → 用 `rustc --print sysroot` 动态查询。
-/// 最终回退到原名，由 `Command` 报错。
-///
-/// 发行包里的 `rust-lld`（与 `dc` 同目录）优先于编译期注入的工具链路径：
-/// 后者在 macOS 上可能因 rpath 问题（rust-lld 动态依赖 libLLVM.dylib）无法运行，
-/// 而发行包里的 rust-lld 已经过 package.py 修复 rpath 并随附 libLLVM.dylib。
+/// 查找顺序：可执行文件同目录（用户自行放置 `rust-lld` 时）→ `DOLPHIN_LLD`
+/// 环境变量（build.rs 编译期注入的 Rust 工具链路径）→ PATH → 用
+/// `rustc --print sysroot` 动态查询。最终回退到原名，由 `Command` 报错。
 fn resolve_tool(tool: &OsString) -> OsString {
     if tool != "rust-lld" {
         return tool.clone();
     }
-    // 1. 可执行文件同目录（发行包形态：`dc` 与 `rust-lld` 放在同一目录）。
+    // 1. 可执行文件同目录（用户把 `rust-lld` 与 `dc` 放在一起时）。
     if let Some(path) = find_next_to_executable() {
         return path;
     }
@@ -189,7 +190,7 @@ fn resolve_tool(tool: &OsString) -> OsString {
     tool.clone()
 }
 
-/// 在 `dc` 可执行文件所在目录查找 `rust-lld`（发行包将二者放在一起）。
+/// 在 `dc` 可执行文件所在目录查找 `rust-lld`（用户手动放置的兼容路径）。
 fn find_next_to_executable() -> Option<OsString> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
